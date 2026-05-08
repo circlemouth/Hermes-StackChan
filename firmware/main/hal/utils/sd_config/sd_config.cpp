@@ -30,7 +30,7 @@ static constexpr KeyMap kKeyMap[] = {
     {"openai_api_key",  sd_config::NVS_NAMESPACE, "openai_key"},
     {"openai_base_url", sd_config::NVS_NAMESPACE, "openai_url"},
     {"openai_model",    sd_config::NVS_NAMESPACE, "openai_model"},
-    {"websocket_url",   "websocket",              "url"},
+    {"websocket_url",   "websocket",              "url_override"},
 };
 
 // FILE* の RAII ラッパー

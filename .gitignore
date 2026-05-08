@@ -3,3 +3,5 @@
 .claude
 ai-server/node_modules
 .env
+ai-server/dist
+.mcp.json

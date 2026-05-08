@@ -15,7 +15,7 @@ export function startServer(port: number): void {
         const session = new Session(ws)
 
         ws.on('message', (data: Buffer | string) => {
-            session.handleMessage(data instanceof Buffer ? data : Buffer.from(data as string))
+            session.handleMessage(data)
         })
 
         ws.on('close', () => {

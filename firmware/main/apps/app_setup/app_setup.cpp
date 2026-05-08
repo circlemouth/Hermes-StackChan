@@ -53,8 +53,10 @@ void AppSetup::onOpen()
     else if (model.length() > 12) model = model.substr(0, 10) + "..";
     std::string model_label = fmt::format("Model   {}", model);
 
-    // WebSocket URL — ホスト部分のみ表示
-    std::string ws_url = Settings("websocket", false).GetString("url", "");
+    // WebSocket URL — url_override 優先、なければ url を参照
+    Settings ws_settings("websocket", false);
+    std::string ws_url = ws_settings.GetString("url_override", "");
+    if (ws_url.empty()) ws_url = ws_settings.GetString("url", "");
     std::string server_disp;
     if (ws_url.empty()) {
         server_disp = "(not set)";

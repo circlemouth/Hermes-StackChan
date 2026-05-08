@@ -5,6 +5,15 @@ services:
       - "50021:50021"
     restart: unless-stopped
 
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - ASR_MODEL=medium
+      - ASR_ENGINE=faster_whisper
+    restart: unless-stopped
+
   ai-server:
     build:
       context: .
@@ -14,6 +23,8 @@ services:
     env_file: .env
     environment:
       - VOICEVOX_URL=http://voicevox:50021
+      - STT_BASE_URL=http://whisper:9000
     depends_on:
       - voicevox
+      - whisper
     restart: unless-stopped
