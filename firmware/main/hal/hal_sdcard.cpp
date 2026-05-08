@@ -73,22 +73,24 @@ static void unmount_sd_card()
     gpio_set_direction(SD_MISO_PIN, GPIO_MODE_OUTPUT);
 }
 
-bool Hal::loadConfigFromSdCard(std::function<void(std::string_view)> onLog)
+sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_view)> onLog)
 {
     mclog::tagInfo(TAG, "mounting SD card");
 
     esp_err_t err = mount_sd_card();
     if (err != ESP_OK) {
         mclog::tagError(TAG, "SD mount failed: %s", esp_err_to_name(err));
-        if (onLog) onLog(std::string("Mount failed: ") + esp_err_to_name(err));
-        return false;
+        sd_config::LoadResult fail;
+        fail.error = std::string("Mount failed: ") + esp_err_to_name(err);
+        if (onLog) onLog(fail.error);
+        return fail;
     }
 
     mclog::tagInfo(TAG, "loading config from SD card");
     auto result = sd_config::load_and_apply(onLog);
 
     unmount_sd_card();
-    return result.success;
+    return result;
 }
 
 AiConfig_t Hal::getAiConfig()

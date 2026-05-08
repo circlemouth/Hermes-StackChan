@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include "workers.h"
-#include <hal/utils/sd_config/sd_config.h>
 #include <hal/hal.h>
 #include <mooncake_log.h>
 
@@ -51,7 +50,8 @@ SdConfigWorker::SdConfigWorker()
 
     // 3. LVGL ロック保持のまま SD カード読み込みを実行
     //    (ディスプレイ DC = GPIO35 がアクティブにならないよう LVGL を止める)
-    sd_config::LoadResult load_result = sd_config::load_and_apply(nullptr);
+    //    mount/unmount も含めて HAL 経由で呼び出す
+    auto load_result = GetHAL().loadConfigFromSdCard(nullptr);
     GetHAL().delay(200);
 
     // 3. ローディング UI を破棄

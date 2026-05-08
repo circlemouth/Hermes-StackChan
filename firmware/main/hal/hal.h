@@ -15,6 +15,7 @@
 #include <array>
 #include <lvgl_image.h>
 #include <string_view>
+#include "utils/sd_config/sd_config.h"
 
 /**
  * @brief
@@ -291,7 +292,7 @@ public:
     bool updateFirmware(std::function<void(std::string_view)> onLog);
 
     /* ------------------------------ SD Config --------------------------------- */
-    bool loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
+    sd_config::LoadResult loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
     AiConfig_t getAiConfig();
 
     /* ---------------------------------- Audio --------------------------------- */

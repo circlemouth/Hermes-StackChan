@@ -10,6 +10,7 @@
 #include <assets/assets.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include <settings.h>
 
 using namespace mooncake;
 using namespace view;
@@ -42,6 +43,32 @@ void AppSetup::onOpen()
     _need_warm_reset = false;
     _magic_count     = 0;
 
+    // ── ステータス表示用の値を収集 ──────────────────────────────
+    // Volume
+    std::string vol_label = fmt::format("Volume   {}%", (int)GetHAL().getSpeakerVolume());
+
+    // AI model (NVS から取得)
+    std::string model = GetHAL().getAiConfig().openaiModel;
+    if (model.empty()) model = "(not set)";
+    else if (model.length() > 12) model = model.substr(0, 10) + "..";
+    std::string model_label = fmt::format("Model   {}", model);
+
+    // WebSocket URL — ホスト部分のみ表示
+    std::string ws_url = Settings("websocket", false).GetString("url", "");
+    std::string server_disp;
+    if (ws_url.empty()) {
+        server_disp = "(not set)";
+    } else {
+        size_t s = ws_url.find("://");
+        std::string host = (s != std::string::npos) ? ws_url.substr(s + 3) : ws_url;
+        size_t e = host.find_first_of(":/");
+        if (e != std::string::npos) host = host.substr(0, e);
+        if (host.length() > 15) host = host.substr(0, 13) + "..";
+        server_disp = host;
+    }
+    std::string server_label = fmt::format("Server  {}", server_disp);
+    // ────────────────────────────────────────────────────────────
+
     _menu_sections = {
         {
             "Wi-Fi",
@@ -59,7 +86,7 @@ void AppSetup::onOpen()
                   _destroy_menu = true;
                   _worker       = std::make_unique<BrightnessSetupWorker>();
               }},
-             {"Volume",
+             {vol_label,
               [&]() {
                   _destroy_menu = true;
                   _worker       = std::make_unique<VolumeSetupWorker>();
@@ -82,7 +109,9 @@ void AppSetup::onOpen()
               [&]() {
                   _destroy_menu = true;
                   _worker       = std::make_unique<SdConfigWorker>();
-              }}},
+              }},
+             {model_label, nullptr},
+             {server_label, nullptr}},
         },
         {
             "Hardware Test",
