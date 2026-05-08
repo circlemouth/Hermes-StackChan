@@ -42,22 +42,17 @@ SdConfigWorker::SdConfigWorker()
     _loading_label->setWidth(280);
     _loading_label->setText("Reading SD card...");
 
-    // 2. RAII で LVGL をアンロックし、SD カード読み込みを実行
-    //    スコープ終了時に自動で lvglLock() が呼ばれる
-    sd_config::LoadResult load_result;
+    // 2. LVGL を一瞬アンロックしてローディング画面をレンダリングさせる
+    //    SD アクセス中は LVGL をロックしたままにして SPI3 (GPIO35) の競合を防ぐ
     {
-        LvglUnlockGuard unlock_guard;
-
-        load_result = sd_config::load_and_apply([this](std::string_view msg) {
-            LvglLockGuard lock;
-            if (_loading_label) {
-                _loading_label->setText(msg);
-            }
-        });
-
-        // 最後のログメッセージをユーザーが確認できるよう少し待機
-        GetHAL().delay(400);
+        LvglUnlockGuard brief_unlock;
+        GetHAL().delay(80);
     }
+
+    // 3. LVGL ロック保持のまま SD カード読み込みを実行
+    //    (ディスプレイ DC = GPIO35 がアクティブにならないよう LVGL を止める)
+    sd_config::LoadResult load_result = sd_config::load_and_apply(nullptr);
+    GetHAL().delay(200);
 
     // 3. ローディング UI を破棄
     _loading_label.reset();

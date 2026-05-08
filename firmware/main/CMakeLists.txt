@@ -311,6 +311,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        sdmmc
                         ArduinoJson
                         esp-now
                         mooncake
