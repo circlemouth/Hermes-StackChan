@@ -335,6 +335,28 @@ private:
 };
 
 /**
+ * @brief SDカードから AI 設定を読み込むワーカー
+ */
+class SdConfigWorker : public WorkerBase {
+public:
+    SdConfigWorker();
+    ~SdConfigWorker() = default;
+    void update() override;
+
+private:
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_title;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_status;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_detail;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _btn_ok;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _loading_panel;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _loading_label;
+    bool _ok_clicked = false;
+
+    void setup_result_ui(bool success, std::string_view status_msg, std::string_view detail_msg);
+};
+
+/**
  * @brief
  *
  */

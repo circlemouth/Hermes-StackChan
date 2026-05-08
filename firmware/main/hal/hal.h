@@ -120,6 +120,16 @@ struct XiaozhiConfig_t {
 };
 
 /**
+ * @brief SDカードから読み込んだ AI 設定
+ */
+struct AiConfig_t {
+    std::string otaUrl;
+    std::string openaiApiKey;
+    std::string openaiBaseUrl;
+    std::string openaiModel;
+};
+
+/**
  * @brief
  *
  */
@@ -279,6 +289,10 @@ public:
 
     /* ----------------------------------- OTA ---------------------------------- */
     bool updateFirmware(std::function<void(std::string_view)> onLog);
+
+    /* ------------------------------ SD Config --------------------------------- */
+    bool loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
+    AiConfig_t getAiConfig();
 
     /* ---------------------------------- Audio --------------------------------- */
     void setSpeakerVolume(uint8_t volume, bool permanent = false);

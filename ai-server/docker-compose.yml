@@ -1,0 +1,19 @@
+services:
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+    ports:
+      - "50021:50021"
+    restart: unless-stopped
+
+  ai-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8765:8765"
+    env_file: .env
+    environment:
+      - VOICEVOX_URL=http://voicevox:50021
+    depends_on:
+      - voicevox
+    restart: unless-stopped
