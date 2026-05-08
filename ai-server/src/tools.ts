@@ -1,4 +1,5 @@
 import type OpenAI from 'openai'
+import { withTiming } from './timing.js'
 
 type ToolDefinition = OpenAI.Chat.Completions.ChatCompletionTool
 
@@ -13,31 +14,45 @@ const WEATHER_CODES: Record<number, string> = {
 }
 
 async function getWeather(city: string): Promise<string> {
-    const geoRes = await fetch(
-        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=ja`
+    const geoRes = await withTiming(
+        'tool.weather.geocode',
+        () => fetch(
+            `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=ja`
+        ),
+        { city },
     )
     if (!geoRes.ok) return `天気情報の取得に失敗しました`
 
-    const geoData = await geoRes.json() as { results?: { latitude: number; longitude: number; name: string }[] }
+    const geoData = await withTiming(
+        'tool.weather.geocode.parse',
+        async () => await geoRes.json() as { results?: { latitude: number; longitude: number; name: string }[] },
+    )
     if (!geoData.results?.length) return `${city}の位置情報が見つかりませんでした`
 
     const { latitude, longitude, name } = geoData.results[0]
 
-    const weatherRes = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
-        `&current=temperature_2m,apparent_temperature,weathercode,windspeed_10m,precipitation&timezone=auto`
+    const weatherRes = await withTiming(
+        'tool.weather.forecast',
+        () => fetch(
+            `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
+            `&current=temperature_2m,apparent_temperature,weathercode,windspeed_10m,precipitation&timezone=auto`
+        ),
+        { city: name, latitude, longitude },
     )
     if (!weatherRes.ok) return `天気情報の取得に失敗しました`
 
-    const weatherData = await weatherRes.json() as {
-        current: {
-            temperature_2m: number
-            apparent_temperature: number
-            weathercode: number
-            windspeed_10m: number
-            precipitation: number
-        }
-    }
+    const weatherData = await withTiming(
+        'tool.weather.forecast.parse',
+        async () => await weatherRes.json() as {
+            current: {
+                temperature_2m: number
+                apparent_temperature: number
+                weathercode: number
+                windspeed_10m: number
+                precipitation: number
+            }
+        },
+    )
     const c = weatherData.current
     const condition = WEATHER_CODES[c.weathercode] ?? '不明'
 

@@ -1,25 +1,10 @@
 services:
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-
   whisper:
     image: onerahmet/openai-whisper-asr-webservice:latest-gpu
     ports:
       - "9000:9000"
     environment:
-      - ASR_MODEL=medium
+      - ASR_MODEL=small
       - ASR_ENGINE=faster_whisper
     deploy:
       resources:
@@ -55,16 +40,15 @@ services:
     environment:
       - VOICEVOX_URL=http://voicevox:50021
       - STT_BASE_URL=http://whisper:9000
-      - OPENAI_BASE_URL=http://ollama:11434/v1
-      - OPENAI_API_KEY=ollama
+      # Ollamaをネイティブで動かす場合はhost.docker.internalを使用
+      #- OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+      #- OPENAI_API_KEY=ollama
       - QDRANT_URL=http://qdrant:6333
     depends_on:
-      - ollama
       - whisper
       - voicevox
       - qdrant
     restart: unless-stopped
 
 volumes:
-  ollama_data:
   qdrant_data:

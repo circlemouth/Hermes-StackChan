@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { pcmToWav } from './audio.js'
+import { withTiming } from './timing.js'
 
 let openaiClient: OpenAI | null = null
 
@@ -18,27 +19,42 @@ async function transcribeLocal(wav: Buffer): Promise<string> {
     const formData = new FormData()
     formData.append('audio_file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav')
 
-    const res = await fetch(
-        `${baseURL}/asr?task=transcribe&language=ja&encode=true&output=json`,
-        { method: 'POST', body: formData }
+    const res = await withTiming(
+        'stt.local.fetch',
+        () => fetch(
+            `${baseURL}/asr?task=transcribe&language=ja&encode=true&output=json`,
+            { method: 'POST', body: formData }
+        ),
+        { baseURL, wavBytes: wav.length },
     )
     if (!res.ok) throw new Error(`Whisper ASR failed: ${res.status}`)
-    const json = await res.json() as { text: string }
+    const json = await withTiming(
+        'stt.local.parse',
+        async () => await res.json() as { text: string },
+    )
     return json.text
 }
 
 async function transcribeOpenAI(wav: Buffer): Promise<string> {
     const file = new File([wav], 'audio.wav', { type: 'audio/wav' })
-    const result = await getOpenAIClient().audio.transcriptions.create({
-        file,
-        model: 'whisper-1',
-        language: 'ja',
-    })
+    const result = await withTiming(
+        'stt.openai.transcribe',
+        () => getOpenAIClient().audio.transcriptions.create({
+            file,
+            model: 'whisper-1',
+            language: 'ja',
+        }),
+        { wavBytes: wav.length },
+    )
     return result.text
 }
 
 export async function transcribe(pcm: Buffer, sampleRate: number): Promise<string> {
-    const wav = pcmToWav(pcm, sampleRate)
+    const wav = await withTiming(
+        'stt.wav.encode',
+        async () => pcmToWav(pcm, sampleRate),
+        { pcmBytes: pcm.length, sampleRate },
+    )
     if (process.env.STT_BASE_URL) {
         return transcribeLocal(wav)
     }

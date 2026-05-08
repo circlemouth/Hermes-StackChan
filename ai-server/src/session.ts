@@ -4,6 +4,7 @@ import { decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, wrapOpusPa
 import { transcribe } from './stt.js'
 import { chat, type Message } from './llm.js'
 import { synthesize } from './tts.js'
+import { elapsedMs, nowMs, withTiming } from './timing.js'
 
 type State = 'idle' | 'listening' | 'processing'
 
@@ -137,15 +138,24 @@ export class Session {
     }
 
     private async process(): Promise<void> {
+        const processStartMs = nowMs()
         const frames = this.opusFrames.splice(0)
         console.log(`[session ${this.sessionId}] processing ${frames.length} frames`)
         if (frames.length === 0) return
 
         // 1. Opus → PCM → Whisper
-        const pcm = decodeOpusFrames(frames)
+        const pcm = await withTiming(
+            `session:${this.sessionId}:audio.decode`,
+            async () => decodeOpusFrames(frames),
+            { frames: frames.length },
+        )
         if (pcm.length === 0) return
 
-        const text = await transcribe(pcm, 16000)
+        const text = await withTiming(
+            `session:${this.sessionId}:stt`,
+            () => transcribe(pcm, 16000),
+            { pcmBytes: pcm.length },
+        )
         console.log(`[session ${this.sessionId}] STT: "${text}"`)
         this.sendJson({ type: 'stt', text })
 
@@ -153,27 +163,42 @@ export class Session {
 
         // 2. LLM
         this.messages.push({ role: 'user', content: text })
-        const reply = await chat(this.messages)
+        const reply = await withTiming(
+            `session:${this.sessionId}:llm`,
+            () => chat(this.messages),
+            { messageCount: this.messages.length },
+        )
         this.messages.push({ role: 'assistant', content: reply })
         console.log(`[session ${this.sessionId}] LLM: "${reply}"`)
         this.sendJson({ type: 'llm', emotion: 'neutral' })
 
         // 3. TTS → Opus → device
-        const wav = await synthesize(reply)
-        const opusFrames = encodeWavToOpusFrames(wav)
+        const wav = await withTiming(
+            `session:${this.sessionId}:tts.synthesize`,
+            () => synthesize(reply),
+            { textLength: reply.length },
+        )
+        const opusFrames = await withTiming(
+            `session:${this.sessionId}:tts.encode`,
+            async () => encodeWavToOpusFrames(wav),
+            { wavBytes: wav.length },
+        )
 
         this.sendJson({ type: 'tts', state: 'start' })
         this.sendJson({ type: 'tts', state: 'sentence_start', text: reply })
+        const streamStartMs = nowMs()
         for (const frame of opusFrames) {
             if (this.state !== 'processing') break
             this.sendBinary(wrapOpusPayload(frame, this.version))
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
+        console.log(`[timing] done session:${this.sessionId}:tts.stream elapsed=${elapsedMs(streamStartMs)} frames=${opusFrames.length}`)
         this.sendJson({ type: 'tts', state: 'sentence_end', text: reply })
         this.sendJson({ type: 'tts', state: 'stop' })
 
         // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
         this.cooldownUntil = Date.now() + POST_TTS_COOLDOWN_MS
+        console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
     }
 
     private sendJson(obj: Record<string, unknown>): void {
