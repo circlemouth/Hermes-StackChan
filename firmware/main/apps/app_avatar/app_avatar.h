@@ -41,5 +41,8 @@ private:
 
     std::unique_ptr<view::VideoWindow> _video_window;
 
+    bool _screen_clicked_flag = false;
+    int _dance_modifier_id    = -1;
+
     void check_auto_angle_sync_mode();
 };

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef _JOYSTICK_BASIC_H_
 #define _JOYSTICK_BASIC_H_
 

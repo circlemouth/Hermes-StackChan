@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef __ESP_NOW_INIT_H__
 #define __ESP_NOW_INIT_H__
 

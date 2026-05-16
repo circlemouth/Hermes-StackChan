@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef _UI_SETUP_SCREEN_H_
 #define _UI_SETUP_SCREEN_H_
 

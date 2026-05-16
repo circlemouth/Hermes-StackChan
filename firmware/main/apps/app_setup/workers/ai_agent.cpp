@@ -6,12 +6,18 @@
 #include "workers.h"
 #include <mooncake_log.h>
 #include <hal/hal.h>
+#include <array>
 #include <vector>
 
 using namespace smooth_ui_toolkit::lvgl_cpp;
 using namespace setup_workers;
 
 static std::string _tag = "Setup-AIAgent";
+
+namespace {
+static const std::array<const char*, 4> _idle_motion_level_labels = {{"Off", "Low", "Medium", "High"}};
+
+}  // namespace
 
 XiaozhiPowerSavingWorker::XiaozhiPowerSavingWorker()
 {
@@ -138,4 +144,97 @@ void XiaozhiPowerSavingWorker::update_idle_label()
 
     auto total_minutes = _config.idleShutdownTimeSeconds / 60;
     _label_idle_value->setText(fmt::format("{} min", total_minutes));
+}
+
+XiaozhiGeneralWorker::XiaozhiGeneralWorker()
+{
+    mclog::info("XiaozhiGeneralWorker start");
+
+    _config = GetHAL().getXiaozhiConfig();
+
+    for (uint8_t level = 0; level < _idle_motion_level_labels.size(); ++level) {
+        _idle_motion_levels.push_back(level);
+    }
+
+    int current_index = static_cast<int>(_idle_motion_levels.size()) - 1;
+    for (size_t i = 0; i < _idle_motion_levels.size(); ++i) {
+        if (_idle_motion_levels[i] >= _config.idleRandomMovementLevel) {
+            current_index = static_cast<int>(i);
+            break;
+        }
+    }
+
+    _panel = std::make_unique<Container>(lv_screen_active());
+    _panel->setBgColor(lv_color_hex(0xEDF4FF));
+    _panel->align(LV_ALIGN_CENTER, 0, 0);
+    _panel->setBorderWidth(0);
+    _panel->setSize(320, 240);
+    _panel->setRadius(0);
+    _panel->setPadding(0, 50, 24, 18);
+    _panel->setScrollDir(LV_DIR_VER);
+    _panel->setScrollbarMode(LV_SCROLLBAR_MODE_ACTIVE);
+
+    _panel_general = std::make_unique<Container>(_panel->get());
+    _panel_general->setSize(296, 156);
+    _panel_general->align(LV_ALIGN_TOP_MID, 0, 20);
+    _panel_general->setBgColor(lv_color_hex(0xD2E3FF));
+    _panel_general->setBorderWidth(0);
+    _panel_general->setRadius(18);
+    _panel_general->setPadding(0, 0, 0, 0);
+    _panel_general->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+
+    _label_idle_motion_title = std::make_unique<Label>(_panel_general->get());
+    _label_idle_motion_title->setText("Idle movement frequency:");
+    _label_idle_motion_title->setTextFont(&lv_font_montserrat_16);
+    _label_idle_motion_title->setTextColor(lv_color_hex(0x26206A));
+    _label_idle_motion_title->setWidth(260);
+    _label_idle_motion_title->setTextAlign(LV_TEXT_ALIGN_CENTER);
+    _label_idle_motion_title->align(LV_ALIGN_TOP_MID, 0, 18);
+
+    _label_idle_motion_value = std::make_unique<Label>(_panel_general->get());
+    _label_idle_motion_value->setTextFont(&lv_font_montserrat_24);
+    _label_idle_motion_value->setTextColor(lv_color_hex(0x26206A));
+    _label_idle_motion_value->align(LV_ALIGN_TOP_MID, 0, 64);
+
+    _slider_idle_motion = std::make_unique<Slider>(_panel_general->get());
+    _slider_idle_motion->align(LV_ALIGN_TOP_MID, 0, 118);
+    _slider_idle_motion->setRange(0, _idle_motion_levels.size() - 1);
+    _slider_idle_motion->setSize(250, 18);
+    _slider_idle_motion->setBgColor(lv_color_hex(0x615B9E), LV_PART_KNOB);
+    _slider_idle_motion->setBgColor(lv_color_hex(0x615B9E), LV_PART_INDICATOR);
+    _slider_idle_motion->setBgColor(lv_color_hex(0xB8D3FD), LV_PART_MAIN);
+    _slider_idle_motion->setBgOpa(255);
+    _slider_idle_motion->setValue(current_index);
+    _slider_idle_motion->onValueChanged().connect([this](int32_t value) { _pending_idle_motion_index = value; });
+
+    _btn_confirm = std::make_unique<Button>(_panel->get());
+    apply_button_common_style(*_btn_confirm);
+    _btn_confirm->align(LV_ALIGN_TOP_MID, 0, 196);
+    _btn_confirm->setSize(290, 50);
+    _btn_confirm->label().setText("Confirm");
+    _btn_confirm->onClick().connect([this]() { _confirm_flag = true; });
+
+    update_idle_motion_label();
+}
+
+void XiaozhiGeneralWorker::update()
+{
+    if (_pending_idle_motion_index != -1) {
+        _config.idleRandomMovementLevel = _idle_motion_levels[_pending_idle_motion_index];
+        _pending_idle_motion_index      = -1;
+        update_idle_motion_label();
+    }
+
+    if (_confirm_flag) {
+        _confirm_flag = false;
+        GetHAL().setXiaozhiConfig(_config);
+        mclog::tagInfo(_tag, "xiaozhi config updated: idleRandomMovementLevel={} ({})", _config.idleRandomMovementLevel,
+                       _idle_motion_level_labels[_config.idleRandomMovementLevel]);
+        _is_done = true;
+    }
+}
+
+void XiaozhiGeneralWorker::update_idle_motion_label()
+{
+    _label_idle_motion_value->setText(_idle_motion_level_labels[_config.idleRandomMovementLevel]);
 }

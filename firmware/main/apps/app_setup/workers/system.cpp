@@ -42,6 +42,7 @@ VolumeSetupWorker::VolumeSetupWorker()
     }
 
     uint8_t current_volume = GetHAL().getSpeakerVolume();
+    _original_volume       = current_volume;
     int current_index      = _volume_levels.size() - 1;
     for (size_t i = 0; i < _volume_levels.size(); i++) {
         if (_volume_levels[i] >= current_volume) {
@@ -83,14 +84,23 @@ VolumeSetupWorker::VolumeSetupWorker()
     _btn_confirm->align(LV_ALIGN_CENTER, 0, 60);
     _btn_confirm->setSize(150, 50);
     _btn_confirm->label().setText("Confirm");
-    _btn_confirm->onClick().connect([this]() { _is_done = true; });
+    _btn_confirm->onClick().connect([this]() {
+        _confirmed = true;
+        _is_done   = true;
+    });
 }
 
 VolumeSetupWorker::~VolumeSetupWorker()
 {
-    auto volume = _volume_levels[_slider->getValue()];
-    mclog::tagInfo(_tag, "final volume: {}", volume);
-    GetHAL().setSpeakerVolume(volume, true);
+    if (_confirmed) {
+        auto volume = _volume_levels[_slider->getValue()];
+        mclog::tagInfo(_tag, "final volume: {}", volume);
+        GetHAL().setSpeakerVolume(volume, true);
+        return;
+    }
+
+    mclog::tagInfo(_tag, "volume change cancelled, restore: {}", _original_volume);
+    GetHAL().setSpeakerVolume(_original_volume, false);
 }
 
 void VolumeSetupWorker::update()

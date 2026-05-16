@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #include "ui_setup_screen.h"
 #include "../lvgl_port.h"
 #include "freertos/FreeRTOS.h"

@@ -272,6 +272,9 @@ void StackChanAvatarDisplay::SetupUI()
 
     // GetHAL().startStackChanAutoUpdate(24);
 
+    auto config        = hal_bridge::get_xiaozhi_config();
+    idle_motion_level_ = config.idleRandomMovementLevel;
+
     ESP_LOGI(TAG, "Avatar created and started");
 }
 
@@ -285,6 +288,27 @@ void StackChanAvatarDisplay::LvglLock()
 void StackChanAvatarDisplay::LvglUnlock()
 {
     Unlock();
+}
+
+void StackChanAvatarDisplay::CreateIdleMotionModifier()
+{
+    auto& stackchan = GetStackChan();
+
+    switch (idle_motion_level_) {
+        case 0:
+            idle_motion_modifier_id_ = -1;
+            return;
+        case 1:
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(8000, 12000));
+            return;
+        case 3:
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(2000, 4000));
+            return;
+        case 2:
+        default:
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
+            return;
+    }
 }
 
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)
@@ -505,7 +529,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // Start idle motion
         ESP_LOGW(TAG, "Start idle motion");
         if (idle_motion_modifier_id_ < 0) {
-            idle_motion_modifier_id_     = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
+            if (idle_motion_level_ > 0) {
+                CreateIdleMotionModifier();
+            }
             idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
         }
 

@@ -20,6 +20,7 @@ BrightnessSetupWorker::BrightnessSetupWorker()
     mclog::info("BrightnessSetupWorker start");
 
     uint8_t current_brightness = GetHAL().getBackLightBrightness();
+    _original_brightness       = current_brightness;
     int current_index          = 0;
     for (size_t i = 0; i < _brightness_levels.size(); i++) {
         if (_brightness_levels[i] >= current_brightness) {
@@ -61,7 +62,10 @@ BrightnessSetupWorker::BrightnessSetupWorker()
     _btn_confirm->align(LV_ALIGN_CENTER, 0, 60);
     _btn_confirm->setSize(150, 50);
     _btn_confirm->label().setText("Confirm");
-    _btn_confirm->onClick().connect([this]() { _is_done = true; });
+    _btn_confirm->onClick().connect([this]() {
+        _confirmed = true;
+        _is_done   = true;
+    });
 }
 
 void BrightnessSetupWorker::update()
@@ -74,7 +78,13 @@ void BrightnessSetupWorker::update()
 
 BrightnessSetupWorker::~BrightnessSetupWorker()
 {
-    auto brightness = _brightness_levels[_slider->getValue()];
-    mclog::tagInfo(_tag, "final brightness: {}", brightness);
-    GetHAL().setBackLightBrightness(brightness, true);
+    if (_confirmed) {
+        auto brightness = _brightness_levels[_slider->getValue()];
+        mclog::tagInfo(_tag, "final brightness: {}", brightness);
+        GetHAL().setBackLightBrightness(brightness, true);
+        return;
+    }
+
+    mclog::tagInfo(_tag, "brightness change cancelled, restore: {}", _original_brightness);
+    GetHAL().setBackLightBrightness(_original_brightness, false);
 }

@@ -628,8 +628,13 @@ void hal_bridge::board_set_speaker_volume(uint8_t volume, bool permanent)
     auto& board      = Board::GetInstance();
     auto audio_codec = board.GetAudioCodec();
     if (audio_codec) {
-        if (permanent) {
-            audio_codec->SetOutputVolume(volume);
+        Settings settings("audio", false);
+        const int persisted_volume = settings.GetInt("output_volume", audio_codec->output_volume());
+        audio_codec->SetOutputVolume(volume);
+        if (!permanent) {
+            Settings writable_settings("audio", true);
+            writable_settings.SetInt("output_volume", persisted_volume);
+            return;
         }
     }
 }
