@@ -6,6 +6,60 @@ Here are StackChan related open-source resources, including source code of the S
 
 Update of this repo could be a little late than the released firmware and mobile app. 
 
+## Architecture and API Communication
+
+<img src="docs/stackchan-architecture.png" alt="StackChan architecture diagram" width="100%">
+
+StackChan is organized into five main runtime parts:
+
+- `firmware/`: ESP32-S3 firmware for the robot hardware, including display, camera, audio, motors, BLE setup, ESP-NOW control, OTA, EzData MQTT, and XiaoZhi MCP tools.
+- `app/`: Flutter mobile app for iOS and Android. It handles user login, device binding, BLE provisioning, camera/audio/avatar control, and XiaoZhi settings.
+- `server/`: GoFrame backend. It exposes REST APIs, WebSocket relay, JWT/MAC authentication, file hosting, admin routes, and XiaoZhi token/license helpers.
+- `remote/`: ESP-NOW joystick firmware that sends local wireless control packets to the robot.
+- `ai-server/`: Optional local TypeScript voice pipeline that can use OpenAI-compatible chat/STT APIs, Whisper, VoiceVox, and tool calls.
+
+External communication is handled through these paths:
+
+- REST/HTTPS: the Flutter app calls the Go backend under `/stackChan` and `/stackChan/v2`; the app and server also call XiaoZhi APIs such as `https://xiaozhi.me/` and `https://api.xiaozhi.me/`.
+- WebSocket: the app and firmware connect to the backend at `/stackChan/ws`; binary messages use a 1-byte type, 4-byte big-endian payload length, and payload body.
+- Authentication: app/backend traffic uses an RSA-encrypted `Authorization` value derived from the device MAC, plus a JWT `token` header on v2 app routes.
+- BLE, ESP-NOW, and MQTT: the app provisions nearby devices through BLE, the remote controller sends ESP-NOW packets, and the firmware can exchange EzData messages over MQTT.
+- OTA and app downloads: firmware retrieves update and app metadata from configured HTTP endpoints.
+
+## Local AI Server
+
+`ai-server/` can run the main voice conversation loop locally: StackChan sends microphone Opus frames over WebSocket, the server runs STT -> LLM -> TTS, and StackChan receives synthesized Opus frames plus small JSON state events. The mobile app and Go backend are not required for this local voice path.
+
+Example local services:
+
+- LLM: Ollama, LM Studio, llama.cpp, or vLLM through an OpenAI-compatible `/v1` endpoint.
+- STT: a local Whisper ASR service such as `onerahmet/openai-whisper-asr-webservice`.
+- TTS: VOICEVOX Engine.
+
+Example `ai-server/.env`:
+
+```env
+OPENAI_API_KEY=local
+OPENAI_MODEL=qwen2.5:7b
+OPENAI_BASE_URL=http://localhost:11434/v1
+STT_BASE_URL=http://localhost:9000
+VOICEVOX_URL=http://localhost:50021
+VOICEVOX_SPEAKER=1
+PORT=8765
+```
+
+Example StackChan SD card config at `/sdcard/config.json`:
+
+```json
+{
+  "websocket_url": "ws://192.168.1.10:8765/ws",
+  "websocket_version": 3,
+  "openai_base_url": "http://192.168.1.10:11434/v1",
+  "openai_model": "qwen2.5:7b",
+  "openai_api_key": "local"
+}
+```
+
 ----
 
 <img src="https://cdn.shopify.com/s/files/1/0056/7689/2250/files/5a589623895f65487717894d9240f6b8.png" width="60%">

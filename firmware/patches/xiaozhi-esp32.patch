@@ -2,7 +2,45 @@ diff --git a/main/application.cc b/main/application.cc
 index d69d43d..3b6f07e 100644
 --- a/main/application.cc
 +++ b/main/application.cc
-@@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
+@@ -400,6 +400,18 @@ void Application::CheckNewVersion() {
+     int retry_count = 0;
+     int retry_delay = 10; // Initial retry delay in seconds
+-
++
++    Settings wifi_settings("wifi", false);
++    Settings websocket_settings("websocket", false);
++    std::string explicit_ota_url = wifi_settings.GetString("ota_url");
++    std::string local_websocket_url = websocket_settings.GetString("url");
++    if (local_websocket_url.empty()) {
++        local_websocket_url = websocket_settings.GetString("url_override");
++    }
++    if (explicit_ota_url.empty() && !local_websocket_url.empty()) {
++        ESP_LOGI(TAG, "Skipping cloud version check because local websocket is configured: %s", local_websocket_url.c_str());
++        return;
++    }
++
+     auto& board = Board::GetInstance();
+     while (true) {
+         auto display = board.GetDisplay();
+@@ -478,6 +490,15 @@ void Application::InitializeProtocol() {
+     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
+-
+-    if (ota_->HasMqttConfig()) {
++
++    Settings websocket_settings("websocket", false);
++    std::string local_websocket_url = websocket_settings.GetString("url");
++    if (local_websocket_url.empty()) {
++        local_websocket_url = websocket_settings.GetString("url_override");
++    }
++
++    if (!local_websocket_url.empty()) {
++        ESP_LOGI(TAG, "Using local websocket protocol: %s", local_websocket_url.c_str());
++        protocol_ = std::make_unique<WebsocketProtocol>();
++    } else if (ota_->HasMqttConfig()) {
+         protocol_ = std::make_unique<MqttProtocol>();
+     } else if (ota_->HasWebsocketConfig()) {
+         protocol_ = std::make_unique<WebsocketProtocol>();
+@@ -610,33 +631,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -39,7 +77,7 @@ index d69d43d..3b6f07e 100644
 +    // };
 +    // static const std::array<digit_sound, 10> digit_sounds{{
 +    //     digit_sound{'0', Lang::Sounds::OGG_0},
-+    //     digit_sound{'1', Lang::Sounds::OGG_1}, 
++    //     digit_sound{'1', Lang::Sounds::OGG_1},
 +    //     digit_sound{'2', Lang::Sounds::OGG_2},
 +    //     digit_sound{'3', Lang::Sounds::OGG_3},
 +    //     digit_sound{'4', Lang::Sounds::OGG_4},
@@ -271,3 +309,29 @@ index 7bc917b..874b137 100644
  };
  
  #endif // I2C_DEVICE_H
+diff --git a/main/ota.cc b/main/ota.cc
+index bcc0dc5..804a0c1 100644
+--- a/main/ota.cc
++++ b/main/ota.cc
+@@ -28,2 +28,5 @@
+ Ota::Ota() {
++    auto app_desc = esp_app_get_description();
++    current_version_ = app_desc->version;
++
+ #ifdef ESP_EFUSE_BLOCK_USR_DATA
+     // Read Serial Number from efuse user_data
+     uint8_t serial_number[33] = {0};
+diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
+index f0cc034..558af21 100644
+--- a/main/protocols/websocket_protocol.cc
++++ b/main/protocols/websocket_protocol.cc
+@@ -83,6 +83,9 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
+ bool WebsocketProtocol::OpenAudioChannel() {
+     Settings settings("websocket", false);
+     std::string url = settings.GetString("url");
++    if (url.empty()) {
++        url = settings.GetString("url_override");
++    }
+     std::string token = settings.GetString("token");
+     int version = settings.GetInt("version");
+     if (version != 0) {

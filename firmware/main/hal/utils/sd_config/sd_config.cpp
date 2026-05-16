@@ -30,7 +30,7 @@ static constexpr KeyMap kKeyMap[] = {
     {"openai_api_key",  sd_config::NVS_NAMESPACE, "openai_key"},
     {"openai_base_url", sd_config::NVS_NAMESPACE, "openai_url"},
     {"openai_model",    sd_config::NVS_NAMESPACE, "openai_model"},
-    {"websocket_url",   "websocket",              "url_override"},
+    {"websocket_url",   "websocket",              "url"},
 };
 
 // FILE* の RAII ラッパー
@@ -58,6 +58,19 @@ static bool is_secret_key(const char* key_name)
 {
     return (std::strstr(key_name, "key") != nullptr ||
             std::strstr(key_name, "token") != nullptr);
+}
+
+static bool is_valid_url_value(const char* key_name, const char* value)
+{
+    if (std::strcmp(key_name, "websocket_url") == 0) {
+        return (std::strncmp(value, "ws://", 5) == 0 ||
+                std::strncmp(value, "wss://", 6) == 0);
+    }
+    if (std::strcmp(key_name, "openai_base_url") == 0) {
+        return (std::strncmp(value, "http://", 7) == 0 ||
+                std::strncmp(value, "https://", 8) == 0);
+    }
+    return std::strncmp(value, "https://", 8) == 0;
 }
 
 namespace sd_config {
@@ -130,6 +143,9 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
 
     log("Saving to NVS...");
 
+    bool imported_websocket_url = false;
+    bool imported_websocket_version = false;
+
     // 5. マッピングされたキーを NVS に保存
     for (const auto& [json_key, nvs_ns, nvs_key] : kKeyMap) {
         cJSON* item = cJSON_GetObjectItem(json.root, json_key);
@@ -151,25 +167,23 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
 
         // URL スキーム検証
         if (std::strstr(json_key, "url") != nullptr) {
-            bool valid = false;
-            if (std::strcmp(json_key, "websocket_url") == 0) {
-                valid = (std::strncmp(value, "ws://", 5) == 0 ||
-                         std::strncmp(value, "wss://", 6) == 0);
-                if (!valid) {
-                    mclog::tagWarn(TAG, "skip {}: URL must start with ws:// or wss://", json_key);
-                    continue;
-                }
-            } else {
-                valid = std::strncmp(value, "https://", 8) == 0;
-                if (!valid) {
-                    mclog::tagWarn(TAG, "skip {}: URL must start with https://", json_key);
-                    continue;
-                }
+            if (!is_valid_url_value(json_key, value)) {
+                mclog::tagWarn(TAG, "skip {}: invalid URL scheme", json_key);
+                continue;
             }
         }
 
         Settings ns_settings(nvs_ns, true);
         ns_settings.SetString(nvs_key, value);
+
+        if (std::strcmp(json_key, "websocket_url") == 0) {
+            ns_settings.SetString("url_override", value);
+            imported_websocket_url = true;
+        } else if (std::strcmp(json_key, "ota_url") == 0) {
+            Settings wifi_settings("wifi", true);
+            wifi_settings.SetString("ota_url", value);
+        }
+
         result.imported_keys.push_back(json_key);
 
         // APIキー類はキー名と長さのみログ出力 (値は出力しない)
@@ -178,6 +192,26 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         } else {
             mclog::tagInfo(TAG, "imported: {} = {}", json_key, value);
         }
+    }
+
+    cJSON* websocket_version = cJSON_GetObjectItem(json.root, "websocket_version");
+    if (websocket_version && cJSON_IsNumber(websocket_version)) {
+        int version = websocket_version->valueint;
+        if (version < 1 || version > 3) {
+            mclog::tagWarn(TAG, "skip websocket_version: unsupported version {}", version);
+        } else {
+            Settings ws_settings("websocket", true);
+            ws_settings.SetInt("version", version);
+            result.imported_keys.push_back("websocket_version");
+            imported_websocket_version = true;
+            mclog::tagInfo(TAG, "imported: websocket_version = {}", version);
+        }
+    }
+
+    if (imported_websocket_url && !imported_websocket_version) {
+        Settings ws_settings("websocket", true);
+        ws_settings.SetInt("version", 3);
+        mclog::tagInfo(TAG, "defaulted: websocket_version = 3");
     }
 
     if (result.imported_keys.empty()) {

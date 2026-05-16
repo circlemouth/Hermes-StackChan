@@ -12,13 +12,14 @@ const inputDecoder = new OpusScript(INPUT_SAMPLE_RATE, 1)
 const outputEncoder = new OpusScript(OUTPUT_SAMPLE_RATE, 1, OpusScript.Application.AUDIO)
 
 // BinaryProtocol3: [type:1][reserved:1][payload_size:2 BE][payload...]
+// Xiaozhi v3 uses type 0 for Opus. Type 1 is accepted for compatibility with older local builds.
 // BinaryProtocol2: [version:2][type:2][reserved:4][timestamp:4][payload_size:4 BE][payload...]
 // version 1 (or other): raw Opus bytes
 
 export function extractOpusPayload(data: Buffer, version: number): Buffer | null {
     if (version === 3) {
         if (data.length < 4) return null
-        if (data[0] !== 0x01) return null  // type != Opus
+        if (data[0] !== 0x00 && data[0] !== 0x01) return null  // type != Opus
         const size = data.readUInt16BE(2)
         return data.subarray(4, 4 + size)
     }
@@ -36,7 +37,7 @@ export function extractOpusPayload(data: Buffer, version: number): Buffer | null
 export function wrapOpusPayload(opus: Buffer, version: number): Buffer {
     if (version === 3) {
         const header = Buffer.alloc(4)
-        header[0] = 0x01
+        header[0] = 0x00
         header[1] = 0x00
         header.writeUInt16BE(opus.length, 2)
         return Buffer.concat([header, opus])
