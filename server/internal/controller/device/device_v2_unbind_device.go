@@ -10,7 +10,6 @@ import (
 	"stackChan/internal/dao"
 	"stackChan/internal/model"
 	"stackChan/internal/service"
-	"stackChan/internal/xiaozhi"
 
 	"github.com/gogf/gf/v2/errors/gcode"
 	"github.com/gogf/gf/v2/errors/gerror"
@@ -33,26 +32,6 @@ func (c *ControllerV2) UnbindDevice(ctx context.Context, req *v2.UnbindDeviceReq
 	// 3. Validate MAC address parameter
 	if req.Mac == "" {
 		return nil, gerror.NewCode(gcode.CodeMissingParameter, "Device MAC address cannot be empty")
-	}
-
-	restoreResponse, err := service.RestoreDefaultAgent(req.Mac)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if !restoreResponse {
-		return nil, gerror.NewCode(gcode.CodeInternalError, "Failed to restore default configuration")
-	}
-
-	// xiaozhi Unbind Device
-	unbindResponse, err := xiaozhi.UnbindDevice(&req.Mac)
-	if err != nil {
-		return nil, gerror.NewCode(gcode.CodeInternalError)
-	}
-	if !unbindResponse {
-		g.Log().Error(ctx, "xiaozhi Unbind Device failed:")
-		return nil, gerror.NewCode(gcode.CodeInternalError)
 	}
 
 	// 4. Perform unbind: set uid to 0/NULL (only the current user's own device can be unbound)

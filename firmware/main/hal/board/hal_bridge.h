@@ -20,11 +20,11 @@ struct TouchPoint_t {
 
 struct Data_t {
     TouchPoint_t touchPoint;
-    bool isXiaozhiMode              = false;
-    bool isXiaozhiModeToggleEnabled = false;
+    bool isHermesMode              = false;
+    bool isHermesModeToggleEnabled = false;
 };
 
-struct XiaozhiConfig_t {
+struct HermesRuntimeConfig_t {
     uint32_t idleShutdownTimeSeconds = 600;
     bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
@@ -37,20 +37,20 @@ Data_t& get_data();
 void set_touch_point(int num, int x, int y);
 TouchPoint_t get_touch_point();
 
-bool is_xiaozhi_mode();
-void set_xiaozhi_mode(bool mode);
-void toggle_xiaozhi_chat_state();
+bool is_hermes_mode();
+void set_hermes_mode(bool mode);
+void toggle_hermes_chat_state();
 
 void disply_lvgl_lock();
 void disply_lvgl_unlock();
 lv_disp_t* display_get_lvgl_display();
 
-void xiaozhi_board_init();
-void start_xiaozhi_app();
-bool is_xiaozhi_ready();
-bool is_xiaozhi_idle();
-XiaozhiConfig_t get_xiaozhi_config();
-void set_xiaozhi_config(const XiaozhiConfig_t& config);
+void hermes_board_init();
+void start_hermes_app();
+bool is_hermes_ready();
+bool is_hermes_idle();
+HermesRuntimeConfig_t get_hermes_config();
+void set_hermes_config(const HermesRuntimeConfig_t& config);
 
 i2c_master_bus_handle_t board_get_i2c_bus();
 StackChanCamera* board_get_camera();

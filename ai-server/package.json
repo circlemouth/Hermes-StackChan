@@ -4,11 +4,13 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "test": "tsx --test test/*.test.ts",
+    "start": "node dist/index.js",
+    "mcp:stackchan": "node dist/stackchan_mcp_server.js",
+    "mcp:stackchan:dev": "tsx src/stackchan_mcp_server.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
-    "openai": "^4.68.0",
     "opusscript": "^0.1.1",
     "ws": "^8.18.0"
   },

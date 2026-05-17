@@ -26,10 +26,6 @@ struct KeyMap {
 };
 
 static constexpr KeyMap kKeyMap[] = {
-    {"ota_url",         sd_config::NVS_NAMESPACE, "ota_url"},
-    {"openai_api_key",  sd_config::NVS_NAMESPACE, "openai_key"},
-    {"openai_base_url", sd_config::NVS_NAMESPACE, "openai_url"},
-    {"openai_model",    sd_config::NVS_NAMESPACE, "openai_model"},
     {"websocket_url",   "websocket",              "url"},
 };
 
@@ -65,10 +61,6 @@ static bool is_valid_url_value(const char* key_name, const char* value)
     if (std::strcmp(key_name, "websocket_url") == 0) {
         return (std::strncmp(value, "ws://", 5) == 0 ||
                 std::strncmp(value, "wss://", 6) == 0);
-    }
-    if (std::strcmp(key_name, "openai_base_url") == 0) {
-        return (std::strncmp(value, "http://", 7) == 0 ||
-                std::strncmp(value, "https://", 8) == 0);
     }
     return std::strncmp(value, "https://", 8) == 0;
 }
@@ -179,9 +171,6 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         if (std::strcmp(json_key, "websocket_url") == 0) {
             ns_settings.SetString("url_override", value);
             imported_websocket_url = true;
-        } else if (std::strcmp(json_key, "ota_url") == 0) {
-            Settings wifi_settings("wifi", true);
-            wifi_settings.SetString("ota_url", value);
         }
 
         result.imported_keys.push_back(json_key);

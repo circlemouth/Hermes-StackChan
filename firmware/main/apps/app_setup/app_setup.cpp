@@ -47,19 +47,13 @@ void AppSetup::onOpen()
     // Volume
     std::string vol_label = fmt::format("Volume   {}%", (int)GetHAL().getSpeakerVolume());
 
-    // AI model (NVS から取得)
-    std::string model = GetHAL().getAiConfig().openaiModel;
-    if (model.empty()) model = "(not set)";
-    else if (model.length() > 12) model = model.substr(0, 10) + "..";
-    std::string model_label = fmt::format("Model   {}", model);
-
     // WebSocket URL — url_override 優先、なければ url を参照
     Settings ws_settings("websocket", false);
     std::string ws_url = ws_settings.GetString("url_override", "");
     if (ws_url.empty()) ws_url = ws_settings.GetString("url", "");
     std::string server_disp;
     if (ws_url.empty()) {
-        server_disp = "(not set)";
+        server_disp = "URL missing";
     } else {
         size_t s = ws_url.find("://");
         std::string host = (s != std::string::npos) ? ws_url.substr(s + 3) : ws_url;
@@ -68,7 +62,7 @@ void AppSetup::onOpen()
         if (host.length() > 15) host = host.substr(0, 13) + "..";
         server_disp = host;
     }
-    std::string server_label = fmt::format("Server  {}", server_disp);
+    std::string server_label = fmt::format("Bridge  {}", server_disp);
     // ────────────────────────────────────────────────────────────
 
     _menu_sections = {
@@ -100,25 +94,24 @@ void AppSetup::onOpen()
               }}},
         },
         {
-            "AI.Agent",
+            "Hermes",
             {{"General",
               [&]() {
                   _destroy_menu    = true;
                   _need_warm_reset = true;
-                  _worker          = std::make_unique<XiaozhiGeneralWorker>();
+                  _worker          = std::make_unique<HermesGeneralWorker>();
               }},
              {"Power Saving",
               [&]() {
                   _destroy_menu    = true;
                   _need_warm_reset = true;
-                  _worker          = std::make_unique<XiaozhiPowerSavingWorker>();
+                  _worker          = std::make_unique<HermesPowerSavingWorker>();
               }},
              {"Load SD Config",
               [&]() {
                   _destroy_menu = true;
                   _worker       = std::make_unique<SdConfigWorker>();
               }},
-             {model_label, nullptr},
              {server_label, nullptr}},
         },
         {
@@ -140,15 +133,6 @@ void AppSetup::onOpen()
               }}},
         },
         {
-            "Account",
-            {{"Unbind & Reset",
-              [&]() {
-                  _destroy_menu    = true;
-                  _need_warm_reset = true;
-                  _worker          = std::make_unique<AccountWorker>();
-              }}},
-        },
-        {
             "Firmware",
             {
                 {fmt::format("Version:  {}", common::FirmwareVersion),
@@ -159,12 +143,6 @@ void AppSetup::onOpen()
                          _destroy_menu = true;
                          _worker       = std::make_unique<FwVersionWorker>();
                      }
-                 }},
-                {"Check for Updates",
-                 [&]() {
-                     _destroy_menu    = true;
-                     _need_warm_reset = true;
-                     _worker          = std::make_unique<SystemUpdateWorker>();
                  }},
                 //  {"Factory Reset",
                 //   [&]() {
@@ -224,6 +202,6 @@ void AppSetup::onClose()
     view::destroy_status_bar();
 
     if (_need_warm_reset) {
-        GetHAL().requestWarmReboot(6);
+        GetHAL().requestWarmReboot(4);
     }
 }

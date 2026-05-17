@@ -82,7 +82,6 @@ class AppState extends GetxController {
   set deviceMac(String mac) {
     _deviceMac.value = mac;
     asyncPrefs.setString(ValueConstant.deviceMac, _deviceMac.value);
-    startSearchXiaoZhiConfig(mac);
   }
 
   bool get hasValidDeviceMac => _deviceMac.isNotEmpty;
@@ -320,9 +319,6 @@ class AppState extends GetxController {
     AppState.shared.popupState = false;
   }
 
-  //Query XiaoZhi configuration status
-  Future<void> startSearchXiaoZhiConfig(String mac) async {}
-
   RxList<Device> devices = RxList([]);
 
   //Get bound device list
@@ -369,9 +365,6 @@ class AppState extends GetxController {
         showToast("Device binding successful");
         getDevices();
         getDeviceInfo();
-
-        ///Proactively reset device default configuration
-        Http.instance.post(Urls.deviceAgentRestore, data: map);
         return true;
       }
     }

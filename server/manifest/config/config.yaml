@@ -35,7 +35,3 @@ rsa:
   client:
     public:
     private:
-
-xiaozhi:
-  secret_key:
-  generate_license_token:

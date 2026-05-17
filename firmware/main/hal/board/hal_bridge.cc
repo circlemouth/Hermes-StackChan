@@ -20,10 +20,10 @@
 
 static const char* _tag = "HAL_BRIDGE";
 
-static constexpr std::string_view _xiaozhi_config_nvs_ns                           = "xiaozhi";
-static constexpr std::string_view _xiaozhi_config_idle_shutdown_time_key           = "idle_sec";
-static constexpr std::string_view _xiaozhi_config_allow_shutdown_when_charging_key = "ext_pwr";
-static constexpr std::string_view _xiaozhi_config_idle_random_movement_key         = "idle_lv";
+static constexpr std::string_view _hermes_config_nvs_ns                           = "hermes";
+static constexpr std::string_view _hermes_config_idle_shutdown_time_key           = "idle_sec";
+static constexpr std::string_view _hermes_config_allow_shutdown_when_charging_key = "ext_pwr";
+static constexpr std::string_view _hermes_config_idle_random_movement_key         = "idle_lv";
 
 namespace hal_bridge {
 
@@ -63,16 +63,16 @@ TouchPoint_t get_touch_point()
     return _data.touchPoint;
 }
 
-bool is_xiaozhi_mode()
+bool is_hermes_mode()
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    return _data.isXiaozhiMode;
+    return _data.isHermesMode;
 }
 
-void set_xiaozhi_mode(bool mode)
+void set_hermes_mode(bool mode)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    _data.isXiaozhiMode = mode;
+    _data.isHermesMode = mode;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -102,15 +102,15 @@ void disply_lvgl_unlock()
 /*                                 Application                                */
 /* -------------------------------------------------------------------------- */
 
-void xiaozhi_board_init()
+void hermes_board_init()
 {
     // Init board
-    auto& board = Board::GetInstance();
+    (void)Board::GetInstance();
 }
 
-void start_xiaozhi_app()
+void start_hermes_app()
 {
-    set_xiaozhi_mode(true);
+    set_hermes_mode(true);
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
@@ -118,27 +118,27 @@ void start_xiaozhi_app()
     app.Run();  // This function runs the main event loop and never returns
 }
 
-XiaozhiConfig_t get_xiaozhi_config()
+HermesRuntimeConfig_t get_hermes_config()
 {
-    XiaozhiConfig_t config;
+    HermesRuntimeConfig_t config;
 
-    Settings settings(_xiaozhi_config_nvs_ns.data(), false);
-    config.idleShutdownTimeSeconds = settings.GetInt(_xiaozhi_config_idle_shutdown_time_key.data(),
+    Settings settings(_hermes_config_nvs_ns.data(), false);
+    config.idleShutdownTimeSeconds = settings.GetInt(_hermes_config_idle_shutdown_time_key.data(),
                                                      static_cast<int>(config.idleShutdownTimeSeconds));
     config.allowShutdownWhenCharging =
-        settings.GetBool(_xiaozhi_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
+        settings.GetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
     config.idleRandomMovementLevel =
-        settings.GetInt(_xiaozhi_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
+        settings.GetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
 
     return config;
 }
 
-void set_xiaozhi_config(const XiaozhiConfig_t& config)
+void set_hermes_config(const HermesRuntimeConfig_t& config)
 {
-    Settings settings(_xiaozhi_config_nvs_ns.data(), true);
-    settings.SetInt(_xiaozhi_config_idle_shutdown_time_key.data(), config.idleShutdownTimeSeconds);
-    settings.SetBool(_xiaozhi_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
-    settings.SetInt(_xiaozhi_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
+    Settings settings(_hermes_config_nvs_ns.data(), true);
+    settings.SetInt(_hermes_config_idle_shutdown_time_key.data(), config.idleShutdownTimeSeconds);
+    settings.SetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
+    settings.SetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
 }
 
 void app_play_sound(const std::string_view& sound)

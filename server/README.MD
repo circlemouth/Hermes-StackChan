@@ -12,7 +12,6 @@
 - **Comment System**: Full CRUD operations for post comments
 - **Dance Control**: Dance creation, management, and motion data handling
 - **App Store Integration**: App management and distribution
-- **AI Agent Integration**: XiaoZhi (小智) AI assistant integration with agent configuration
 - **Persistent Storage**: MySQL database with ORM-based data access
 
 ---
@@ -99,16 +98,6 @@ jwt:
 ### 3. RSA Keys
 
 For production use, generate your own RSA key pairs for encryption.
-
-### 4. XiaoZhi Configuration
-
-Set your XiaoZhi (小智) API secret key:
-
-```yaml
-xiaozhi:
-  secret_key: "your_xiaozhi_secret_key_here"
-  generate_license_token: "your_xiaozhi_generate_license_token_here"
-```
 
 ---
 
@@ -199,7 +188,6 @@ stackChan/
 │   ├── friend/            # Friend module APIs
 │   ├── post/              # Post module APIs
 │   ├── user/              # User module APIs
-│   └── xiaozhi/           # XiaoZhi AI module APIs
 ├── internal/              # Internal application code
 │   ├── boot/             # Boot initialization
 │   ├── cmd/              # Command entry
@@ -210,8 +198,7 @@ stackChan/
 │   ├── middleware/       # HTTP middlewares
 │   ├── model/            # Data models
 │   ├── packed/           # Packed assets
-│   ├── service/          # Business services
-│   └── xiaozhi/          # XiaoZhi integration
+│   └── service/          # Business services
 ├── manifest/             # Deployment and configuration
 │   ├── config/           # Configuration files
 │   ├── deploy/           # Deployment scripts

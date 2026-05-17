@@ -13,11 +13,11 @@ using namespace stackchan;
 
 static const std::string_view _tag = "HAL-MCP";
 
-void Hal::xiaozhi_mcp_init()
+void Hal::robot_mcp_init()
 {
     mclog::tagInfo(_tag, "init");
 
-    // https://github.com/78/xiaozhi-esp32/blob/main/docs/mcp-usage.md
+    // Firmware-side robot MCP tools used by the Hermes bridge.
     auto& mcp_server = McpServer::GetInstance();
 
     // System Prompt：

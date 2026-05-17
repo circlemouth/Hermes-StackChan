@@ -19,15 +19,15 @@ static const std::array<const char*, 4> _idle_motion_level_labels = {{"Off", "Lo
 
 }  // namespace
 
-XiaozhiPowerSavingWorker::XiaozhiPowerSavingWorker()
+HermesPowerSavingWorker::HermesPowerSavingWorker()
 {
-    mclog::info("XiaozhiPowerSavingWorker start");
+    mclog::info("HermesPowerSavingWorker start");
 
     for (uint32_t seconds = 0; seconds <= 3600; seconds += 300) {
         _idle_shutdown_levels.push_back(seconds);
     }
 
-    _config = GetHAL().getXiaozhiConfig();
+    _config = GetHAL().getHermesBridgeConfig();
 
     int current_index = static_cast<int>(_idle_shutdown_levels.size()) - 1;
     for (size_t i = 0; i < _idle_shutdown_levels.size(); ++i) {
@@ -117,7 +117,7 @@ XiaozhiPowerSavingWorker::XiaozhiPowerSavingWorker()
     update_idle_label();
 }
 
-void XiaozhiPowerSavingWorker::update()
+void HermesPowerSavingWorker::update()
 {
     if (_pending_idle_index != -1) {
         _config.idleShutdownTimeSeconds = _idle_shutdown_levels[_pending_idle_index];
@@ -128,14 +128,14 @@ void XiaozhiPowerSavingWorker::update()
     if (_confirm_flag) {
         _confirm_flag                     = false;
         _config.allowShutdownWhenCharging = _switch_charging->getValue();
-        GetHAL().setXiaozhiConfig(_config);
-        mclog::tagInfo(_tag, "xiaozhi config updated: idleShutdownTimeSeconds={}, allowShutdownWhenCharging={}",
+        GetHAL().setHermesBridgeConfig(_config);
+        mclog::tagInfo(_tag, "Hermes bridge config updated: idleShutdownTimeSeconds={}, allowShutdownWhenCharging={}",
                        _config.idleShutdownTimeSeconds, _config.allowShutdownWhenCharging);
         _is_done = true;
     }
 }
 
-void XiaozhiPowerSavingWorker::update_idle_label()
+void HermesPowerSavingWorker::update_idle_label()
 {
     if (_config.idleShutdownTimeSeconds == 0) {
         _label_idle_value->setText("Off");
@@ -146,11 +146,11 @@ void XiaozhiPowerSavingWorker::update_idle_label()
     _label_idle_value->setText(fmt::format("{} min", total_minutes));
 }
 
-XiaozhiGeneralWorker::XiaozhiGeneralWorker()
+HermesGeneralWorker::HermesGeneralWorker()
 {
-    mclog::info("XiaozhiGeneralWorker start");
+    mclog::info("HermesGeneralWorker start");
 
-    _config = GetHAL().getXiaozhiConfig();
+    _config = GetHAL().getHermesBridgeConfig();
 
     for (uint8_t level = 0; level < _idle_motion_level_labels.size(); ++level) {
         _idle_motion_levels.push_back(level);
@@ -217,7 +217,7 @@ XiaozhiGeneralWorker::XiaozhiGeneralWorker()
     update_idle_motion_label();
 }
 
-void XiaozhiGeneralWorker::update()
+void HermesGeneralWorker::update()
 {
     if (_pending_idle_motion_index != -1) {
         _config.idleRandomMovementLevel = _idle_motion_levels[_pending_idle_motion_index];
@@ -227,14 +227,14 @@ void XiaozhiGeneralWorker::update()
 
     if (_confirm_flag) {
         _confirm_flag = false;
-        GetHAL().setXiaozhiConfig(_config);
-        mclog::tagInfo(_tag, "xiaozhi config updated: idleRandomMovementLevel={} ({})", _config.idleRandomMovementLevel,
+        GetHAL().setHermesBridgeConfig(_config);
+        mclog::tagInfo(_tag, "Hermes bridge config updated: idleRandomMovementLevel={} ({})", _config.idleRandomMovementLevel,
                        _idle_motion_level_labels[_config.idleRandomMovementLevel]);
         _is_done = true;
     }
 }
 
-void XiaozhiGeneralWorker::update_idle_motion_label()
+void HermesGeneralWorker::update_idle_motion_label()
 {
     _label_idle_motion_value->setText(_idle_motion_level_labels[_config.idleRandomMovementLevel]);
 }

@@ -29,10 +29,7 @@ extern "C" void app_main(void)
     // Install apps
     GetMooncake().installApp(std::make_unique<AppLauncher>());
     GetMooncake().installApp(std::make_unique<AppAiAgent>());
-    GetMooncake().installApp(std::make_unique<AppAvatar>());
     GetMooncake().installApp(std::make_unique<AppEspnowControl>());
-    GetMooncake().installApp(std::make_unique<AppAppCenter>());
-    GetMooncake().installApp(std::make_unique<AppEzdata>());
     GetMooncake().installApp(std::make_unique<AppDance>());
     GetMooncake().installApp(std::make_unique<AppSetup>());
 
@@ -43,7 +40,7 @@ extern "C" void app_main(void)
 
         GetMooncake().update();
 
-        if (GetHAL().isXiaozhiStartRequested()) {
+        if (GetHAL().isHermesStartRequested()) {
             break;
         }
     }
@@ -52,6 +49,6 @@ extern "C" void app_main(void)
     GetMooncake().uninstallAllApps();
     DestroyMooncake();
 
-    // Start xiaozhi, never returns
-    GetHAL().startXiaozhi();
+    // Start Hermes bridge runtime, never returns
+    GetHAL().startHermes();
 }

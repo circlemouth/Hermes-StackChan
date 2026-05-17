@@ -20,7 +20,6 @@ import (
 	"stackChan/internal/controller/post"
 	"stackChan/internal/controller/stackchandevice"
 	"stackChan/internal/controller/user"
-	"stackChan/internal/controller/xiaozhi"
 	"stackChan/internal/middleware"
 	"stackChan/internal/web_socket"
 
@@ -72,7 +71,7 @@ var (
 
 			s.Group("/stackChan", func(group *ghttp.RouterGroup) {
 				group.Middleware(middleware.TokenAuthMiddleware, ghttp.MiddlewareHandlerResponse)
-				group.Bind(device.NewV1(), friend.NewV1(), dance.NewV1(), file.NewV1(), post.NewV1(), pano.NewV1(), appstore.NewV1(), xiaozhi.NewV1(), stackchandevice.NewV2())
+				group.Bind(device.NewV1(), friend.NewV1(), dance.NewV1(), file.NewV1(), post.NewV1(), pano.NewV1(), appstore.NewV1(), stackchandevice.NewV2())
 			})
 
 			s.Group("/admin/stackChan", func(group *ghttp.RouterGroup) {

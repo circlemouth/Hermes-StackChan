@@ -20,6 +20,7 @@ export function startServer(port: number): void {
 
         ws.on('close', () => {
             console.log(`[server] disconnected: ${ip}`)
+            session.close()
         })
 
         ws.on('error', (err) => {

@@ -245,13 +245,13 @@ private:
     StackChanCamera* camera_;
     esp_timer_handle_t touchpad_timer_;
     PowerSaveTimer* power_save_timer_;
-    hal_bridge::XiaozhiConfig_t xiaozhi_config_;
+    hal_bridge::HermesRuntimeConfig_t hermes_config_;
     bool last_power_save_enabled_      = false;
     int64_t last_power_state_check_ms_ = 0;
 
     bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
     {
-        return is_discharging || (has_external_power && xiaozhi_config_.allowShutdownWhenCharging);
+        return is_discharging || (has_external_power && hermes_config_.allowShutdownWhenCharging);
     }
 
     void UpdatePowerSaveEnabled(bool has_external_power, bool is_discharging)
@@ -263,7 +263,7 @@ private:
 
         ESP_LOGI(TAG, "Power save timer %s: external_power=%d, discharging=%d, allowShutdownWhenCharging=%d",
                  should_enable_power_save ? "enabled" : "disabled", has_external_power, is_discharging,
-                 xiaozhi_config_.allowShutdownWhenCharging);
+                 hermes_config_.allowShutdownWhenCharging);
         power_save_timer_->SetEnabled(should_enable_power_save);
         last_power_save_enabled_ = should_enable_power_save;
     }
@@ -281,17 +281,17 @@ private:
 
     void InitializePowerSaveTimer()
     {
-        xiaozhi_config_ = hal_bridge::get_xiaozhi_config();
+        hermes_config_ = hal_bridge::get_hermes_config();
 
-        const int seconds_to_shutdown = xiaozhi_config_.idleShutdownTimeSeconds > 0
-                                            ? static_cast<int>(xiaozhi_config_.idleShutdownTimeSeconds)
+        const int seconds_to_shutdown = hermes_config_.idleShutdownTimeSeconds > 0
+                                            ? static_cast<int>(hermes_config_.idleShutdownTimeSeconds)
                                             : -1;
         const int seconds_to_sleep    = seconds_to_shutdown == -1
                                             ? kPowerSaveSleepDelaySeconds
                                             : std::min(kPowerSaveSleepDelaySeconds, seconds_to_shutdown);
 
         ESP_LOGI(TAG, "Init power save timer: sleep=%d s, shutdown=%d s, allow_shutdown_when_charging=%d",
-                 seconds_to_sleep, seconds_to_shutdown, xiaozhi_config_.allowShutdownWhenCharging);
+                 seconds_to_sleep, seconds_to_shutdown, hermes_config_.allowShutdownWhenCharging);
 
         power_save_timer_ = new PowerSaveTimer(-1, seconds_to_sleep, seconds_to_shutdown);
         power_save_timer_->OnEnterSleepMode([this]() {
@@ -650,7 +650,7 @@ uint8_t hal_bridge::board_get_speaker_volume()
     return volume;
 }
 
-void hal_bridge::toggle_xiaozhi_chat_state()
+void hal_bridge::toggle_hermes_chat_state()
 {
     auto& app = Application::GetInstance();
     if (app.GetDeviceState() == kDeviceStateStarting) {

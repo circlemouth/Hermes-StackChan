@@ -126,23 +126,4 @@ class Urls {
 
   /// Unbind a device from a user account
   static const String v2deviceUnbind = "v2/device/unbind";
-
-  /// Restore device agent configuration
-  static const String deviceAgentRestore = "v2/device/agent/restore";
-
-  // ===========================================================================
-  // XiaoZhi AI Service Endpoints
-  // ===========================================================================
-
-  /// XiaoZhi AI authentication token endpoint
-  /// Retrieve token for AI service access
-  static const String xiaozhiToken = "xiaozhi/token";
-
-  /// XiaoZhi AI token refresh endpoint
-  /// Refresh expired authentication tokens
-  static const String xiaozhiTokenRefresh = "xiaozhi/token/refresh";
-
-  /// Generate license token for device activation
-  /// Used for StackChan device licensing and activation
-  static const String xiaozhiGenerateLicenseToken = "xiaozhi/generateLicenseToken";
 }

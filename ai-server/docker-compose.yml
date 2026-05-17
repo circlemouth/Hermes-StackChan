@@ -1,30 +1,17 @@
 services:
-  voicevox:
-    image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
-    ports:
-      - "50021:50021"
-    restart: unless-stopped
-
-  whisper:
-    image: onerahmet/openai-whisper-asr-webservice:latest
-    ports:
-      - "9000:9000"
-    environment:
-      - ASR_MODEL=medium
-      - ASR_ENGINE=faster_whisper
-    restart: unless-stopped
-
   ai-server:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "8765:8765"
+      - "8766:8766"
     env_file: .env
     environment:
-      - VOICEVOX_URL=http://voicevox:50021
-      - STT_BASE_URL=http://whisper:9000
-    depends_on:
-      - voicevox
-      - whisper
+      - HERMES_ROOT=/hermes-agent
+      - HERMES_PYTHON=python3
+      - STACKCHAN_CONTROL_HOST=0.0.0.0
+    volumes:
+      - ../hermes-agent:/hermes-agent:ro
+      - ~/.hermes:/root/.hermes
     restart: unless-stopped

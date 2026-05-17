@@ -92,14 +92,3 @@ sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_v
     unmount_sd_card();
     return result;
 }
-
-AiConfig_t Hal::getAiConfig()
-{
-    Settings settings(sd_config::NVS_NAMESPACE, false);
-    return AiConfig_t{
-        .otaUrl        = settings.GetString("ota_url", ""),
-        .openaiApiKey  = settings.GetString("openai_key", ""),
-        .openaiBaseUrl = settings.GetString("openai_url", ""),
-        .openaiModel   = settings.GetString("openai_model", ""),
-    };
-}

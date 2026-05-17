@@ -10,11 +10,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:pull_down_button/pull_down_button.dart';
 import 'package:stack_chan/app_state.dart';
-import 'package:stack_chan/view/home/conversation_page.dart';
-import 'package:stack_chan/view/home/mcp_page.dart';
 import 'package:stack_chan/view/popup/user_info_page.dart';
-
-import '../popup/xiaozhi_welcome_page.dart';
 
 class Settings extends StatefulWidget {
   const Settings({super.key});
@@ -41,13 +37,6 @@ class _SettingsState extends State<Settings> {
       FocusScope.of(context).unfocus();
     }
     super.dispose();
-  }
-
-  void _navigateToPage(Widget page) {
-    Navigator.of(
-      context,
-      rootNavigator: true,
-    ).push(CupertinoPageRoute(builder: (context) => page));
   }
 
   bool _checkDeviceBinding() {
@@ -277,15 +266,6 @@ class _SettingsState extends State<Settings> {
                 children: [_buildChangeNameTile()],
               ),
 
-              //====================== AIset ======================
-              CupertinoListSection.insetGrouped(
-                children: [
-                  _buildAgentConfigTile(),
-                  _buildMcpListTile(),
-                  _buildConversationListTile(),
-                ],
-              ),
-
               //====================== Systemset ======================
               CupertinoListSection.insetGrouped(
                 children: [_unbindResetTitle(), _buildBindDeviceTile()],
@@ -467,67 +447,6 @@ class _SettingsState extends State<Settings> {
       leading: _buildSectionIcon(
         iconPath: "assets/wifi.svg",
         color: CupertinoColors.activeBlue,
-      ),
-      trailing: _buildChevronIcon(),
-    );
-  }
-
-  Widget _buildAgentConfigTile() {
-    return CupertinoListTile(
-      title: const Text("AI Agent Config"),
-      onTap: () {
-        if (_checkDeviceBinding()) {
-          showCupertinoSheet(
-            context: context,
-            builder: (context) {
-              return XiaoZhiWelcomePage(isWelCome: false);
-            },
-          );
-          // showCupertinoSheet(
-          //   useNestedNavigation: true,
-          //   context: context,
-          //   builder: (context) => const AgentConfiguration(),
-          // );
-        }
-      },
-      leading: _buildSectionIcon(
-        iconPath: "assets/rectangle.badge.sparkles.fill.svg",
-        color: CupertinoColors.activeGreen.resolveFrom(context),
-      ),
-      trailing: _buildChevronIcon(),
-    );
-  }
-
-  Widget _buildMcpListTile() {
-    return CupertinoListTile(
-      title: const Text("MCP"),
-      onTap: () {
-        if (_checkDeviceBinding()) {
-          showCupertinoSheet(
-            context: context,
-            builder: (context) {
-              return const McpPage();
-            },
-          );
-        }
-      },
-      leading: _buildSectionIcon(
-        iconPath: "assets/network.badge.shield.half.filled.svg",
-        color: CupertinoColors.activeBlue,
-      ),
-      trailing: _buildChevronIcon(),
-    );
-  }
-
-  Widget _buildConversationListTile() {
-    return CupertinoListTile(
-      title: const Text("Chat History"),
-      onTap: () {
-        if (_checkDeviceBinding()) _navigateToPage(const ConversationPage());
-      },
-      leading: _buildSectionIcon(
-        iconPath: "assets/bubble.left.and.bubble.right.fill.svg",
-        color: CupertinoColors.activeOrange,
       ),
       trailing: _buildChevronIcon(),
     );

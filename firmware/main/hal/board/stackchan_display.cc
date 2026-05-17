@@ -191,7 +191,7 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         Unlock();
     }
 
-    // Robot will be created later in SetupXiaoZhiUI()
+    // Robot will be created later in the Hermes runtime UI.
 }
 
 StackChanAvatarDisplay::~StackChanAvatarDisplay()
@@ -254,8 +254,8 @@ void StackChanAvatarDisplay::SetupUI()
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
     avatar->getPanel()->onClick().connect([]() {
-        if (hal_bridge::is_xiaozhi_ready()) {
-            hal_bridge::toggle_xiaozhi_chat_state();
+        if (hal_bridge::is_hermes_ready()) {
+            hal_bridge::toggle_hermes_chat_state();
         }
     });
 
@@ -272,7 +272,7 @@ void StackChanAvatarDisplay::SetupUI()
 
     // GetHAL().startStackChanAutoUpdate(24);
 
-    auto config        = hal_bridge::get_xiaozhi_config();
+    auto config        = hal_bridge::get_hermes_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
 
     ESP_LOGI(TAG, "Avatar created and started");
@@ -459,15 +459,15 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
 }
 
 #include <hal/board/hal_bridge.h>
-static bool _is_xiaozhi_ready = false;
-static bool _is_xiaozhi_idle  = false;
-bool hal_bridge::is_xiaozhi_ready()
+static bool _is_hermes_ready = false;
+static bool _is_hermes_idle  = false;
+bool hal_bridge::is_hermes_ready()
 {
-    return _is_xiaozhi_ready;
+    return _is_hermes_ready;
 }
-bool hal_bridge::is_xiaozhi_idle()
+bool hal_bridge::is_hermes_idle()
 {
-    return _is_xiaozhi_idle;
+    return _is_hermes_idle;
 }
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
@@ -500,7 +500,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
-        _is_xiaozhi_ready = true;
+        _is_hermes_ready = true;
 
         if (speaking_modifier_id_ >= 0) {
             // Stop speaking
@@ -535,7 +535,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
         }
 
-        _is_xiaozhi_idle = true;
+        _is_hermes_idle = true;
     } else {
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -552,7 +552,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         //     motion.yawServo().moveWithSpeed(0, 350);
         // }
 
-        _is_xiaozhi_idle = false;
+        _is_hermes_idle = false;
     }
 
     // Clear sleep state

@@ -5,7 +5,6 @@ SPDX-License-Identifier: MIT
 
 //====================== devicename(completed) ======================
 import 'package:flutter/cupertino.dart';
-import 'package:stack_chan/view/popup/XiaoZhi_welcome_page.dart';
 
 import '../../app_state.dart';
 import 'device_wifi_config.dart';
@@ -121,7 +120,7 @@ class _DeviceNamePageState extends State<DeviceNamePage> {
                       Navigator.of(context).push(
                         CupertinoPageRoute(
                           builder: (context) {
-                            return XiaoZhiWelcomePage(isWelCome: true);
+                            return DeviceWifiConfig();
                           },
                         ),
                       );

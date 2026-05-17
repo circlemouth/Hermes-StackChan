@@ -20,11 +20,6 @@ struct LoadResult {
 };
 
 /**
- * @brief NVS ネームスペース名 (ai_config)
- */
-static constexpr const char* NVS_NAMESPACE = "ai_config";
-
-/**
  * @brief SDカード上の設定ファイルパス
  */
 static constexpr const char* CONFIG_PATH = "/sdcard/config.json";
@@ -34,10 +29,6 @@ static constexpr const char* CONFIG_PATH = "/sdcard/config.json";
  *
  * config.json の例:
  * {
- *   "ota_url":         "https://your-server/ota/",
- *   "openai_api_key":  "local",
- *   "openai_base_url": "http://192.168.1.x:11434/v1",
- *   "openai_model":    "qwen2.5:7b",
  *   "websocket_url":   "ws://192.168.1.x:8765/ws",
  *   "websocket_version": 3
  * }

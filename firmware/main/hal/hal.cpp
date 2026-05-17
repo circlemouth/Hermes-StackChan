@@ -32,8 +32,8 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
-    xiaozhi_board_init();
-    xiaozhi_mcp_init();
+    hermes_board_init();
+    robot_mcp_init();
     head_touch_init();
     io_expander_init();
     rtc_init();
@@ -128,18 +128,18 @@ void Hal::updateHeapStatusLog()
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                   Xiaozhi                                  */
+/*                                Hermes Bridge                              */
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
 
-void Hal::xiaozhi_board_init()
+void Hal::hermes_board_init()
 {
-    mclog::tagInfo(_tag, "xiaozhi board init");
+    mclog::tagInfo(_tag, "hermes bridge board init");
 
-    hal_bridge::xiaozhi_board_init();
+    hal_bridge::hermes_board_init();
 }
 
 static void _stackchan_update_task(void* param)
@@ -153,18 +153,18 @@ static void _stackchan_update_task(void* param)
 
         LvglLockGuard lock;
 
-        if (!hal_bridge::is_xiaozhi_idle()) {
+        if (!hal_bridge::is_hermes_idle()) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
         GetStackChan().update();
 
-        if (!hal_bridge::is_xiaozhi_ready()) {
+        if (!hal_bridge::is_hermes_ready()) {
             continue;
         }
 
         if (!is_setup_done) {
-            // Setup when xiaozhi ready
+            // Setup when the vendored audio runtime is ready
             GetHAL().startSntp();
             view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
             view::create_status_bar(0x81DBBD, 0x134233);
@@ -176,9 +176,9 @@ static void _stackchan_update_task(void* param)
     }
 }
 
-void Hal::startXiaozhi()
+void Hal::startHermes()
 {
-    mclog::tagInfo(_tag, "start xiaozhi");
+    mclog::tagInfo(_tag, "start Hermes bridge");
 
     auto& motion = GetStackChan().motion();
     motion.setAutoAngleSyncEnabled(true);
@@ -199,22 +199,22 @@ void Hal::startXiaozhi()
     // Start stackchan update task
     xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
 
-    hal_bridge::start_xiaozhi_app();
+    hal_bridge::start_hermes_app();
 }
 
-XiaozhiConfig_t Hal::getXiaozhiConfig()
+HermesBridgeConfig_t Hal::getHermesBridgeConfig()
 {
-    auto bridge_config = hal_bridge::get_xiaozhi_config();
-    return XiaozhiConfig_t{
+    auto bridge_config = hal_bridge::get_hermes_config();
+    return HermesBridgeConfig_t{
         .idleShutdownTimeSeconds   = bridge_config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = bridge_config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = bridge_config.idleRandomMovementLevel,
     };
 }
 
-void Hal::setXiaozhiConfig(XiaozhiConfig_t config)
+void Hal::setHermesBridgeConfig(HermesBridgeConfig_t config)
 {
-    hal_bridge::set_xiaozhi_config({
+    hal_bridge::set_hermes_config({
         .idleShutdownTimeSeconds   = config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = config.idleRandomMovementLevel,

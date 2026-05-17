@@ -40,10 +40,3 @@ type UpdateDeviceReq struct {
 }
 
 type UpdateDeviceRes bool
-
-type AgentRestoreDefaultReq struct {
-	g.Meta `path:"/device/agent/restore" method:"post" tags:"Device" summary:"Restore Agent to default template settings"`
-	Mac    string `json:"mac" v:"required" dc:"Device MAC address"`
-}
-
-type AgentRestoreDefaultRes bool

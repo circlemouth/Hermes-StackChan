@@ -27,24 +27,6 @@ enum class HeadPetGesture { None, Press, Release, SwipeForward, SwipeBackward };
  * @brief
  *
  */
-enum class WsSignalSource {
-    Local = 0,
-    Remote,
-};
-
-/**
- * @brief
- *
- */
-struct WsTextMessage_t {
-    std::string name;
-    std::string content;
-};
-
-/**
- * @brief
- *
- */
 enum class ImuMotionEvent {
     None = 0,
     Shake,
@@ -68,33 +50,6 @@ enum class AppConfigEvent {
  * @brief
  *
  */
-enum class CommonLogLevel {
-    Info = 0,
-    Warning,
-    Error,
-};
-
-/**
- * @brief
- *
- */
-namespace app_center {
-
-struct AppInfo_t {
-    std::string name;
-    std::string iconUrl;
-    std::string description;
-    std::string firmwareUrl;
-};
-
-using AppInfoList_t = std::vector<AppInfo_t>;
-
-};  // namespace app_center
-
-/**
- * @brief
- *
- */
 enum class WifiStatus {
     None = 0,
     Low,
@@ -106,16 +61,7 @@ enum class WifiStatus {
  * @brief
  *
  */
-struct UserAccountInfo_t {
-    std::string username;
-    std::string deviceName;
-};
-
-/**
- * @brief
- *
- */
-struct XiaozhiConfig_t {
+struct HermesBridgeConfig_t {
     uint32_t idleShutdownTimeSeconds = 600;
     bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
@@ -131,16 +77,6 @@ enum class MicTestStatus {
     Playing,
     Done,
     Failed,
-};
-
-/**
- * @brief SDカードから読み込んだ AI 設定
- */
-struct AiConfig_t {
-    std::string otaUrl;
-    std::string openaiApiKey;
-    std::string openaiBaseUrl;
-    std::string openaiModel;
 };
 
 /**
@@ -212,18 +148,18 @@ public:
     void setBackLightBrightness(uint8_t brightness, bool permanent = false);
     uint8_t getBackLightBrightness();
 
-    /* --------------------------------- Xiaozhi -------------------------------- */
-    void requestXiaozhiStart()
+    /* ----------------------------- Hermes Bridge ----------------------------- */
+    void requestHermesStart()
     {
-        _xiaozhi_start_requested = true;
+        _hermes_start_requested = true;
     }
-    bool isXiaozhiStartRequested()
+    bool isHermesStartRequested()
     {
-        return _xiaozhi_start_requested;
+        return _hermes_start_requested;
     }
-    void startXiaozhi();
-    XiaozhiConfig_t getXiaozhiConfig();
-    void setXiaozhiConfig(XiaozhiConfig_t config);
+    void startHermes();
+    HermesBridgeConfig_t getHermesBridgeConfig();
+    void setHermesBridgeConfig(HermesBridgeConfig_t config);
 
     /* ----------------------------------- BLE ---------------------------------- */
     uitk::Signal<const char*> onBleMotionData;
@@ -248,20 +184,6 @@ public:
 
     /* ---------------------------------- Power --------------------------------- */
     void setServoPowerEnabled(bool enabled);
-
-    /* -------------------------------- Websocket ------------------------------- */
-    uitk::Signal<std::string_view> onWsMotionData;
-    uitk::Signal<std::string_view> onWsAvatarData;
-    uitk::Signal<std::string> onWsCallRequest;
-    uitk::Signal<bool> onWsCallResponse;
-    uitk::Signal<WsSignalSource> onWsCallEnd;
-    uitk::Signal<const WsTextMessage_t&> onWsTextMessage;
-    uitk::Signal<bool> onWsVideoModeChange;
-    uitk::Signal<std::shared_ptr<LvglImage>> onWsVideoFrame;
-    uitk::Signal<std::string_view> onWsDanceData;
-    uitk::Signal<CommonLogLevel, std::string_view> onWsLog;
-
-    void startWebSocketAvatarService(std::function<void(std::string_view)> onStartLog);
 
     /* ----------------------------------- IMU ---------------------------------- */
     uitk::Signal<ImuMotionEvent> onImuMotionEvent;
@@ -288,25 +210,8 @@ public:
     WifiStatus getWifiStatus();
     void startSntp();
 
-    /* -------------------------------- App center ------------------------------- */
-    app_center::AppInfoList_t fetchAppList();
-    void launchApp(std::string_view url, std::function<void(int)> onProgress);
-
-    /* --------------------------------- EzData --------------------------------- */
-    void startEzDataService(std::function<void(std::string_view)> onStartLog);
-    uitk::Signal<std::string_view> onEzdataPairCode;
-
-    /* ------------------------------- User Acount ------------------------------ */
-    UserAccountInfo_t getUserAccountInfo();
-    bool updateAccountInfo(std::function<void(std::string_view)> onLog);
-    bool unbindAccount(std::function<void(std::string_view)> onLog);
-
-    /* ----------------------------------- OTA ---------------------------------- */
-    bool updateFirmware(std::function<void(std::string_view)> onLog);
-
     /* ------------------------------ SD Config --------------------------------- */
     sd_config::LoadResult loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
-    AiConfig_t getAiConfig();
 
     /* ---------------------------------- Audio --------------------------------- */
     void setSpeakerVolume(uint8_t volume, bool permanent = false);
@@ -316,11 +221,11 @@ public:
     void clearupMicTest();
 
 private:
-    bool _xiaozhi_start_requested = false;
+    bool _hermes_start_requested = false;
 
-    void xiaozhi_board_init();
+    void hermes_board_init();
     void lvgl_init();
-    void xiaozhi_mcp_init();
+    void robot_mcp_init();
     void ble_init(bool useAltUuid);
     void servo_init();
     void head_touch_init();

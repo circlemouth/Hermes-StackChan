@@ -10,6 +10,8 @@
 #include <ArduinoJson.hpp>
 #include <mooncake_log.h>
 #include <hal/hal.h>
+#include <assets/assets.h>
+#include <settings.h>
 #include <memory>
 
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -20,7 +22,7 @@ static std::string _tag = "Setup-Connectivity";
 
 WifiSetupWorker::WifiSetupWorker()
 {
-    _state       = State::AppDownload;
+    _state       = State::HermesSetup;
     _last_state  = State::None;
     _is_first_in = true;
 
@@ -45,14 +47,24 @@ void WifiSetupWorker::update()
     update_state();
 }
 
+static std::string get_websocket_url()
+{
+    Settings ws_settings("websocket", false);
+    std::string url = ws_settings.GetString("url_override", "");
+    if (url.empty()) {
+        url = ws_settings.GetString("url", "");
+    }
+    return url;
+}
+
 void WifiSetupWorker::update_state()
 {
     switch (_state) {
-        case State::AppDownload: {
+        case State::HermesSetup: {
             if (_is_first_in) {
                 _is_first_in = false;
 
-                auto& data = _state_app_download_data;
+                auto& data = _state_hermes_setup_data;
 
                 data.panel = std::make_unique<Container>(lv_screen_active());
                 data.panel->setBgColor(lv_color_hex(0xEDF4FF));
@@ -64,52 +76,38 @@ void WifiSetupWorker::update_state()
                 data.title = std::make_unique<Label>(lv_screen_active());
                 data.title->setTextFont(&lv_font_montserrat_20);
                 data.title->setTextColor(lv_color_hex(0x7E7B9C));
-                data.title->align(LV_ALIGN_TOP_MID, 0, 0);
-                data.title->setText("APP SETUP");
+                data.title->align(LV_ALIGN_TOP_MID, 0, 10);
+                data.title->setText("HERMES SETUP");
+
+                data.logo_img = assets::get_image("icon_hermes.png");
+                data.logo     = std::make_unique<Image>(lv_screen_active());
+                data.logo->setSrc(&data.logo_img);
+                data.logo->align(LV_ALIGN_TOP_MID, 0, 39);
+
+                data.device_id = std::make_unique<Label>(lv_screen_active());
+                data.device_id->setTextFont(&lv_font_montserrat_14);
+                data.device_id->setTextColor(lv_color_hex(0x26206A));
+                data.device_id->align(LV_ALIGN_TOP_MID, 0, 96);
+                data.device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
+                data.device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
 
                 data.info = std::make_unique<Label>(lv_screen_active());
                 data.info->setTextFont(&lv_font_montserrat_14);
                 data.info->setTextColor(lv_color_hex(0x26206A));
-                data.info->align(LV_ALIGN_TOP_MID, 0, 27);
+                data.info->align(LV_ALIGN_TOP_MID, 0, 122);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
-                data.info->setText("Install \"StackChan World\" app\nand login to your M5Stack account");
-
-                std::string qrcode_text = "https://apps.apple.com/us/app/stackchan-world/id6756086326";
-                data.qrcode_ios         = std::make_unique<Qrcode>(lv_screen_active());
-                data.qrcode_ios->setSize(80);
-                data.qrcode_ios->setDarkColor(lv_color_hex(0x221C5B));
-                data.qrcode_ios->setLightColor(lv_color_hex(0xEDF4FF));
-                data.qrcode_ios->update(qrcode_text);
-                data.qrcode_ios->align(LV_ALIGN_CENTER, -65, -12);
-
-                qrcode_text         = "https://play.google.com/store/apps/details?id=com.m5stack.stackchan";
-                data.qrcode_android = std::make_unique<Qrcode>(lv_screen_active());
-                data.qrcode_android->setSize(80);
-                data.qrcode_android->setDarkColor(lv_color_hex(0x221C5B));
-                data.qrcode_android->setLightColor(lv_color_hex(0xEDF4FF));
-                data.qrcode_android->update(qrcode_text);
-                data.qrcode_android->align(LV_ALIGN_CENTER, 65, -12);
-
-                data.label_ios = std::make_unique<Label>(lv_screen_active());
-                data.label_ios->setTextFont(&lv_font_montserrat_14);
-                data.label_ios->setTextColor(lv_color_hex(0x26206A));
-                data.label_ios->align(LV_ALIGN_CENTER, -65, 47);
-                data.label_ios->setText("App Store\n(iOS)");
-                data.label_ios->setTextAlign(LV_TEXT_ALIGN_CENTER);
-
-                data.label_android = std::make_unique<Label>(lv_screen_active());
-                data.label_android->setTextFont(&lv_font_montserrat_14);
-                data.label_android->setTextColor(lv_color_hex(0x26206A));
-                data.label_android->align(LV_ALIGN_CENTER, 65, 47);
-                data.label_android->setText("Play Store\n(Android)");
-                data.label_android->setTextAlign(LV_TEXT_ALIGN_CENTER);
+                if (get_websocket_url().empty()) {
+                    data.info->setText("Bridge URL missing\nSet websocket_url on SD card.");
+                } else {
+                    data.info->setText("Connect Wi-Fi, then use\nHermes bridge.");
+                }
 
                 data.btn_next = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_next);
                 data.btn_next->align(LV_ALIGN_CENTER, 72, 91);
                 data.btn_next->setSize(112, 42);
                 data.btn_next->label().setText("Next");
-                data.btn_next->onClick().connect([this]() { _state_app_download_data.next_clicked = true; });
+                data.btn_next->onClick().connect([this]() { _state_hermes_setup_data.next_clicked = true; });
 
                 data.btn_quit = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_quit);
@@ -118,15 +116,15 @@ void WifiSetupWorker::update_state()
                 data.btn_quit->setBgColor(lv_color_hex(0xD4D9E0));
                 data.btn_quit->label().setText("Back");
                 data.btn_quit->label().setTextColor(lv_color_hex(0x525064));
-                data.btn_quit->onClick().connect([this]() { _state_app_download_data.quit_clicked = true; });
+                data.btn_quit->onClick().connect([this]() { _state_hermes_setup_data.quit_clicked = true; });
             }
 
-            if (_state_app_download_data.quit_clicked) {
+            if (_state_hermes_setup_data.quit_clicked) {
                 _is_done = true;
             }
 
-            if (_state_app_download_data.next_clicked) {
-                switch_state(State::WaitAppConnection);
+            if (_state_hermes_setup_data.next_clicked) {
+                switch_state(State::WaitBleProvisioning);
             }
 
             // Check events
@@ -139,7 +137,7 @@ void WifiSetupWorker::update_state()
 
             break;
         }
-        case State::WaitAppConnection: {
+        case State::WaitBleProvisioning: {
             if (_is_first_in) {
                 _is_first_in = false;
 
@@ -149,7 +147,7 @@ void WifiSetupWorker::update_state()
 
                 GetHAL().startAppConfigServer();
 
-                auto& data = _state_wait_app_connection_data;
+                auto& data = _state_wait_ble_provisioning_data;
 
                 data.panel = std::make_unique<Container>(lv_screen_active());
                 data.panel->setBgColor(lv_color_hex(0xEDF4FF));
@@ -158,23 +156,30 @@ void WifiSetupWorker::update_state()
                 data.panel->setSize(320, 240);
                 data.panel->setRadius(0);
 
+                data.title = std::make_unique<Label>(lv_screen_active());
+                data.title->setTextFont(&lv_font_montserrat_20);
+                data.title->setTextColor(lv_color_hex(0x7E7B9C));
+                data.title->align(LV_ALIGN_TOP_MID, 0, 18);
+                data.title->setText("BLE PROVISIONING");
+
                 data.btn_id = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_id);
-                data.btn_id->align(LV_ALIGN_CENTER, 0, -20);
+                data.btn_id->align(LV_ALIGN_CENTER, 0, -15);
                 data.btn_id->setSize(262, 52);
                 data.btn_id->onClick().connect([]() {
                     auto& avatar = GetStackChan().avatar();
                     avatar.clearDecorators();
                     avatar.addDecorator(std::make_unique<avatar::HeartDecorator>(lv_screen_active(), 3000));
                 });
-                data.btn_id->label().setText(fmt::format("ID: {}", GetHAL().getFactoryMacString()));
+                data.btn_id->label().setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()));
+                data.btn_id->label().setTextFont(&lv_font_montserrat_20);
 
                 data.info = std::make_unique<Label>(lv_screen_active());
-                data.info->setTextFont(&lv_font_montserrat_24);
+                data.info->setTextFont(&lv_font_montserrat_16);
                 data.info->setTextColor(lv_color_hex(0x26206A));
-                data.info->align(LV_ALIGN_BOTTOM_MID, 0, -26);
+                data.info->align(LV_ALIGN_BOTTOM_MID, 0, -24);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
-                data.info->setText("Look for me in the app\nto start setup.");
+                data.info->setText("BLE provisioning active\nSend Wi-Fi credentials\nfrom a provisioning client.");
 
                 auto& avatar = GetStackChan().avatar();
                 avatar.clearDecorators();
@@ -210,7 +215,7 @@ void WifiSetupWorker::update_state()
             // Check events
             if (_last_app_config_event != AppConfigEvent::None) {
                 if (_last_app_config_event == AppConfigEvent::AppDisconnected) {
-                    switch_state(State::WaitAppConnection);
+                    switch_state(State::WaitBleProvisioning);
                 } else if (_last_app_config_event == AppConfigEvent::TryWifiConnect) {
                     auto& avatar = GetStackChan().avatar();
                     avatar.setSpeech("Verifying...");
@@ -270,12 +275,12 @@ void WifiSetupWorker::cleanup_ui()
     }
 
     switch (_last_state) {
-        case State::AppDownload: {
-            _state_app_download_data.reset();
+        case State::HermesSetup: {
+            _state_hermes_setup_data.reset();
             break;
         }
-        case State::WaitAppConnection: {
-            _state_wait_app_connection_data.reset();
+        case State::WaitBleProvisioning: {
+            _state_wait_ble_provisioning_data.reset();
             break;
         }
         case State::AppConnected: {

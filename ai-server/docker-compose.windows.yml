@@ -1,54 +1,17 @@
 services:
-  whisper:
-    image: onerahmet/openai-whisper-asr-webservice:latest-gpu
-    ports:
-      - "9000:9000"
-    environment:
-      - ASR_MODEL=small
-      - ASR_ENGINE=faster_whisper
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-
-  voicevox:
-    image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
-    ports:
-      - "50021:50021"
-    restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    restart: unless-stopped
-
   ai-server:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "8765:8765"
+      - "8766:8766"
     env_file: .env
     environment:
-      - VOICEVOX_URL=http://voicevox:50021
-      - STT_BASE_URL=http://whisper:9000
-      # Ollamaをネイティブで動かす場合はhost.docker.internalを使用
-      #- OPENAI_BASE_URL=http://host.docker.internal:11434/v1
-      #- OPENAI_API_KEY=ollama
-      - QDRANT_URL=http://qdrant:6333
-    depends_on:
-      - whisper
-      - voicevox
-      - qdrant
+      - HERMES_ROOT=/hermes-agent
+      - HERMES_PYTHON=python3
+      - STACKCHAN_CONTROL_HOST=0.0.0.0
+    volumes:
+      - ../hermes-agent:/hermes-agent:ro
+      - ~/.hermes:/root/.hermes
     restart: unless-stopped
-
-volumes:
-  qdrant_data:

@@ -11,7 +11,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:get/get.dart';
-import 'package:stack_chan/util/XiaoZhi_util.dart';
 import 'package:stack_chan/util/rsa_util.dart';
 import 'package:stack_chan/view/popup/login_page.dart';
 
@@ -19,7 +18,6 @@ import '../../app_state.dart';
 import '../../model/blue_device_info.dart';
 import '../../model/blue_model.dart';
 import '../../util/blue_util.dart';
-import '../../util/mac_address_validator.dart';
 import '../../util/value_constant.dart';
 import 'device_name_page.dart';
 
@@ -221,18 +219,6 @@ class _SelectBlueDeviceState extends State<SelectBlueDevice> {
   //activatedevice
   Future<void> activateDevice(String macAddress) async {
     try {
-      ///startqueryagentconfiginfo
-      bool isConfiguration = await queryConfiguration(macAddress);
-      if (!isConfiguration) {
-        _resetConnectState();
-        //activatefail(Alreadyhashint,NoRepeat)
-        return;
-      }
-
-      if (mounted) {
-        AppState.shared.showToast("The AI Agent has been configured.");
-      }
-
       //binddevice
       bool result = await AppState.shared.bindDevice(macAddress);
       if (result) {
@@ -254,68 +240,8 @@ class _SelectBlueDeviceState extends State<SelectBlueDevice> {
     } catch (e) {
       _resetConnectState();
             if (mounted) {
-        AppState.shared.showToast("Device activation exception.");
+        AppState.shared.showToast("Device binding exception.");
       }
-    }
-  }
-
-  //querydeviceconfig(StreamProcess / Threaderrorhint)
-  Future<bool> queryConfiguration(String macAddress) async {
-    try {
-      //1. querydevicewhetheractivated (laterNotAgainquery directactivate)
-      // final devices = await XiaoZhiUtil.shared.getDevice(macAddress);
-      // if (devices.isNotEmpty) {
-      //   if (devices.first.agent_id != null) {
-      //debugPrint("✅ deviceactivated");
-      //     return true;
-      //   }
-      // }
-
-      //2. generatelicense
-      final generateLicense = await XiaoZhiUtil.shared.generateLicense(
-        macAddress,
-      );
-      if (generateLicense == null || generateLicense.serialNumber == null) {
-                if (mounted) {
-          AppState.shared.showToast("Failed to generate device license.");
-        }
-        return false;
-      }
-
-      //3. activatedevice
-      final serialNumber = generateLicense.serialNumber!;
-      final mac = MacAddressValidator.formatMac(AppState.shared.deviceMac);
-      if (mac == null) {
-        AppState.shared.showToast("Failed to format device MAC address.");
-        return false;
-      }
-      bool activateResult = await XiaoZhiUtil.shared.agentsDevicesActivate(
-        serialNumber,
-        mac,
-      );
-      if (!activateResult) {
-                if (mounted) {
-          AppState.shared.showToast("Device cloud activation failed.");
-        }
-        return false;
-      }
-
-      ///deviceMayexist Notactivate,Needverify
-      final checkDevice = await XiaoZhiUtil.shared.serialNumberGetDevice(
-        serialNumber,
-      );
-      if (checkDevice == null || checkDevice.agent_id == null) {
-        //activatefail
-        return false;
-      } else {
-        AppState.shared.showToast("Device activation successful");
-                return true;
-      }
-    } catch (e) {
-            if (mounted) {
-        AppState.shared.showToast("Failed to query device configuration.");
-      }
-      return false;
     }
   }
 

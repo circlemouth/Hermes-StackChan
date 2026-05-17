@@ -137,7 +137,7 @@ void AppDance::onClose()
         view::destroy_status_bar();
     }
 
-    GetHAL().requestWarmReboot(5);
+    GetHAL().requestWarmReboot(3);
 }
 
 void AppDance::check_auto_angle_sync_mode()

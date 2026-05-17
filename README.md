@@ -1,86 +1,299 @@
-# StackChan Open-Source
+# StackChan Hermes Edition
 
-<img src="https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/K151_stack_chan_main_pictures_01.webp" width="60%">
+[日本語版はこちら](./README.ja.md)
 
-Here are StackChan related open-source resources, including source code of the StackChan firmware, remote controller firmware, mobile app (iOS and Android), and server. 
+This repository is for using StackChan with HermesAgent as its backend.
 
-Update of this repo could be a little late than the released firmware and mobile app. 
+The M5Stack device handles only the hardware-facing work: microphone input, speaker output, face display, head servos, LEDs, touch, BLE Wi-Fi provisioning, and local autonomous motion. STT, LLM, TTS, memory, skills, and MCP decisions are expected to run on a server terminal. That server terminal runs both HermesAgent and `ai-server`.
 
-## Architecture and API Communication
+## What This Repository Is
 
-<img src="docs/stackchan-architecture.png" alt="StackChan architecture diagram" width="100%">
+- StackChan is the physical interface for HermesAgent.
+- `ai-server` is the bridge between the M5Stack WebSocket/Opus protocol and HermesAgent.
+- HermesAgent owns STT, LLM, TTS, memory, skills, provider configuration, and MCP configuration.
+- StackChan firmware only needs Wi-Fi and a `websocket_url` that points to `ai-server`.
+- Intentional robot actions are exposed to Hermes as MCP tools. Autonomous blinking, idle motion, and speaking motion stay in firmware.
 
-StackChan is organized into five main runtime parts:
+This repository assumes operation through HermesAgent. Cloud-related parts from the original M5Stack repository have been removed.
 
-- `firmware/`: ESP32-S3 firmware for the robot hardware, including display, camera, audio, motors, BLE setup, ESP-NOW control, OTA, EzData MQTT, and XiaoZhi MCP tools.
-- `app/`: Flutter mobile app for iOS and Android. It handles user login, device binding, BLE provisioning, camera/audio/avatar control, and XiaoZhi settings.
-- `server/`: GoFrame backend. It exposes REST APIs, WebSocket relay, JWT/MAC authentication, file hosting, admin routes, and XiaoZhi token/license helpers.
-- `remote/`: ESP-NOW joystick firmware that sends local wireless control packets to the robot.
-- `ai-server/`: Optional local TypeScript voice pipeline that can use OpenAI-compatible chat/STT APIs, Whisper, VoiceVox, and tool calls.
+## System Overview
 
-External communication is handled through these paths:
+```mermaid
+flowchart LR
+    M5["StackChan / M5Stack\nfirmware\nmic, speaker, face, servos, LEDs"]
+    Bridge["ai-server\nWebSocket bridge\nSTT/TTS helper runner\nrobot control HTTP"]
+    Hermes["Hermes Dashboard/TUI\n/api/ws\nseparate StackChan session"]
+    Config["~/.hermes/config.yaml\nproviders, memory, skills, MCP"]
 
-- REST/HTTPS: the Flutter app calls the Go backend under `/stackChan` and `/stackChan/v2`; the app and server also call XiaoZhi APIs such as `https://xiaozhi.me/` and `https://api.xiaozhi.me/`.
-- WebSocket: the app and firmware connect to the backend at `/stackChan/ws`; binary messages use a 1-byte type, 4-byte big-endian payload length, and payload body.
-- Authentication: app/backend traffic uses an RSA-encrypted `Authorization` value derived from the device MAC, plus a JWT `token` header on v2 app routes.
-- BLE, ESP-NOW, and MQTT: the app provisions nearby devices through BLE, the remote controller sends ESP-NOW packets, and the firmware can exchange EzData messages over MQTT.
-- OTA and app downloads: firmware retrieves update and app metadata from configured HTTP endpoints.
-
-## Local AI Server
-
-`ai-server/` can run the main voice conversation loop locally: StackChan sends microphone Opus frames over WebSocket, the server runs STT -> LLM -> TTS, and StackChan receives synthesized Opus frames plus small JSON state events. The mobile app and Go backend are not required for this local voice path.
-
-Example local services:
-
-- LLM: Ollama, LM Studio, llama.cpp, or vLLM through an OpenAI-compatible `/v1` endpoint.
-- STT: a local Whisper ASR service such as `onerahmet/openai-whisper-asr-webservice`.
-- TTS: VOICEVOX Engine.
-
-Example `ai-server/.env`:
-
-```env
-OPENAI_API_KEY=local
-OPENAI_MODEL=qwen2.5:7b
-OPENAI_BASE_URL=http://localhost:11434/v1
-STT_BASE_URL=http://localhost:9000
-VOICEVOX_URL=http://localhost:50021
-VOICEVOX_SPEAKER=1
-PORT=8765
+    M5 -- "Opus audio + JSON\nws://server-ip:8765/ws" --> Bridge
+    Bridge -- "session.create\nprompt.submit\nmessage.complete" --> Hermes
+    Hermes --> Config
+    Bridge -- "Hermes TTS audio\nOpus stream" --> M5
 ```
 
-Example StackChan SD card config at `/sdcard/config.json`:
+Robot-control tools use a second local path on the server terminal:
+
+```mermaid
+flowchart LR
+    Hermes["Hermes StackChan session"]
+    MCP["stackchan_robot MCP server\nstdio"]
+    Control["ai-server control HTTP\nhttp://127.0.0.1:8766"]
+    Firmware["StackChan firmware\nfirmware-side robot MCP payload"]
+    Body["Head servos / LEDs"]
+
+    Hermes -- "tool call" --> MCP
+    MCP -- "HTTP request" --> Control
+    Control -- "existing firmware MCP payload" --> Firmware
+    Firmware --> Body
+```
+
+The v1 robot tools are:
+
+- `stackchan_get_head_angles`
+- `stackchan_set_head_angles`
+- `stackchan_set_led_color`
+
+Hermes should call these only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, and speaking-time motion.
+
+## Repository Layout
+
+- `firmware/`: ESP32-S3 firmware for StackChan hardware.
+- `ai-server/`: TypeScript bridge between StackChan and HermesAgent.
+- `hermes-agent/`: HermesAgent checkout used by the local setup.
+- `remote/`: ESP-NOW remote-controller firmware.
+- `app/`: Flutter app. It can still be useful as a BLE Wi-Fi provisioning client, but it is not required for the Hermes voice loop.
+- `server/`: Go backend from the broader product stack. It is not required for the local Hermes voice loop.
+
+## Required Server Terminal
+
+Use a PC or server on the same LAN as StackChan. The M5Stack must be able to reach this machine by LAN IP address.
+
+Required on the server terminal:
+
+- Node.js and npm for `ai-server`
+- Python 3 for HermesAgent helper modules
+- `ffmpeg` for audio conversion when the TTS helper returns non-WAV audio
+- HermesAgent installed or available from this repository
+- Network access from StackChan to `ws://<server-ip>:8765/ws`
+
+Ports used by the default setup:
+
+| Port | Bind address | Purpose |
+| --- | --- | --- |
+| `8765` | server LAN interface | StackChan firmware connects here by WebSocket |
+| `8766` | `127.0.0.1` | local robot control HTTP used by the MCP server |
+| `9119` | `127.0.0.1` | Hermes Dashboard/TUI `/api/ws` |
+
+## Quick Start
+
+### 1. Start Hermes Dashboard/TUI
+
+Run Hermes on the same server terminal where `ai-server` will run:
+
+```bash
+hermes dashboard --tui --host 127.0.0.1 --port 9119
+```
+
+Hermes must expose Dashboard `/api/ws`. `ai-server` connects to this endpoint, creates a separate StackChan session, and does not reuse or interrupt the Dashboard's active chat session.
+
+### 2. Configure `ai-server`
+
+Create `ai-server/.env`:
+
+```env
+PORT=8765
+STACKCHAN_CONTROL_PORT=8766
+STACKCHAN_CONTROL_HOST=127.0.0.1
+
+HERMES_CONNECT_MODE=dashboard_ws
+HERMES_DASHBOARD_URL=http://127.0.0.1:9119
+HERMES_ROOT=../hermes-agent
+HERMES_PYTHON=python3
+```
+
+`HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
+
+Build and run:
+
+```bash
+cd ai-server
+npm install
+npm run build
+npm start
+```
+
+The bridge listens for StackChan at:
+
+```text
+ws://<server-ip>:8765/ws
+```
+
+Reference setting string: `websocket_url: ws://<server-ip>:8765/ws`
+
+### 3. Configure Hermes MCP Robot Tools
+
+Add the StackChan robot MCP server to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  stackchan_robot:
+    command: node
+    args:
+      - /absolute/path/to/StackChan/ai-server/dist/stackchan_mcp_server.js
+    env:
+      STACKCHAN_CONTROL_URL: http://127.0.0.1:8766
+```
+
+Restart Hermes after changing the config. The MCP server talks only to the local `ai-server` control HTTP endpoint. If StackChan is not connected, the tool result reports a clear device-not-connected error instead of crashing the Hermes conversation.
+
+### 4. Configure the StackChan SD Card
+
+Create `/sdcard/config.json` on the StackChan SD card:
 
 ```json
 {
-  "websocket_url": "ws://192.168.1.10:8765/ws",
-  "websocket_version": 3,
-  "openai_base_url": "http://192.168.1.10:11434/v1",
-  "openai_model": "qwen2.5:7b",
-  "openai_api_key": "local"
+  "websocket_url": "ws://<server-ip>:8765/ws",
+  "websocket_version": 3
 }
 ```
 
-----
+Use the server terminal's LAN IP address.
 
-<img src="https://cdn.shopify.com/s/files/1/0056/7689/2250/files/5a589623895f65487717894d9240f6b8.png" width="60%">
+Only these two keys are used by the Hermes firmware setup.
 
-**StackChan is a super kawaii AI desktop robot co-created by M5Stack and the user community.** It uses the M5Stack **flagship IoT development kit [CoreS3](https://docs.m5stack.com/en/core/CoreS3)** as its main controller, powered by an ESP32-S3 SoC featuring a 240 MHz dual-core processor, with 16MB Flash and 8MB PSRAM onboard, and supporting Wi-Fi and BLE. The main unit also integrates a 2.0-inch capacitive touch display with a high-strength glass cover, a 0.3 MP camera, a proximity & ambient light sensor, a 9-axis IMU (accelerometer + gyroscope + magnetometer), a microSD card slot, a 1W speaker, dual microphones, and power/reset buttons. 
+### 5. Boot StackChan
 
-The **robot body**, connected to the main unit, includes a USB-C interface for power and data, a 550 mAh battery, two feedback servos (360-degree continuous rotation on the horizontal axis and 90-degree movement on the vertical axis), two rows totaling 12 RGB LEDs, infrared transmitter and receiver, a three-zone touch panel, and a full-featured NFC module. 
+On first boot, the firmware shows `HERMES SETUP`.
 
-The **factory firmware** is feature-rich, including an AI Agent, lively and expressive animations, ESP-NOW wireless remote control, and online app downloads. It can connect to a mobile app for video viewing, remote avatar control, and more, and also supports online updates (OTA). The product also supports programming via Arduino, UiFlow2, and other methods, and can connect to various expansion units in the M5Stack ecosystem, making it easy to implement a wide range of custom functions. 
+Expected setup states:
 
-> ⚠️ Do not forcibly rotate any movable parts connected to the motors by hand when you are unsure whether the motors are powered and under control, as this may cause hardware damage. 
+- `Bridge URL missing`: `websocket_url` was not imported from SD/NVS.
+- `Wi-Fi not connected`: Wi-Fi provisioning is still needed.
+- `Connecting to Hermes bridge`: firmware is starting the local WebSocket runtime.
+- `Hermes bridge ready`: StackChan is connected through `ai-server`.
+- `Check websocket_url and bridge host`: StackChan could not reach the bridge host.
 
-- Purchase link: [M5Stack Official Store](https://shop.m5stack.com/products/stackchan-kawaii-co-created-open-source-ai-desktop-robot) | [淘宝 Taobao](https://item.taobao.com/item.htm?id=1042238294510)
+BLE Wi-Fi provisioning remains available, but it is presented as network setup rather than account binding. The setup screen shows the device ID and waits for Wi-Fi credentials from a provisioning client.
 
-- Product document page: [English](https://docs.m5stack.com/en/StackChan) | [日本語](https://docs.m5stack.com/ja/StackChan) | [中文](https://docs.m5stack.com/zh_CN/StackChan)
+## Runtime Behavior
 
-- Board support package: https://github.com/m5stack/StackChan-BSP
+Audio flow:
 
-Thank you to the contributors of the StackChan community, especially: 
+1. StackChan streams microphone Opus frames to `ai-server`.
+2. `ai-server` decodes the audio and calls Hermes STT through Python helper modules.
+3. `ai-server` submits the transcript to Hermes Dashboard `/api/ws` using a dedicated StackChan session.
+4. Hermes returns the final assistant message from that session.
+5. `ai-server` calls Hermes TTS through Python helper modules.
+6. `ai-server` streams synthesized Opus audio back to StackChan.
 
-| ![](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/avatar_stack_chan.jpg) | ![](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1205/avatar_takao.jpg) |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| [@stack_chan](https://x.com/stack_chan)                                          | [@mongonta555](https://x.com/mongonta555)                                   |
-| Shinya Ishikawa                                                                  | Takao Akaki                                                                 |
+Interrupt behavior:
+
+- StackChan `abort` stops local playback streaming.
+- `ai-server` sends `session.interrupt` only for the StackChan Hermes session.
+- Existing Dashboard/TUI sessions for other work are not interrupted.
+
+Movement behavior:
+
+- Hermes can intentionally move the head or set LEDs through MCP tools.
+- Firmware continues autonomous blinking, idle motion, and speaking motion.
+- This mixed-control model keeps robot behavior natural without requiring Hermes to micromanage every frame.
+
+## Firmware Setup
+
+The Hermes firmware in this repository keeps only the necessary firmware features and removes cloud-first screens.
+
+Launcher apps:
+
+- `HERMES`
+- `DANCE`
+- `ESPNOW.REMOTE`
+- `SETUP`
+
+Setup keeps:
+
+- Version display
+- Wi-Fi and BLE provisioning
+- Device information
+- Hermes bridge settings
+- Hardware test
+
+Build and flash from `firmware/` with ESP-IDF:
+
+```bash
+cd firmware
+idf.py build
+idf.py -p /dev/cu.usbmodemXXXX flash monitor
+```
+
+Use the serial port that matches your connected M5Stack.
+
+## Troubleshooting
+
+### Dashboard token or `/api/ws` error
+
+Start Hermes with Dashboard/TUI enabled:
+
+```bash
+hermes dashboard --tui --host 127.0.0.1 --port 9119
+```
+
+If the Dashboard HTML does not expose a session token, set `HERMES_DASHBOARD_TOKEN` in `ai-server/.env` only if your Hermes setup provides a known token.
+
+### StackChan cannot connect
+
+Check these points:
+
+- `ai-server` is running.
+- The M5Stack and server terminal are on the same LAN.
+- The SD config uses the server terminal's LAN IP address.
+- Firewall rules allow inbound TCP port `8765`.
+- The URL ends with `/ws`.
+
+### Hermes replies but the robot tools fail
+
+Check these points:
+
+- `ai-server` control server is listening on `127.0.0.1:8766`.
+- Hermes config uses `STACKCHAN_CONTROL_URL=http://127.0.0.1:8766`.
+- `npm run build` was run after changing `ai-server`.
+- StackChan is connected to `ai-server`.
+
+### STT/TTS helper failure
+
+Check these points:
+
+- `HERMES_ROOT` points to the HermesAgent tree.
+- `HERMES_PYTHON` points to the Python interpreter that can import Hermes tool modules.
+- `ffmpeg` is installed and available on `PATH`.
+- Hermes provider and audio tool configuration are valid in `~/.hermes/config.yaml`.
+
+## Development Checks
+
+Recommended checks after changes:
+
+```bash
+cd ai-server
+npm run build
+npm test
+```
+
+```bash
+cd firmware
+idf.py build
+```
+
+README consistency checks:
+
+```bash
+rg "HERMES_CONNECT_MODE=dashboard_ws|HERMES_DASHBOARD_URL=http://127.0.0.1:9119|STACKCHAN_CONTROL_URL=http://127.0.0.1:8766|websocket_url: ws://<server-ip>:8765/ws" README.md README.ja.md
+```
+
+## Hardware Safety
+
+Do not forcibly rotate motorized parts by hand when you are unsure whether the motors are powered or under control. Doing so can damage the hardware.
+
+Product documentation for the base hardware:
+
+- [English](https://docs.m5stack.com/en/StackChan)
+- [日本語](https://docs.m5stack.com/ja/StackChan)
+- [中文](https://docs.m5stack.com/zh_CN/StackChan)
