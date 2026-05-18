@@ -530,7 +530,7 @@ public:
         charging                     = pmic_->IsCharging();
         discharging                  = pmic_->IsDischarging();
         if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
+            UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), discharging);
             last_discharging = discharging;
         }
 

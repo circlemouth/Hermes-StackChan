@@ -151,28 +151,32 @@ static void _stackchan_update_task(void* param)
 
         tools::update_reminders();
 
-        LvglLockGuard lock;
-
         if (!hal_bridge::is_hermes_idle()) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
-        GetStackChan().update();
+        {
+            LvglLockGuard lock;
 
-        if (!hal_bridge::is_hermes_ready()) {
-            continue;
+            if (GetStackChan().hasAvatar()) {
+                GetStackChan().update();
+            }
+
+            if (!hal_bridge::is_hermes_ready()) {
+                continue;
+            }
+
+            if (!is_setup_done) {
+                // Setup when the vendored audio runtime is ready
+                GetHAL().startSntp();
+                view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
+                view::create_status_bar(0x81DBBD, 0x134233);
+                is_setup_done = true;
+            }
+
+            view::update_home_indicator();
+            view::update_status_bar();
         }
-
-        if (!is_setup_done) {
-            // Setup when the vendored audio runtime is ready
-            GetHAL().startSntp();
-            view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
-            view::create_status_bar(0x81DBBD, 0x134233);
-            is_setup_done = true;
-        }
-
-        view::update_home_indicator();
-        view::update_status_bar();
     }
 }
 

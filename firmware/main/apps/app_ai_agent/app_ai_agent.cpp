@@ -53,37 +53,41 @@ void AppAiAgent::onOpen()
         status_text = "Wi-Fi not connected";
     }
 
-    _panel = std::make_unique<Container>(lv_screen_active());
-    _panel->setBgColor(lv_color_hex(0xEDF4FF));
-    _panel->align(LV_ALIGN_CENTER, 0, 0);
-    _panel->setBorderWidth(0);
-    _panel->setSize(320, 240);
-    _panel->setRadius(0);
+    {
+        LvglLockGuard lock;
 
-    _logo_img = assets::get_image("icon_hermes.png");
-    _logo     = std::make_unique<Image>(lv_screen_active());
-    _logo->setSrc(&_logo_img);
-    _logo->align(LV_ALIGN_TOP_MID, 0, 35);
+        _panel = std::make_unique<Container>(lv_screen_active());
+        _panel->setBgColor(lv_color_hex(0xEDF4FF));
+        _panel->align(LV_ALIGN_CENTER, 0, 0);
+        _panel->setBorderWidth(0);
+        _panel->setSize(320, 240);
+        _panel->setRadius(0);
 
-    _title = std::make_unique<Label>(lv_screen_active());
-    _title->setTextFont(&lv_font_montserrat_20);
-    _title->setTextColor(lv_color_hex(0x7E7B9C));
-    _title->align(LV_ALIGN_TOP_MID, 0, 11);
-    _title->setText("HERMES");
+        _logo_img = assets::get_image("icon_hermes.png");
+        _logo     = std::make_unique<Image>(lv_screen_active());
+        _logo->setSrc(&_logo_img);
+        _logo->align(LV_ALIGN_TOP_MID, 0, 35);
 
-    _status = std::make_unique<Label>(lv_screen_active());
-    _status->setTextFont(&lv_font_montserrat_20);
-    _status->setTextColor(lv_color_hex(0x26206A));
-    _status->align(LV_ALIGN_TOP_MID, 0, 105);
-    _status->setTextAlign(LV_TEXT_ALIGN_CENTER);
-    _status->setText(status_text);
+        _title = std::make_unique<Label>(lv_screen_active());
+        _title->setTextFont(&lv_font_montserrat_20);
+        _title->setTextColor(lv_color_hex(0x7E7B9C));
+        _title->align(LV_ALIGN_TOP_MID, 0, 11);
+        _title->setText("HERMES");
 
-    _device_id = std::make_unique<Label>(lv_screen_active());
-    _device_id->setTextFont(&lv_font_montserrat_14);
-    _device_id->setTextColor(lv_color_hex(0x525064));
-    _device_id->align(LV_ALIGN_TOP_MID, 0, 145);
-    _device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
-    _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
+        _status = std::make_unique<Label>(lv_screen_active());
+        _status->setTextFont(&lv_font_montserrat_20);
+        _status->setTextColor(lv_color_hex(0x26206A));
+        _status->align(LV_ALIGN_TOP_MID, 0, 105);
+        _status->setTextAlign(LV_TEXT_ALIGN_CENTER);
+        _status->setText(status_text);
+
+        _device_id = std::make_unique<Label>(lv_screen_active());
+        _device_id->setTextFont(&lv_font_montserrat_14);
+        _device_id->setTextColor(lv_color_hex(0x525064));
+        _device_id->align(LV_ALIGN_TOP_MID, 0, 145);
+        _device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
+        _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
+    }
 
     // Request to start Hermes bridge service
     // Mooncake apps are stopped before the Hermes bridge runtime starts.
@@ -100,6 +104,7 @@ void AppAiAgent::onRunning()
 void AppAiAgent::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
+    LvglLockGuard lock;
     _device_id.reset();
     _status.reset();
     _title.reset();
