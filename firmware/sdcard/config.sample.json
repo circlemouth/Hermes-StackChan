@@ -1,0 +1,4 @@
+{
+  "websocket_url": "ws://192.168.1.100:8765/ws",
+  "websocket_version": 3
+}

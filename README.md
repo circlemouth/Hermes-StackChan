@@ -149,6 +149,7 @@ Restart Hermes after changing the config. The MCP server talks only to the local
 ### 4. Configure the StackChan SD Card
 
 Create `/sdcard/config.json` on the StackChan SD card:
+An example is available at `firmware/sdcard/config.sample.json`.
 
 ```json
 {

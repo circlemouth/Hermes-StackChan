@@ -150,6 +150,7 @@ mcp_servers:
 ### 4. StackChan の SD card を設定する
 
 StackChan の SD card に `/sdcard/config.json` を作成します。
+サンプルは `firmware/sdcard/config.sample.json` にあります。
 
 ```json
 {
