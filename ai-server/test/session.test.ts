@@ -97,3 +97,59 @@ test('Session forwards abort to Hermes interrupt and stops local capture state',
 
     session.close()
 })
+
+test('Session displays Hermes image media and strips image tags before TTS', async () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => '画像を見せて',
+        hermes: {
+            submitPrompt: async () => 'MEDIA:https://example.com/result.png\nこちらです',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            assert.equal(text, 'こちらです')
+            return Buffer.from('fake wav')
+        },
+        encodeWavToOpusFrames: () => [Buffer.from([3])],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) {
+        session.handleMessage(Buffer.from([i]))
+    }
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'mcp'))
+    const firstMcpMessage = jsonMessages(ws).find((msg) => msg['type'] === 'mcp')
+    assert.ok(firstMcpMessage)
+    session.handleMessage(JSON.stringify({
+        type: 'mcp',
+        payload: {
+            id: (firstMcpMessage['payload'] as Record<string, unknown>)['id'],
+            result: true,
+        },
+    }))
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    const messages = jsonMessages(ws)
+    const mcpMessage = messages.find((msg) => msg['type'] === 'mcp')
+    assert.ok(mcpMessage)
+    assert.deepEqual(
+        ((mcpMessage['payload'] as Record<string, unknown>)['params'] as Record<string, unknown>),
+        {
+            name: 'self.screen.preview_image_url',
+            arguments: {
+                url: 'https://example.com/result.png',
+                duration_seconds: 6,
+            },
+        },
+    )
+    assert.ok(messages.some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === 'こちらです'))
+
+    session.close()
+})

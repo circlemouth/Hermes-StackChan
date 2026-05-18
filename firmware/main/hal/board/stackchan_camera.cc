@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <esp_heap_caps.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "esp_imgfx_color_convert.h"
@@ -848,6 +849,35 @@ bool StackChanCamera::Capture()
         auto image = std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
     }
+    return true;
+}
+
+bool StackChanCamera::EncodeFrameToJpeg(std::string& jpeg, int quality)
+{
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+
+    if (frame_.data == nullptr || frame_.len == 0) {
+        ESP_LOGE(TAG, "No captured frame to encode");
+        return false;
+    }
+
+    uint8_t* out_data = nullptr;
+    size_t out_len    = 0;
+    uint16_t w        = frame_.width ? frame_.width : 320;
+    uint16_t h        = frame_.height ? frame_.height : 240;
+    bool ok           = image_to_jpeg(frame_.data, frame_.len, w, h, frame_.format, quality, &out_data, &out_len);
+    if (!ok || out_data == nullptr || out_len == 0) {
+        ESP_LOGE(TAG, "Failed to encode captured frame to JPEG");
+        if (out_data) {
+            free(out_data);
+        }
+        return false;
+    }
+
+    jpeg.assign(reinterpret_cast<const char*>(out_data), out_len);
+    free(out_data);
     return true;
 }
 

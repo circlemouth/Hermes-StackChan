@@ -79,24 +79,28 @@ void WifiSetupWorker::update_state()
                 data.title->align(LV_ALIGN_TOP_MID, 0, 10);
                 data.title->setText("HERMES SETUP");
 
+                const bool is_bridge_configured = !get_websocket_url().empty();
+
                 data.logo_img = assets::get_image("icon_hermes.png");
                 data.logo     = std::make_unique<Image>(lv_screen_active());
                 data.logo->setSrc(&data.logo_img);
-                data.logo->align(LV_ALIGN_TOP_MID, 0, 39);
+                lv_image_set_scale(data.logo->get(), 160);
+                data.logo->align(LV_ALIGN_TOP_MID, 0, 22);
 
                 data.device_id = std::make_unique<Label>(lv_screen_active());
                 data.device_id->setTextFont(&lv_font_montserrat_14);
                 data.device_id->setTextColor(lv_color_hex(0x26206A));
-                data.device_id->align(LV_ALIGN_TOP_MID, 0, 96);
+                data.device_id->align(LV_ALIGN_TOP_MID, 0, 104);
                 data.device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
                 data.device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
 
                 data.info = std::make_unique<Label>(lv_screen_active());
                 data.info->setTextFont(&lv_font_montserrat_14);
                 data.info->setTextColor(lv_color_hex(0x26206A));
-                data.info->align(LV_ALIGN_TOP_MID, 0, 122);
+                data.info->setWidth(292);
+                data.info->align(LV_ALIGN_TOP_MID, 0, 130);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
-                if (get_websocket_url().empty()) {
+                if (!is_bridge_configured) {
                     data.info->setText("Bridge URL missing\nSet websocket_url on SD card.");
                 } else {
                     data.info->setText("Connect Wi-Fi, then use\nHermes bridge.");
@@ -107,7 +111,16 @@ void WifiSetupWorker::update_state()
                 data.btn_next->align(LV_ALIGN_CENTER, 72, 91);
                 data.btn_next->setSize(112, 42);
                 data.btn_next->label().setText("Next");
-                data.btn_next->onClick().connect([this]() { _state_hermes_setup_data.next_clicked = true; });
+                if (!is_bridge_configured) {
+                    data.btn_next->addState(LV_STATE_DISABLED);
+                    data.btn_next->setBgColor(lv_color_hex(0xD4D9E0));
+                    data.btn_next->label().setTextColor(lv_color_hex(0x8A8994));
+                }
+                data.btn_next->onClick().connect([this, is_bridge_configured]() {
+                    if (is_bridge_configured) {
+                        _state_hermes_setup_data.next_clicked = true;
+                    }
+                });
 
                 data.btn_quit = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_quit);
@@ -123,7 +136,7 @@ void WifiSetupWorker::update_state()
                 _is_done = true;
             }
 
-            if (_state_hermes_setup_data.next_clicked) {
+            if (_state_hermes_setup_data.next_clicked && !get_websocket_url().empty()) {
                 switch_state(State::WaitBleProvisioning);
             }
 

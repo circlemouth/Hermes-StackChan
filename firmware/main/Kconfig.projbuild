@@ -1,5 +1,12 @@
 menu "Hermes Runtime"
 
+config OTA_URL
+    string "Default OTA URL"
+    default ""
+    help
+        Optional OTA endpoint used by inherited Xiaozhi firmware code.
+        Hermes firmware leaves this empty to avoid cloud OTA checks by default.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

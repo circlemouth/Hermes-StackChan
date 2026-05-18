@@ -50,6 +50,43 @@ const tools: ToolDefinition[] = [
             additionalProperties: false,
         },
     },
+    {
+        name: 'stackchan_take_photo',
+        description: [
+            'Capture one still photo from StackChan camera and return it as an MCP image content block.',
+            'Use this when the user asks you to look, see, inspect, identify something, read visible text, or asks "what is this?".',
+            'If the MCP client returns a MEDIA: path after this tool result, pass that path to vision_analyze for visual reasoning.',
+            'Do not use this for video streaming or continuous monitoring.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                quality: { type: 'integer', minimum: 1, maximum: 100, default: 80 },
+            },
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_display_image',
+        description: [
+            'Display an image on StackChan screen for a short preview.',
+            'Accepts an HTTP/HTTPS image URL, a local image path, or a MEDIA: path produced by Hermes tools.',
+            'Use this when you generate or receive an image that would be useful for the user to see on the physical StackChan display.',
+            'JPEG and PNG are supported by the firmware preview path.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                source: {
+                    type: 'string',
+                    description: 'HTTP/HTTPS URL, local file path, file:// URL, or image path to display.',
+                },
+                duration_seconds: { type: 'integer', minimum: 1, maximum: 30, default: 6 },
+            },
+            required: ['source'],
+            additionalProperties: false,
+        },
+    },
 ]
 
 function controlUrl(): string {
@@ -83,7 +120,50 @@ async function callBridge(name: string, args: Record<string, unknown>): Promise<
     return body['result']
 }
 
-async function handleRequest(req: JsonRpcRequest): Promise<void> {
+function parseFirmwareImage(value: unknown): Record<string, unknown> | null {
+    const image = typeof value === 'string' ? JSON.parse(value) as unknown : value
+    if (!isRecord(image)) return null
+    if (image['type'] !== 'image') return null
+    if (typeof image['mimeType'] !== 'string' || typeof image['data'] !== 'string') return null
+    return {
+        type: 'image',
+        mimeType: image['mimeType'],
+        data: image['data'],
+    }
+}
+
+export function normalizeBridgeResultToMcpContent(result: unknown): Array<Record<string, unknown>> {
+    if (!isRecord(result) || !Array.isArray(result['content'])) {
+        return [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+    }
+
+    const content: Array<Record<string, unknown>> = []
+    for (const item of result['content']) {
+        if (!isRecord(item) || typeof item['type'] !== 'string') continue
+        if (item['type'] === 'text' && typeof item['text'] === 'string') {
+            content.push({ type: 'text', text: item['text'] })
+            continue
+        }
+        if (item['type'] === 'image') {
+            if (typeof item['mimeType'] === 'string' && typeof item['data'] === 'string') {
+                content.push({ type: 'image', mimeType: item['mimeType'], data: item['data'] })
+                continue
+            }
+            if ('image' in item) {
+                try {
+                    const parsed = parseFirmwareImage(item['image'])
+                    if (parsed) content.push(parsed)
+                } catch {
+                    // Fall through to text fallback below if no usable image block was found.
+                }
+            }
+        }
+    }
+
+    return content.length > 0 ? content : [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+}
+
+export async function handleRequest(req: JsonRpcRequest): Promise<void> {
     if (req.method === 'initialize') {
         respond(req.id, {
             protocolVersion: '2024-11-05',
@@ -108,7 +188,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         try {
             const result = await callBridge(name, args)
             respond(req.id, {
-                content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+                content: normalizeBridgeResultToMcpContent(result),
                 isError: false,
             })
         } catch (error) {
@@ -124,13 +204,19 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
     respondError(req.id, -32601, `Unknown method: ${req.method ?? ''}`)
 }
 
-const rl = createInterface({ input: process.stdin })
-rl.on('line', (line) => {
-    if (!line.trim()) return
-    try {
-        const request = JSON.parse(line) as JsonRpcRequest
-        void handleRequest(request)
-    } catch (error) {
-        respondError(undefined, -32700, error instanceof Error ? error.message : String(error))
-    }
-})
+export function startStdioServer(): void {
+    const rl = createInterface({ input: process.stdin })
+    rl.on('line', (line) => {
+        if (!line.trim()) return
+        try {
+            const request = JSON.parse(line) as JsonRpcRequest
+            void handleRequest(request)
+        } catch (error) {
+            respondError(undefined, -32700, error instanceof Error ? error.message : String(error))
+        }
+    })
+}
+
+if (require.main === module) {
+    startStdioServer()
+}

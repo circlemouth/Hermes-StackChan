@@ -43,6 +43,7 @@ public:
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
+    void SetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms);
     virtual void UpdateStatusBar(bool update_all = false) override;
     virtual void SetupUI() override;
     virtual void SetTheme(Theme* theme) override;

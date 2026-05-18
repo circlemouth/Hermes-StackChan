@@ -17,6 +17,7 @@ type HermesEvent = {
     type?: string
     session_id?: string
     text?: string
+    payload?: unknown
     [key: string]: unknown
 }
 
@@ -66,6 +67,12 @@ function errorFromJsonRpc(error: unknown): Error {
         return new Error(error['message'])
     }
     return new Error(JSON.stringify(error))
+}
+
+function eventText(event: HermesEvent): string | null {
+    if (typeof event.text === 'string') return event.text
+    if (isRecord(event.payload) && typeof event.payload['text'] === 'string') return event.payload['text']
+    return null
 }
 
 function dashboardWebSocketUrl(dashboardUrl: string, token: string): string {
@@ -255,22 +262,22 @@ class RpcHermesClient {
             }
 
             const onEvent: EventListener = (event) => {
-                if (event.type === 'message.delta' && typeof event.text === 'string') {
+                const text = eventText(event)
+                if (event.type === 'message.delta' && text !== null) {
                     if (event.session_id !== sessionId) return
-                    fragments.push(event.text)
+                    fragments.push(text)
                 }
                 if (event.type === 'message.complete') {
                     if (event.session_id !== sessionId) return
                     complete = true
                     cleanup()
-                    const text = typeof event.text === 'string' ? event.text : fragments.join('')
-                    resolve(text)
+                    resolve(text ?? fragments.join(''))
                 }
             }
 
             this.listeners.add(onEvent)
             this.closeListeners.add(onClose)
-            this.request('prompt.submit', { session_id: sessionId, prompt })
+            this.request('prompt.submit', { session_id: sessionId, text: prompt })
                 .then(() => {
                     if (!complete) return
                 })

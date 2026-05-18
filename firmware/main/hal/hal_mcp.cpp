@@ -4,14 +4,101 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <algorithm>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <board.h>
+#include <esp_heap_caps.h>
+#include <jpg/jpeg_to_image.h>
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include "board/stackchan_camera.h"
+#include "board/stackchan_display.h"
 
 using namespace stackchan;
 
 static const std::string_view _tag = "HAL-MCP";
+
+namespace {
+constexpr size_t kMaxPreviewImageBytes = 2 * 1024 * 1024;
+
+bool is_jpeg(const uint8_t* data, size_t len)
+{
+    return len >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff;
+}
+
+bool is_png(const uint8_t* data, size_t len)
+{
+    static constexpr uint8_t kPngMagic[] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    return len >= sizeof(kPngMagic) && std::memcmp(data, kPngMagic, sizeof(kPngMagic)) == 0;
+}
+
+std::unique_ptr<LvglImage> preview_image_from_bytes(const uint8_t* data, size_t len)
+{
+    if (is_jpeg(data, len)) {
+#ifdef CONFIG_IDF_TARGET_ESP32
+        throw std::runtime_error("JPEG preview decode is not available on this target");
+#else
+        uint8_t* out_data = nullptr;
+        size_t out_len    = 0;
+        size_t width      = 0;
+        size_t height     = 0;
+        size_t stride     = 0;
+        esp_err_t ret     = jpeg_to_image(data, len, &out_data, &out_len, &width, &height, &stride);
+        if (ret != ESP_OK || out_data == nullptr) {
+            if (out_data) {
+                heap_caps_free(out_data);
+            }
+            throw std::runtime_error("Failed to decode JPEG image");
+        }
+        return std::make_unique<LvglAllocatedImage>(out_data, out_len, width, height, stride, LV_COLOR_FORMAT_RGB565);
+#endif  // CONFIG_IDF_TARGET_ESP32
+    }
+
+    if (is_png(data, len)) {
+        auto* copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (copy == nullptr) {
+            copy = heap_caps_malloc(len, MALLOC_CAP_8BIT);
+        }
+        if (copy == nullptr) {
+            throw std::runtime_error("Failed to allocate memory for PNG image");
+        }
+        std::memcpy(copy, data, len);
+        return std::make_unique<LvglAllocatedImage>(copy, len);
+    }
+
+    throw std::runtime_error("Unsupported image format; only JPEG and PNG are supported");
+}
+
+std::unique_ptr<LvglImage> download_preview_image(const std::string& url)
+{
+    auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+    if (!http->Open("GET", url)) {
+        throw std::runtime_error("Failed to open URL: " + url);
+    }
+
+    int status_code = http->GetStatusCode();
+    if (status_code != 200) {
+        http->Close();
+        throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
+    }
+
+    std::string body = http->ReadAll();
+    http->Close();
+
+    if (body.empty()) {
+        throw std::runtime_error("Downloaded image is empty");
+    }
+    if (body.size() > kMaxPreviewImageBytes) {
+        throw std::runtime_error("Downloaded image is too large");
+    }
+
+    return preview_image_from_bytes(reinterpret_cast<const uint8_t*>(body.data()), body.size());
+}
+}  // namespace
 
 void Hal::robot_mcp_init()
 {
@@ -91,6 +178,49 @@ void Hal::robot_mcp_init()
 
             return true;
         });
+
+#ifndef CONFIG_IDF_TARGET_ESP32
+    mclog::tagInfo(_tag, "add camera.capture_photo tool");
+    mcp_server.AddTool("self.camera.capture_photo",
+                       "Capture one still photo from StackChan camera and return it as an image/jpeg MCP image block.",
+                       PropertyList({Property("quality", kPropertyTypeInteger, 80, 1, 100)}),
+                       [](const PropertyList& properties) -> ReturnValue {
+                           int quality = properties["quality"].value<int>();
+                           auto* camera =
+                               dynamic_cast<StackChanCamera*>(Board::GetInstance().GetCamera());
+                           if (camera == nullptr) {
+                               throw std::runtime_error("StackChan camera is not available");
+                           }
+                           if (!camera->Capture()) {
+                               throw std::runtime_error("Failed to capture photo");
+                           }
+
+                           std::string jpeg;
+                           if (!camera->EncodeFrameToJpeg(jpeg, quality)) {
+                               throw std::runtime_error("Failed to encode captured photo");
+                           }
+                           return new ImageContent("image/jpeg", jpeg);
+                       });
+#endif  // CONFIG_IDF_TARGET_ESP32
+
+    mclog::tagInfo(_tag, "add screen.preview_image_url tool");
+    mcp_server.AddTool("self.screen.preview_image_url",
+                       "Download a JPEG or PNG image URL and show it full-screen on StackChan for a short preview.",
+                       PropertyList({Property("url", kPropertyTypeString),
+                                     Property("duration_seconds", kPropertyTypeInteger, 6, 1, 30)}),
+                       [](const PropertyList& properties) -> ReturnValue {
+                           auto url             = properties["url"].value<std::string>();
+                           int duration_seconds = properties["duration_seconds"].value<int>();
+                           auto* display =
+                               dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+                           if (display == nullptr) {
+                               throw std::runtime_error("StackChan display is not available");
+                           }
+
+                           auto image = download_preview_image(url);
+                           display->SetPreviewImageForDuration(std::move(image), duration_seconds * 1000);
+                           return true;
+                       });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");
     mcp_server.AddTool("self.robot.create_reminder",

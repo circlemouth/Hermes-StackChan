@@ -72,7 +72,7 @@ async function startDashboardMock(html: string): Promise<DashboardMock> {
                     params: {
                         type: 'message.complete',
                         session_id: 'stackchan-test-session',
-                        text: 'やあ',
+                        payload: { text: 'やあ' },
                     },
                 })
                 return
@@ -135,7 +135,7 @@ test('HermesClient connects to Dashboard /api/ws, creates a separate session, su
     assert.deepEqual(dashboard.requests[0]['params'], {})
     assert.deepEqual(dashboard.requests[1]['params'], {
         session_id: 'stackchan-test-session',
-        prompt: 'こんにちは',
+        text: 'こんにちは',
     })
     assert.deepEqual(dashboard.requests[2]['params'], {
         session_id: 'stackchan-test-session',

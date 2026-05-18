@@ -409,6 +409,11 @@ void StackChanAvatarDisplay::ClearChatMessages()
 
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 {
+    SetPreviewImageForDuration(std::move(image), 6000);
+}
+
+void StackChanAvatarDisplay::SetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms)
+{
     DisplayLockGuard lock(this);
     if (preview_image_ == nullptr) {
         return;
@@ -433,7 +438,7 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
     lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(preview_image_);
     esp_timer_stop(preview_timer_);
-    ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, 6000 * 1000));
+    ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, duration_ms * 1000));
 }
 
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)

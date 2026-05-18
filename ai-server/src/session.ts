@@ -4,6 +4,7 @@ import { decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, 
 import { HermesClient } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
 import { registerDeviceSession } from './device_control.js'
+import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
 
 type State = 'idle' | 'listening' | 'processing'
@@ -227,12 +228,14 @@ export class Session {
         )
         console.log(`[session ${this.sessionId}] LLM: "${reply}"`)
         this.sendJson({ type: 'llm', emotion: 'neutral' })
+        void this.displayFirstImageFromReply(reply)
 
         // 3. Hermes TTS -> Opus -> device
+        const speechText = stripMediaForSpeech(reply) || '画像を表示しました。'
         const wav = await withTiming(
             `session:${this.sessionId}:tts.synthesize`,
-            () => this.synthesizeTextFn(reply),
-            { textLength: reply.length },
+            () => this.synthesizeTextFn(speechText),
+            { textLength: speechText.length },
         )
         const opusFrames = await withTiming(
             `session:${this.sessionId}:tts.encode`,
@@ -241,7 +244,7 @@ export class Session {
         )
 
         this.sendJson({ type: 'tts', state: 'start' })
-        this.sendJson({ type: 'tts', state: 'sentence_start', text: reply })
+        this.sendJson({ type: 'tts', state: 'sentence_start', text: speechText })
         const streamStartMs = nowMs()
         for (const frame of opusFrames) {
             if (this.state !== 'processing') break
@@ -249,12 +252,28 @@ export class Session {
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
         console.log(`[timing] done session:${this.sessionId}:tts.stream elapsed=${elapsedMs(streamStartMs)} frames=${opusFrames.length}`)
-        this.sendJson({ type: 'tts', state: 'sentence_end', text: reply })
+        this.sendJson({ type: 'tts', state: 'sentence_end', text: speechText })
         this.sendJson({ type: 'tts', state: 'stop' })
 
         // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
         this.cooldownUntil = Date.now() + POST_TTS_COOLDOWN_MS
         console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
+    }
+
+    private async displayFirstImageFromReply(reply: string): Promise<void> {
+        const source = extractFirstDisplayImage(reply)
+        if (!source) return
+
+        try {
+            const url = resolveDisplayImageSource(source)
+            if (!url) return
+            await this.callRobotTool('self.screen.preview_image_url', {
+                url,
+                duration_seconds: 6,
+            })
+        } catch (error) {
+            console.error(`[session ${this.sessionId}] display image error:`, error)
+        }
     }
 
     async callRobotTool(name: string, args: Record<string, unknown>): Promise<unknown> {
