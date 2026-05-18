@@ -2,3 +2,7 @@ managed_components
 build
 .vscode
 .cache
+
+# Generated firmware packages
+/StackChan-RemoteControl-ESPNow*_0x0.bin
+/sdkconfig.old
