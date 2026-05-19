@@ -15,6 +15,19 @@ type ToolDefinition = {
 
 const tools: ToolDefinition[] = [
     {
+        name: 'stackchan_get_status',
+        description: [
+            'Get local StackChan status, including battery, charging, Wi-Fi state, volume, brightness, firmware version,',
+            'Hermes autostart, and whether the bridge WebSocket is configured.',
+            'The firmware does not expose the full bridge URL or secrets.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
         name: 'stackchan_get_head_angles',
         description: 'Get the current StackChan head yaw and pitch angles.',
         inputSchema: {
@@ -84,6 +97,20 @@ const tools: ToolDefinition[] = [
                 duration_seconds: { type: 'integer', minimum: 1, maximum: 30, default: 6 },
             },
             required: ['source'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_capture_screen',
+        description: [
+            'Capture the current StackChan screen and return it as an MCP image content block.',
+            'Use this when you need to inspect what is currently visible on the physical device display.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                quality: { type: 'integer', minimum: 1, maximum: 100, default: 80 },
+            },
             additionalProperties: false,
         },
     },

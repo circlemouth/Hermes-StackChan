@@ -5,6 +5,7 @@
  */
 #include "hal.h"
 #include <algorithm>
+#include <cJSON.h>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -13,8 +14,10 @@
 #include <jpg/jpeg_to_image.h>
 #include <mooncake_log.h>
 #include <mcp_server.h>
+#include <settings.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include "sdkconfig.h"
 #include "board/stackchan_camera.h"
 #include "board/stackchan_display.h"
 
@@ -24,6 +27,58 @@ static const std::string_view _tag = "HAL-MCP";
 
 namespace {
 constexpr size_t kMaxPreviewImageBytes = 2 * 1024 * 1024;
+
+const char* wifi_status_to_string(WifiStatus status)
+{
+    switch (status) {
+        case WifiStatus::None:
+            return "none";
+        case WifiStatus::Low:
+            return "low";
+        case WifiStatus::Medium:
+            return "medium";
+        case WifiStatus::High:
+            return "high";
+        default:
+            return "unknown";
+    }
+}
+
+std::string get_websocket_url()
+{
+    Settings ws_settings("websocket", false);
+    std::string websocket_url = ws_settings.GetString("url_override", "");
+    if (websocket_url.empty()) {
+        websocket_url = ws_settings.GetString("url", "");
+    }
+    return websocket_url;
+}
+
+std::string websocket_scheme(std::string_view url)
+{
+    auto scheme_end = url.find("://");
+    if (scheme_end == std::string_view::npos || scheme_end == 0) {
+        return "";
+    }
+    return std::string(url.substr(0, scheme_end));
+}
+
+std::string websocket_host(std::string_view url)
+{
+    auto host_start = url.find("://");
+    if (host_start == std::string_view::npos) {
+        host_start = 0;
+    } else {
+        host_start += 3;
+    }
+
+    auto host_end = url.find_first_of(":/", host_start);
+    if (host_end == std::string_view::npos) {
+        host_end = url.length();
+    }
+
+    return std::string(url.substr(host_start, host_end - host_start));
+}
 
 bool is_jpeg(const uint8_t* data, size_t len)
 {
@@ -107,6 +162,35 @@ void Hal::robot_mcp_init()
     // Firmware-side robot MCP tools used by the Hermes bridge.
     auto& mcp_server = McpServer::GetInstance();
 
+    mclog::tagInfo(_tag, "add robot.get_status tool");
+    mcp_server.AddTool("self.robot.get_status",
+                       "Get local StackChan status without exposing secrets or the full bridge URL.",
+                       std::vector<Property>{}, [this](const PropertyList& properties) -> ReturnValue {
+                           const std::string websocket_url = get_websocket_url();
+                           cJSON* result                   = cJSON_CreateObject();
+
+                           cJSON_AddStringToObject(result, "device_id", GetHAL().getFactoryMacString().c_str());
+                           cJSON_AddStringToObject(result, "firmware_version", common::FirmwareVersion.data());
+                           cJSON_AddNumberToObject(result, "battery_level", GetHAL().getBatteryLevel());
+                           cJSON_AddBoolToObject(result, "charging", GetHAL().isBatteryCharging());
+                           cJSON_AddStringToObject(result, "wifi_status",
+                                                   wifi_status_to_string(GetHAL().getWifiStatus()));
+                           cJSON_AddBoolToObject(result, "wifi_configured", GetHAL().isAppConfiged());
+                           cJSON_AddNumberToObject(result, "speaker_volume", GetHAL().getSpeakerVolume());
+                           cJSON_AddNumberToObject(result, "backlight_brightness", GetHAL().getBackLightBrightness());
+#if CONFIG_HERMES_AUTOSTART
+                           cJSON_AddBoolToObject(result, "hermes_autostart", true);
+#else
+                           cJSON_AddBoolToObject(result, "hermes_autostart", false);
+#endif
+                           cJSON_AddBoolToObject(result, "websocket_configured", !websocket_url.empty());
+                           cJSON_AddStringToObject(result, "websocket_scheme",
+                                                   websocket_scheme(websocket_url).c_str());
+                           cJSON_AddStringToObject(result, "websocket_host", websocket_host(websocket_url).c_str());
+
+                           return result;
+                       });
+
     // System Prompt：
     // You can control the robot's head. Use get_yaw and get_pitch to sense current position. Use set_yaw for horizontal
     // movement and set_pitch for vertical movement. All angles are in degrees.
@@ -186,8 +270,7 @@ void Hal::robot_mcp_init()
                        PropertyList({Property("quality", kPropertyTypeInteger, 80, 1, 100)}),
                        [](const PropertyList& properties) -> ReturnValue {
                            int quality = properties["quality"].value<int>();
-                           auto* camera =
-                               dynamic_cast<StackChanCamera*>(Board::GetInstance().GetCamera());
+                           auto* camera = dynamic_cast<StackChanCamera*>(Board::GetInstance().GetCamera());
                            if (camera == nullptr) {
                                throw std::runtime_error("StackChan camera is not available");
                            }
@@ -211,8 +294,7 @@ void Hal::robot_mcp_init()
                        [](const PropertyList& properties) -> ReturnValue {
                            auto url             = properties["url"].value<std::string>();
                            int duration_seconds = properties["duration_seconds"].value<int>();
-                           auto* display =
-                               dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+                           auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
                            if (display == nullptr) {
                                throw std::runtime_error("StackChan display is not available");
                            }
@@ -220,6 +302,24 @@ void Hal::robot_mcp_init()
                            auto image = download_preview_image(url);
                            display->SetPreviewImageForDuration(std::move(image), duration_seconds * 1000);
                            return true;
+                       });
+
+    mclog::tagInfo(_tag, "add screen.capture_screenshot tool");
+    mcp_server.AddTool("self.screen.capture_screenshot",
+                       "Capture the current StackChan screen and return it as an image/jpeg MCP image block.",
+                       PropertyList({Property("quality", kPropertyTypeInteger, 80, 1, 100)}),
+                       [](const PropertyList& properties) -> ReturnValue {
+                           int quality = properties["quality"].value<int>();
+                           auto* display = dynamic_cast<StackChanAvatarDisplay*>(Board::GetInstance().GetDisplay());
+                           if (display == nullptr) {
+                               throw std::runtime_error("StackChan display is not available");
+                           }
+
+                           std::string jpeg;
+                           if (!display->SnapshotToJpeg(jpeg, quality) || jpeg.empty()) {
+                               throw std::runtime_error("Failed to capture screen");
+                           }
+                           return new ImageContent("image/jpeg", jpeg);
                        });
 
     mclog::tagInfo(_tag, "add robot.create_reminder tool");
