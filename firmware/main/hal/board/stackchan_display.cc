@@ -179,17 +179,16 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     };
     esp_timer_create(&preview_timer_args, &preview_timer_);
 
-    // Create boot logo label if not warm boot
-    if (GetHAL().getWarmRebootTarget() < 0) {
-        ESP_LOGI(TAG, "Create boot logo label");
-        Lock();
-        {
-            uitk::lvgl_cpp::ScreenActive screen;
-            screen.setBgColor(lv_color_hex(0x000000));
-        }
-        GetHAL().bootLogo = std::make_unique<BootLogo>();
-        Unlock();
+    // Always show a boot surface. Warm reboot previously skipped this, which
+    // could leave the display black until the launcher finished rebuilding.
+    ESP_LOGI(TAG, "Create boot logo label");
+    Lock();
+    {
+        uitk::lvgl_cpp::ScreenActive screen;
+        screen.setBgColor(lv_color_hex(0x000000));
     }
+    GetHAL().bootLogo = std::make_unique<BootLogo>();
+    Unlock();
 
     // Robot will be created later in the Hermes runtime UI.
 }
@@ -240,14 +239,21 @@ void StackChanAvatarDisplay::SetupUI()
 
     Display::SetupUI();  // Mark SetupUI as called
 
+    DisplayLockGuard lock(this);
+
     auto& stackchan = GetStackChan();
 
-    if (stackchan.hasAvatar()) {
-        ESP_LOGW(TAG, "Avatar already created");
-        return;
-    }
+    GetHAL().bootLogo.reset();
+    stackchan.resetAvatar();
+    stackchan.clearModifiers();
+    lv_obj_clean(lv_screen_active());
 
-    DisplayLockGuard lock(this);
+    blink_modifier_id_           = -1;
+    speaking_modifier_id_        = -1;
+    idle_motion_modifier_id_     = -1;
+    idle_expression_modifier_id_ = -1;
+    preview_image_               = nullptr;
+    is_sleeping_                 = false;
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 

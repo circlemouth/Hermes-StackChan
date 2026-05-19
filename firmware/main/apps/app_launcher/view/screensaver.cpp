@@ -39,7 +39,7 @@ void Screensaver::onInit()
     _logo = std::make_unique<Container>(_screen->get());
     _logo->setSize(_logo_size.width, _logo_size.height);
     _logo->setBgColor(lv_color_hex(_logo_colors[0]));
-    _logo->align(LV_ALIGN_TOP_LEFT, 2333, 2333);
+    _logo->align(LV_ALIGN_CENTER, 0, 0);
     _logo->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
     _logo->setPadding(0, 0, 0, 0);
     _logo->setBorderWidth(0);

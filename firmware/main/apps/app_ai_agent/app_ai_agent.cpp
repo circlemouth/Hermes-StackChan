@@ -47,7 +47,7 @@ static std::string websocket_scheme(std::string_view url)
 
 static bool hermes_autostart_enabled()
 {
-#ifdef CONFIG_HERMES_AUTOSTART
+#if CONFIG_HERMES_AUTOSTART
     return true;
 #else
     return false;
@@ -125,6 +125,14 @@ void AppAiAgent::onOpen()
              static_cast<unsigned>(websocket_url.length()), scheme.c_str());
     ESP_LOGI(TAG, "Wi-Fi status=%s, wifi_configured=%d", wifi_status_to_string(wifi_status), has_wifi_config);
 
+    if (is_hermes_autostart_enabled && is_hermes_start_ready) {
+        // Mooncake apps are stopped before the Hermes bridge runtime starts, so
+        // avoid creating a temporary LVGL screen that would be torn down at once.
+        ESP_LOGI(TAG, "Hermes start requested");
+        GetHAL().requestHermesStart();
+        return;
+    }
+
     const char* status_text = "Connecting to Hermes bridge";
     if (websocket_url.empty()) {
         status_text = "Bridge URL missing";
@@ -145,27 +153,32 @@ void AppAiAgent::onOpen()
         _panel->setRadius(0);
 
         _logo_img = assets::get_image("icon_hermes.png");
-        _logo     = std::make_unique<Image>(lv_screen_active());
+        _logo     = std::make_unique<Image>(_panel->get());
         _logo->setSrc(&_logo_img);
-        _logo->align(LV_ALIGN_TOP_MID, 0, 35);
+        lv_image_set_scale(_logo->get(), 160);
+        _logo->align(LV_ALIGN_TOP_MID, 0, 32);
 
-        _title = std::make_unique<Label>(lv_screen_active());
+        _title = std::make_unique<Label>(_panel->get());
         _title->setTextFont(&lv_font_montserrat_20);
         _title->setTextColor(lv_color_hex(0x7E7B9C));
         _title->align(LV_ALIGN_TOP_MID, 0, 11);
         _title->setText("HERMES");
 
-        _status = std::make_unique<Label>(lv_screen_active());
-        _status->setTextFont(&lv_font_montserrat_20);
+        _status = std::make_unique<Label>(_panel->get());
+        _status->setTextFont(&lv_font_montserrat_16);
         _status->setTextColor(lv_color_hex(0x26206A));
-        _status->align(LV_ALIGN_TOP_MID, 0, 105);
+        _status->setWidth(292);
+        lv_label_set_long_mode(_status->get(), LV_LABEL_LONG_WRAP);
+        _status->align(LV_ALIGN_TOP_MID, 0, 118);
         _status->setTextAlign(LV_TEXT_ALIGN_CENTER);
         _status->setText(status_text);
 
-        _device_id = std::make_unique<Label>(lv_screen_active());
+        _device_id = std::make_unique<Label>(_panel->get());
         _device_id->setTextFont(&lv_font_montserrat_14);
         _device_id->setTextColor(lv_color_hex(0x525064));
-        _device_id->align(LV_ALIGN_TOP_MID, 0, 145);
+        _device_id->setWidth(292);
+        lv_label_set_long_mode(_device_id->get(), LV_LABEL_LONG_WRAP);
+        _device_id->align(LV_ALIGN_TOP_MID, 0, 156);
         _device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
         _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
     }
@@ -180,11 +193,6 @@ void AppAiAgent::onOpen()
                  has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
         return;
     }
-
-    // Request to start Hermes bridge service.
-    // Mooncake apps are stopped before the Hermes bridge runtime starts.
-    ESP_LOGI(TAG, "Hermes start requested");
-    GetHAL().requestHermesStart();
 }
 
 // Called repeatedly while the App is running

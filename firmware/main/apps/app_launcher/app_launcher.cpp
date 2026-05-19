@@ -9,6 +9,8 @@
 #include <mooncake_log.h>
 #include <stackchan/stackchan.h>
 #include <cstdint>
+#include <string>
+#include "sdkconfig.h"
 
 using namespace mooncake;
 
@@ -56,6 +58,7 @@ void AppLauncher::onLauncherRunning()
         }
     } else {
         _view->update();
+        try_auto_open_hermes();
         screensaver_update();
     }
 
@@ -105,4 +108,25 @@ void AppLauncher::screensaver_update()
         _screensaver_timecount = GetHAL().millis();
         _screensaver->update();
     }
+}
+
+void AppLauncher::try_auto_open_hermes()
+{
+#if CONFIG_HERMES_AUTOSTART
+    if (_hermes_auto_open_attempted || !GetHAL().isAppConfiged()) {
+        return;
+    }
+
+    _hermes_auto_open_attempted = true;
+
+    for (const auto& app : getAppProps()) {
+        if (app.info.name == "AVATAR") {
+            mclog::tagInfo(getAppInfo().name, "auto opening AVATAR app, app id: {}", app.appID);
+            openApp(app.appID);
+            return;
+        }
+    }
+
+    mclog::tagWarn(getAppInfo().name, "AVATAR app not found for startup face");
+#endif
 }
