@@ -2,22 +2,26 @@ import http from 'http'
 import { resolveDisplayImageSource } from './media.js'
 
 export type StackChanToolName =
+    | 'stackchan_get_status'
     | 'stackchan_get_head_angles'
     | 'stackchan_set_head_angles'
     | 'stackchan_set_led_color'
     | 'stackchan_take_photo'
     | 'stackchan_display_image'
+    | 'stackchan_capture_screen'
 
 export type StackChanDeviceSession = {
     callRobotTool(name: string, args: Record<string, unknown>): Promise<unknown>
 }
 
 const TOOL_MAP: Record<StackChanToolName, string> = {
+    stackchan_get_status: 'self.robot.get_status',
     stackchan_get_head_angles: 'self.robot.get_head_angles',
     stackchan_set_head_angles: 'self.robot.set_head_angles',
     stackchan_set_led_color: 'self.robot.set_led_color',
     stackchan_take_photo: 'self.camera.capture_photo',
     stackchan_display_image: 'self.screen.preview_image_url',
+    stackchan_capture_screen: 'self.screen.capture_screenshot',
 }
 
 let activeSession: StackChanDeviceSession | null = null

@@ -49,11 +49,15 @@ flowchart LR
 
 The v1 robot tools are:
 
+- `stackchan_get_status`
 - `stackchan_get_head_angles`
 - `stackchan_set_head_angles`
 - `stackchan_set_led_color`
+- `stackchan_take_photo`
+- `stackchan_display_image`
+- `stackchan_capture_screen`
 
-Hermes should call these only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, and speaking-time motion.
+Hermes should call movement and LED tools only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, and speaking-time motion. Camera, screen capture, and image preview tools are local-only helpers for the StackChan session.
 
 ## Repository Layout
 

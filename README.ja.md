@@ -50,11 +50,15 @@ flowchart LR
 
 v1 のロボット tool は以下です。
 
+- `stackchan_get_status`
 - `stackchan_get_head_angles`
 - `stackchan_set_head_angles`
 - `stackchan_set_led_color`
+- `stackchan_take_photo`
+- `stackchan_display_image`
+- `stackchan_capture_screen`
 
-Hermes は、首振りや LED 変更などの意図的な動作だけをこれらの tool で指示します。自然な瞬き、待機モーション、発話中モーションは ファームウェア が継続して担当します。
+Hermes は、首振りや LED 変更などの意図的な動作だけをこれらの tool で指示します。自然な瞬き、待機モーション、発話中モーションは ファームウェア が継続して担当します。カメラ、画面キャプチャ、画像表示 tool は StackChan セッション用のローカル補助機能です。
 
 ## リポジトリ構成
 
