@@ -134,6 +134,7 @@ void Hal::updateHeapStatusLog()
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
+#include <esp_log.h>
 
 void Hal::hermes_board_init()
 {
@@ -183,6 +184,7 @@ static void _stackchan_update_task(void* param)
 void Hal::startHermes()
 {
     mclog::tagInfo(_tag, "start Hermes bridge");
+    ESP_LOGI(_tag.data(), "Hal::startHermes entered");
 
     auto& motion = GetStackChan().motion();
     motion.setAutoAngleSyncEnabled(true);
@@ -203,7 +205,10 @@ void Hal::startHermes()
     // Start stackchan update task
     xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
 
+    ESP_LOGI(_tag.data(), "Calling hal_bridge::start_hermes_app; this is expected not to return");
     hal_bridge::start_hermes_app();
+
+    ESP_LOGE(_tag.data(), "hal_bridge::start_hermes_app returned unexpectedly");
 }
 
 HermesBridgeConfig_t Hal::getHermesBridgeConfig()

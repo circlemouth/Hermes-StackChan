@@ -160,9 +160,9 @@ An example is available at `firmware/sdcard/config.sample.json`.
 }
 ```
 
-Use the server terminal's LAN IP address.
+Use the server terminal's LAN IP address. `wifi_ssid` and `wifi_password` are optional; when present, `Load SD Config` imports them into NVS and marks network setup complete. Use an empty `wifi_password` for an open network.
 
-`wifi_ssid` and `wifi_password` are optional. When present, `Load SD Config` also saves Wi-Fi credentials to NVS. Use an empty `wifi_password` for an open network.
+The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "...", "password": "..."}`.
 
 ### 5. Boot StackChan
 

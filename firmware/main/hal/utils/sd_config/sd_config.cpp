@@ -6,8 +6,8 @@
 #include "sd_config.h"
 #include <cJSON.h>
 #include <settings.h>
-#include <mooncake_log.h>
 #include <ssid_manager.h>
+#include <mooncake_log.h>
 #include <cstdio>
 #include <cstring>
 
@@ -55,6 +55,7 @@ static bool is_secret_key(const char* key_name)
 {
     return (std::strstr(key_name, "key") != nullptr ||
             std::strstr(key_name, "token") != nullptr ||
+            std::strstr(key_name, "pass") != nullptr ||
             std::strstr(key_name, "password") != nullptr);
 }
 
@@ -67,15 +68,38 @@ static bool is_valid_url_value(const char* key_name, const char* value)
     return std::strncmp(value, "https://", 8) == 0;
 }
 
-static bool is_valid_wifi_ssid(const char* value)
+static std::string url_scheme(std::string_view url)
 {
-    const size_t len = std::strlen(value);
-    return len > 0 && len <= 32;
+    auto scheme_end = url.find("://");
+    if (scheme_end == std::string_view::npos || scheme_end == 0) {
+        return "none";
+    }
+    return std::string(url.substr(0, scheme_end));
 }
 
-static bool is_valid_wifi_password(const char* value)
+static cJSON* get_object_string(cJSON* root, const char* key)
 {
-    return std::strlen(value) <= 64;
+    cJSON* item = cJSON_GetObjectItem(root, key);
+    if (item && cJSON_IsString(item)) {
+        return item;
+    }
+    return nullptr;
+}
+
+static std::string get_wifi_string(cJSON* root, const char* flat_key, const char* nested_key)
+{
+    if (auto* item = get_object_string(root, flat_key)) {
+        return item->valuestring ? item->valuestring : "";
+    }
+
+    cJSON* wifi = cJSON_GetObjectItem(root, "wifi");
+    if (wifi && cJSON_IsObject(wifi)) {
+        if (auto* item = get_object_string(wifi, nested_key)) {
+            return item->valuestring ? item->valuestring : "";
+        }
+    }
+
+    return "";
 }
 
 namespace sd_config {
@@ -189,7 +213,10 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         result.imported_keys.push_back(json_key);
 
         // APIキー類はキー名と長さのみログ出力 (値は出力しない)
-        if (is_secret_key(json_key)) {
+        if (std::strcmp(json_key, "websocket_url") == 0) {
+            mclog::tagInfo(TAG, "imported: {} configured, length={}, scheme={}", json_key, value_len,
+                           url_scheme(value));
+        } else if (is_secret_key(json_key)) {
             mclog::tagInfo(TAG, "imported secret: {} (length={})", json_key, value_len);
         } else {
             mclog::tagInfo(TAG, "imported: {} = {}", json_key, value);
@@ -216,24 +243,26 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         mclog::tagInfo(TAG, "defaulted: websocket_version = 3");
     }
 
-    cJSON* wifi_ssid = cJSON_GetObjectItem(json.root, "wifi_ssid");
-    if (wifi_ssid && cJSON_IsString(wifi_ssid)) {
-        const char* ssid = wifi_ssid->valuestring;
-        cJSON* wifi_password = cJSON_GetObjectItem(json.root, "wifi_password");
-        const char* password = (wifi_password && cJSON_IsString(wifi_password)) ? wifi_password->valuestring : "";
-
-        if (!ssid || !is_valid_wifi_ssid(ssid)) {
-            mclog::tagWarn(TAG, "skip wifi_ssid: invalid length");
-        } else if (!is_valid_wifi_password(password)) {
-            mclog::tagWarn(TAG, "skip wifi_password: invalid length");
+    const std::string wifi_ssid     = get_wifi_string(json.root, "wifi_ssid", "ssid");
+    const std::string wifi_password = get_wifi_string(json.root, "wifi_password", "password");
+    if (!wifi_ssid.empty() || !wifi_password.empty()) {
+        if (wifi_ssid.empty()) {
+            mclog::tagWarn(TAG, "skip wifi credentials: wifi_ssid is empty");
+        } else if (wifi_ssid.length() > 32) {
+            mclog::tagWarn(TAG, "skip wifi credentials: wifi_ssid too long ({} bytes)", wifi_ssid.length());
+        } else if (wifi_password.length() > 64) {
+            mclog::tagWarn(TAG, "skip wifi credentials: wifi_password too long ({} bytes)", wifi_password.length());
         } else {
-            SsidManager::GetInstance().AddSsid(ssid, password);
+            SsidManager::GetInstance().AddSsid(wifi_ssid, wifi_password);
             result.imported_keys.push_back("wifi_ssid");
-            if (wifi_password && cJSON_IsString(wifi_password)) {
-                result.imported_keys.push_back("wifi_password");
-            }
-            mclog::tagInfo(TAG, "imported Wi-Fi credentials: ssid={}, password_length={}",
-                           ssid, std::strlen(password));
+            result.imported_keys.push_back("wifi_password");
+            result.imported_wifi_credentials = true;
+
+            Settings app_config("app_config", true);
+            app_config.SetBool("is_configed", true);
+
+            mclog::tagInfo(TAG, "imported Wi-Fi credentials: ssid length={}, password configured={}",
+                           wifi_ssid.length(), !wifi_password.empty());
         }
     }
 

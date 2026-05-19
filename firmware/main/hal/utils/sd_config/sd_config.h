@@ -15,6 +15,7 @@ namespace sd_config {
  */
 struct LoadResult {
     bool success = false;
+    bool imported_wifi_credentials = false;
     std::string error;
     std::vector<std::string> imported_keys;
 };

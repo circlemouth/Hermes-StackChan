@@ -161,9 +161,9 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 }
 ```
 
-`<server-ip>` には、サーバー端末の LAN IP を入れます。
+`<server-ip>` には、サーバー端末の LAN IP を入れます。`wifi_ssid` と `wifi_password` は任意です。指定した場合、`Load SD Config` 実行時に NVS に取り込み、ネットワーク設定済みとして扱います。空パスワードのネットワークでは `wifi_password` を空文字にできます。
 
-`wifi_ssid` と `wifi_password` は任意です。設定すると、`Load SD Config` 実行時に Wi-Fi credentials も NVS に保存されます。空パスワードのネットワークでは `wifi_password` を空文字にできます。
+Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式でも指定できます。
 
 ### 5. StackChan を起動する
 

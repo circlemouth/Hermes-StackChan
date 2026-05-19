@@ -12,9 +12,78 @@
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <settings.h>
+#include <esp_log.h>
+#include "sdkconfig.h"
 
 using namespace mooncake;
 using namespace smooth_ui_toolkit::lvgl_cpp;
+
+static const char* TAG = "AppAiAgent";
+
+static const char* wifi_status_to_string(WifiStatus status)
+{
+    switch (status) {
+        case WifiStatus::None:
+            return "None";
+        case WifiStatus::Low:
+            return "Low";
+        case WifiStatus::Medium:
+            return "Medium";
+        case WifiStatus::High:
+            return "High";
+        default:
+            return "Unknown";
+    }
+}
+
+static std::string websocket_scheme(std::string_view url)
+{
+    auto scheme_end = url.find("://");
+    if (scheme_end == std::string_view::npos || scheme_end == 0) {
+        return "none";
+    }
+    return std::string(url.substr(0, scheme_end));
+}
+
+static bool hermes_autostart_enabled()
+{
+#ifdef CONFIG_HERMES_AUTOSTART
+    return true;
+#else
+    return false;
+#endif
+}
+
+static std::string get_websocket_url()
+{
+    Settings ws_settings("websocket", false);
+    std::string websocket_url = ws_settings.GetString("url_override", "");
+    if (websocket_url.empty()) {
+        websocket_url = ws_settings.GetString("url", "");
+    }
+    return websocket_url;
+}
+
+static std::string load_websocket_url_from_sd_if_missing()
+{
+    std::string websocket_url = get_websocket_url();
+    if (!websocket_url.empty()) {
+        return websocket_url;
+    }
+
+    ESP_LOGI(TAG, "websocket URL missing, trying SD config import");
+    {
+        LvglLockGuard lock;
+        auto result = GetHAL().loadConfigFromSdCard(nullptr);
+        if (!result.success) {
+            ESP_LOGW(TAG, "SD config import failed: %s", result.error.c_str());
+        } else {
+            ESP_LOGI(TAG, "SD config imported %u key(s)", static_cast<unsigned>(result.imported_keys.size()));
+        }
+    }
+
+    return get_websocket_url();
+}
 
 AppAiAgent::AppAiAgent()
 {
@@ -39,18 +108,30 @@ void AppAiAgent::onCreate()
 void AppAiAgent::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
+    ESP_LOGI(TAG, "AppAiAgent::onOpen entered");
 
-    Settings ws_settings("websocket", false);
-    std::string websocket_url = ws_settings.GetString("url_override", "");
-    if (websocket_url.empty()) {
-        websocket_url = ws_settings.GetString("url", "");
-    }
+    std::string websocket_url = load_websocket_url_from_sd_if_missing();
+
+    const WifiStatus wifi_status      = GetHAL().getWifiStatus();
+    const bool has_websocket_url      = !websocket_url.empty();
+    const bool is_wifi_connected      = wifi_status != WifiStatus::None;
+    const bool has_wifi_config        = GetHAL().isAppConfiged();
+    const bool wifi_ready_for_runtime = is_wifi_connected || has_wifi_config;
+    const bool is_hermes_start_ready  = has_websocket_url && wifi_ready_for_runtime;
+    const bool is_hermes_autostart_enabled = hermes_autostart_enabled();
+    const std::string scheme          = websocket_scheme(websocket_url);
+
+    ESP_LOGI(TAG, "websocket_url configured=%d, length=%u, scheme=%s", has_websocket_url,
+             static_cast<unsigned>(websocket_url.length()), scheme.c_str());
+    ESP_LOGI(TAG, "Wi-Fi status=%s, wifi_configured=%d", wifi_status_to_string(wifi_status), has_wifi_config);
 
     const char* status_text = "Connecting to Hermes bridge";
     if (websocket_url.empty()) {
         status_text = "Bridge URL missing";
-    } else if (GetHAL().getWifiStatus() == WifiStatus::None) {
+    } else if (!wifi_ready_for_runtime) {
         status_text = "Wi-Fi not connected";
+    } else if (!is_hermes_autostart_enabled) {
+        status_text = "Hermes autostart disabled";
     }
 
     {
@@ -89,8 +170,20 @@ void AppAiAgent::onOpen()
         _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
     }
 
-    // Request to start Hermes bridge service
+    if (!is_hermes_autostart_enabled) {
+        ESP_LOGW(TAG, "Hermes start deferred: autostart disabled by CONFIG_HERMES_AUTOSTART");
+        return;
+    }
+
+    if (!is_hermes_start_ready) {
+        ESP_LOGW(TAG, "Hermes start deferred: websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
+                 has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
+        return;
+    }
+
+    // Request to start Hermes bridge service.
     // Mooncake apps are stopped before the Hermes bridge runtime starts.
+    ESP_LOGI(TAG, "Hermes start requested");
     GetHAL().requestHermesStart();
 }
 

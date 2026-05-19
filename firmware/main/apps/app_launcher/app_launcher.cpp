@@ -27,6 +27,15 @@ void AppLauncher::onLauncherOpen()
     LvglLockGuard lock;
 
     if (!_startup_checked && !GetHAL().isAppConfiged()) {
+        auto result = GetHAL().loadConfigFromSdCard(nullptr);
+        if (result.success) {
+            mclog::tagInfo(getAppInfo().name, "SD config imported {} key(s)", result.imported_keys.size());
+        } else {
+            mclog::tagWarn(getAppInfo().name, "SD config import skipped: {}", result.error);
+        }
+    }
+
+    if (!_startup_checked && !GetHAL().isAppConfiged()) {
         mclog::tagInfo(getAppInfo().name, "app not configured, start startup worker");
         _startup_worker = std::make_unique<setup_workers::StartupWorker>();
     } else {

@@ -110,12 +110,16 @@ void hermes_board_init()
 
 void start_hermes_app()
 {
+    ESP_LOGI(_tag, "hal_bridge::start_hermes_app entered");
     set_hermes_mode(true);
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
+    ESP_LOGI(_tag, "Calling Application::Initialize");
     app.Initialize();
+    ESP_LOGI(_tag, "Calling Application::Run; this is expected not to return");
     app.Run();  // This function runs the main event loop and never returns
+    ESP_LOGE(_tag, "Application::Run returned unexpectedly");
 }
 
 HermesRuntimeConfig_t get_hermes_config()
