@@ -155,13 +155,15 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 ```json
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
-  "websocket_version": 3
+  "websocket_version": 3,
+  "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
+  "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 `<server-ip>` には、サーバー端末の LAN IP を入れます。
 
-Hermes 専用 firmware が SD config から読むのは、この 2 つの key だけです。
+`wifi_ssid` と `wifi_password` は任意です。設定すると、`Load SD Config` 実行時に Wi-Fi credentials も NVS に保存されます。空パスワードのネットワークでは `wifi_password` を空文字にできます。
 
 ### 5. StackChan を起動する
 

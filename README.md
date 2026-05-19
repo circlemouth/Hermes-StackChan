@@ -154,13 +154,15 @@ An example is available at `firmware/sdcard/config.sample.json`.
 ```json
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
-  "websocket_version": 3
+  "websocket_version": 3,
+  "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
+  "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 Use the server terminal's LAN IP address.
 
-Only these two keys are used by the Hermes firmware setup.
+`wifi_ssid` and `wifi_password` are optional. When present, `Load SD Config` also saves Wi-Fi credentials to NVS. Use an empty `wifi_password` for an open network.
 
 ### 5. Boot StackChan
 

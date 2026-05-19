@@ -30,7 +30,9 @@ static constexpr const char* CONFIG_PATH = "/sdcard/config.json";
  * config.json の例:
  * {
  *   "websocket_url":   "ws://192.168.1.x:8765/ws",
- *   "websocket_version": 3
+ *   "websocket_version": 3,
+ *   "wifi_ssid": "your-2.4ghz-ssid",
+ *   "wifi_password": "your-wifi-password"
  * }
  *
  * @param on_log 進捗ログコールバック (nullptr可)
