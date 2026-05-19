@@ -9,7 +9,9 @@
 #include <ssid_manager.h>
 #include <mooncake_log.h>
 #include <cstdio>
+#include <dirent.h>
 #include <cstring>
+#include <cctype>
 
 static constexpr const char* TAG = "SdConfig";
 
@@ -30,12 +32,94 @@ static constexpr KeyMap kKeyMap[] = {
     {"websocket_url",   "websocket",              "url"},
 };
 
+static constexpr const char* kConfigPathCandidates[] = {
+    "/sdcard/config.json",
+    "/sdcard/CONFIG.JSON",
+    "/sdcard/config.JSON",
+    "/sdcard/hermes-config.json",
+    "/sdcard/hermes/config.json",
+    "/sdcard/stackchan/config.json",
+};
+
+static std::string list_sdcard_root_entries()
+{
+    DIR* dir = opendir("/sdcard");
+    if (!dir) {
+        return "Cannot list /sdcard";
+    }
+
+    std::string entries;
+    while (auto* entry = readdir(dir)) {
+        if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (!entries.empty()) {
+            entries += ", ";
+        }
+        entries += entry->d_name;
+    }
+    closedir(dir);
+
+    if (entries.empty()) {
+        return "/sdcard is empty";
+    }
+    return "Files in /sdcard: " + entries;
+}
+
+static bool ends_with(std::string_view value, std::string_view suffix)
+{
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static bool looks_like_config_short_name(const char* name)
+{
+    std::string upper;
+    for (const char* p = name; p && *p; ++p) {
+        upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(*p))));
+    }
+
+    if (!(ends_with(upper, ".JSO") || ends_with(upper, ".JSON"))) {
+        return false;
+    }
+    return upper.rfind("CONFIG", 0) == 0 || upper.rfind("CONFI~", 0) == 0;
+}
+
+static std::string find_config_short_path()
+{
+    DIR* dir = opendir("/sdcard");
+    if (!dir) {
+        return "";
+    }
+
+    std::string found;
+    while (auto* entry = readdir(dir)) {
+        if (!looks_like_config_short_name(entry->d_name)) {
+            continue;
+        }
+        found = std::string("/sdcard/") + entry->d_name;
+        break;
+    }
+    closedir(dir);
+    return found;
+}
+
 // FILE* の RAII ラッパー
 struct FileGuard {
     FILE* f = nullptr;
-    explicit FileGuard(const char* path) : f(fopen(path, "r")) {}
+    std::string path;
+    FileGuard() = default;
     ~FileGuard() { if (f) fclose(f); }
     bool is_open() const { return f != nullptr; }
+    bool open(const char* open_path)
+    {
+        if (f) {
+            fclose(f);
+        }
+        path = open_path;
+        f = fopen(open_path, "r");
+        return f != nullptr;
+    }
     FileGuard(const FileGuard&) = delete;
     FileGuard& operator=(const FileGuard&) = delete;
 };
@@ -115,15 +199,30 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         }
     };
 
-    log("Opening /sdcard/config.json ...");
+    log("Opening SD config file ...");
 
     // 1. ファイルを開く
-    FileGuard file(CONFIG_PATH);
+    FileGuard file;
+    for (const auto* path : kConfigPathCandidates) {
+        if (file.open(path)) {
+            break;
+        }
+    }
     if (!file.is_open()) {
-        result.error = "Cannot open /sdcard/config.json\nCheck SD card is inserted";
+        const auto short_path = find_config_short_path();
+        if (!short_path.empty()) {
+            file.open(short_path.c_str());
+        }
+    }
+
+    if (!file.is_open()) {
+        const auto entries = list_sdcard_root_entries();
+        mclog::tagWarn(TAG, "{}", entries);
+        result.error = "Cannot open config.json on SD card\nPlace config.json at the SD card root";
         log(result.error);
         return result;
     }
+    log(fmt::format("Using {}", file.path));
 
     // 2. ファイルサイズを取得
     if (fseek(file.f, 0, SEEK_END) != 0) {

@@ -17,19 +17,21 @@
 static constexpr const char* TAG = "HAL-SdConfig";
 
 // CoreS3: SD card uses SPI3 (shared with display).
-// GPIO35 is display DC (output) AND SD MISO (input) — same physical pin.
-// Safe to share because we hold the LVGL lock during SD access,
-// which stops all display SPI3 transactions.
+// GPIO35 is display DC (output) AND SD MISO (input) on the same physical pin.
+// Callers hold the LVGL lock during SD access so display transactions are stopped.
 static constexpr gpio_num_t SD_CS_PIN   = GPIO_NUM_4;
+static constexpr gpio_num_t LCD_CS_PIN  = GPIO_NUM_3;
 static constexpr gpio_num_t SD_MISO_PIN = GPIO_NUM_35;
 
 static sdmmc_card_t* s_sd_card = nullptr;
 
-static esp_err_t mount_sd_card()
+static void prepare_shared_spi_for_sd()
 {
-    if (s_sd_card) return ESP_OK;
+    gpio_set_direction(LCD_CS_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(LCD_CS_PIN, 1);
+    gpio_set_direction(SD_CS_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(SD_CS_PIN, 1);
 
-    // Reconfigure GPIO35 as input for SD MISO (temporarily overrides display DC output)
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << SD_MISO_PIN);
     io_conf.mode = GPIO_MODE_INPUT;
@@ -38,13 +40,28 @@ static esp_err_t mount_sd_card()
     io_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
 
-    // Route GPIO35 to SPI3 MISO via GPIO matrix
     esp_rom_gpio_connect_in_signal(SD_MISO_PIN,
                                    spi_periph_signal[SPI3_HOST].spiq_in, false);
+}
+
+static void restore_shared_spi_for_display()
+{
+    gpio_set_direction(SD_MISO_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(SD_MISO_PIN, 1);
+    gpio_set_level(LCD_CS_PIN, 1);
+    gpio_set_level(SD_CS_PIN, 1);
+}
+
+static esp_err_t mount_sd_card()
+{
+    if (s_sd_card) return ESP_OK;
+
+    prepare_shared_spi_for_sd();
 
     // Add SD card as a new device on the already-initialized SPI3 bus
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI3_HOST;
+    host.max_freq_khz = SDMMC_FREQ_PROBING;
 
     sdspi_device_config_t dev_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
     dev_cfg.gpio_cs  = SD_CS_PIN;
@@ -58,8 +75,7 @@ static esp_err_t mount_sd_card()
 
     esp_err_t ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &dev_cfg, &mount_cfg, &s_sd_card);
     if (ret != ESP_OK) {
-        // Restore GPIO35 as output for display DC on failure
-        gpio_set_direction(SD_MISO_PIN, GPIO_MODE_OUTPUT);
+        restore_shared_spi_for_display();
     }
     return ret;
 }
@@ -69,8 +85,7 @@ static void unmount_sd_card()
     if (!s_sd_card) return;
     esp_vfs_fat_sdcard_unmount("/sdcard", s_sd_card);
     s_sd_card = nullptr;
-    // Restore GPIO35 as output for display DC
-    gpio_set_direction(SD_MISO_PIN, GPIO_MODE_OUTPUT);
+    restore_shared_spi_for_display();
 }
 
 sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_view)> onLog)

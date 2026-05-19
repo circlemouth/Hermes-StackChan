@@ -11,6 +11,7 @@
 #include <mooncake.h>
 #include <settings.h>
 #include <esp_mac.h>
+#include <ssid_manager.h>
 
 static const std::string_view _tag = "HAL-BLE";
 
@@ -281,7 +282,18 @@ void Hal::startAppConfigServer()
 bool Hal::isAppConfiged()
 {
     Settings settings("app_config", false);
-    return settings.GetBool("is_configed", false);
+    if (settings.GetBool("is_configed", false)) {
+        return true;
+    }
+
+    const bool has_saved_wifi = !SsidManager::GetInstance().GetSsidList().empty();
+    if (has_saved_wifi) {
+        mclog::tagWarn(_tag, "app_config flag is missing but saved Wi-Fi credentials exist; treating app as configured");
+        Settings write_settings("app_config", true);
+        write_settings.SetBool("is_configed", true);
+        return true;
+    }
+    return false;
 }
 
 void Hal::resetAppConfiged()
