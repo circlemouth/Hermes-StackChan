@@ -162,7 +162,8 @@ export class Session {
         if (type === 'listen') {
             const listenState = msg['state'] as string | undefined
             if (listenState === 'start' || listenState === 'detect') {
-                if (Date.now() < this.cooldownUntil) {
+                const isWakeWordStart = listenState === 'detect'
+                if (!isWakeWordStart && Date.now() < this.cooldownUntil) {
                     console.log(`[session ${this.sessionId}] listen start ignored (post-TTS cooldown)`)
                     return
                 }
@@ -174,7 +175,8 @@ export class Session {
                     console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
                     this.triggerProcess()
                 }, MAX_RECORDING_MS)
-                console.log(`[session ${this.sessionId}] listening started (mode=${msg['mode']})`)
+                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${String(msg['mode'] ?? '')}`
+                console.log(`[session ${this.sessionId}] listening started (${source})`)
             } else if (listenState === 'stop') {
                 this.triggerProcess()
             }

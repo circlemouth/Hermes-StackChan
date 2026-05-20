@@ -98,6 +98,39 @@ test('Session forwards abort to Hermes interrupt and stops local capture state',
     session.close()
 })
 
+test('Session accepts wake word detect during post-TTS cooldown', async () => {
+    const ws = new MockWebSocket()
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => `turn ${++transcribeCount}`,
+        hermes: {
+            submitPrompt: async (prompt) => `reply to ${prompt}`,
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+    await delay(10)
+
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'detect', text: 'Hi StackChan' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => jsonMessages(ws).filter((msg) => msg['type'] === 'stt').length === 2)
+    assert.equal(transcribeCount, 2)
+
+    session.close()
+})
+
 test('Session displays Hermes image media and strips image tags before TTS', async () => {
     const ws = new MockWebSocket()
     const session = new Session(ws as never, {
