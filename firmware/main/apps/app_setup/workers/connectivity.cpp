@@ -111,7 +111,7 @@ void WifiSetupWorker::update_state()
                 const auto sd_config_result = ensure_sd_config_loaded();
                 const bool is_bridge_configured = sd_config_result.bridge_configured;
 
-                data.logo_img = assets::get_image("icon_hermes.png");
+                data.logo_img = assets::get_image("icon_hermes.bin");
                 data.logo     = std::make_unique<Image>(lv_screen_active());
                 data.logo->setSrc(&data.logo_img);
                 lv_image_set_scale(data.logo->get(), 160);

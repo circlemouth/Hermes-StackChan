@@ -90,7 +90,7 @@ AppAiAgent::AppAiAgent()
     // Configure App name
     setAppInfo().name = "HERMES";
     // Configure App icon
-    static auto icon  = assets::get_image("icon_hermes.png");
+    static auto icon  = assets::get_image("icon_hermes.bin");
     setAppInfo().icon = (void*)&icon;
     // Configure App theme color
     static uint32_t theme_color = 0x33CC99;
@@ -152,7 +152,7 @@ void AppAiAgent::onOpen()
         _panel->setSize(320, 240);
         _panel->setRadius(0);
 
-        _logo_img = assets::get_image("icon_hermes.png");
+        _logo_img = assets::get_image("icon_hermes.bin");
         _logo     = std::make_unique<Image>(_panel->get());
         _logo->setSrc(&_logo_img);
         lv_image_set_scale(_logo->get(), 160);

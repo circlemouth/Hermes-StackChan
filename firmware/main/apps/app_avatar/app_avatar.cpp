@@ -16,7 +16,7 @@ using namespace stackchan;
 AppAvatar::AppAvatar()
 {
     setAppInfo().name = "AVATAR";
-    static auto icon  = assets::get_image("icon_hermes.png");
+    static auto icon  = assets::get_image("icon_hermes.bin");
     setAppInfo().icon = (void*)&icon;
     static uint32_t theme_color = 0xFF6699;
     setAppInfo().userData       = (void*)&theme_color;
