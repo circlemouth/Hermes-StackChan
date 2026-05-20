@@ -16,6 +16,7 @@ void DefaultAvatar::init(lv_obj_t* parent, const lv_font_t* font)
     _pannel->setRadius(0);
     _pannel->setBorderWidth(0);
     _pannel->setBgColor(secondaryColor);
+    _pannel->setBgOpa(LV_OPA_COVER);
     _pannel->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
 
     _key_elements.leftEye  = std::make_unique<DefaultEyes>(_pannel->get(), primaryColor, secondaryColor, true);

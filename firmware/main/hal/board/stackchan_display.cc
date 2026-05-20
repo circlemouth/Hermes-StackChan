@@ -12,6 +12,7 @@
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
+#include <system_info.h>
 #include <lvgl.h>
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
@@ -247,6 +248,9 @@ void StackChanAvatarDisplay::SetupUI()
     stackchan.resetAvatar();
     stackchan.clearModifiers();
     lv_obj_clean(lv_screen_active());
+    lv_obj_remove_flag(lv_screen_active(), LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, LV_PART_MAIN);
 
     blink_modifier_id_           = -1;
     speaking_modifier_id_        = -1;
@@ -370,6 +374,10 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Neutral);
     }
 
+    if (strcmp(emotion, "sleepy") != 0) {
+        is_sleeping_ = false;
+    }
+
     // Resync blink modifier base eye weights
     auto blink_modifier = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_));
     if (blink_modifier) {
@@ -393,6 +401,10 @@ void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* conten
     DisplayLockGuard lock(this);
 
     if (strcmp(role, "system") == 0) {
+        if (content != nullptr && SystemInfo::GetUserAgent() == content) {
+            stackchan.avatar().clearSpeech();
+            return;
+        }
         stackchan.avatar().setSpeech(content);
     } else if (strcmp(role, "assistant") == 0) {
         stackchan.avatar().setSpeech(content);
@@ -454,6 +466,7 @@ void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
 void StackChanAvatarDisplay::SetTheme(Theme* theme)
 {
     ESP_LOGI(TAG, "SetTheme: %s", theme->name().c_str());
+    Display::SetTheme(theme);
 
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
@@ -569,6 +582,8 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     // Clear sleep state
     if (is_sleeping_) {
         avatar.setSpeech("");
+        avatar.setEmotion(Emotion::Neutral);
+        is_sleeping_ = false;
     }
 }
 

@@ -131,6 +131,7 @@ void Hal::updateHeapStatusLog()
 /*                                Hermes Bridge                              */
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
+#include <board.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
@@ -185,6 +186,12 @@ void Hal::startHermes()
 {
     mclog::tagInfo(_tag, "start Hermes bridge");
     ESP_LOGI(_tag.data(), "Hal::startHermes entered");
+
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    if (auto* backlight = board.GetBacklight()) {
+        backlight->RestoreBrightness();
+    }
 
     auto& motion = GetStackChan().motion();
     motion.setAutoAngleSyncEnabled(true);
