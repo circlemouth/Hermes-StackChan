@@ -38,6 +38,7 @@ type SessionDeps = {
     encodeWavToOpusFrames?: typeof encodeWavToOpusFrames
     transcribeWav?: typeof transcribeWithHermes
     synthesizeText?: typeof synthesizeWithHermes
+    postTtsCooldownMs?: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,7 +60,9 @@ export class Session {
     private nextMcpId = 1
     private silenceTimer?: ReturnType<typeof setTimeout>
     private maxDurationTimer?: ReturnType<typeof setTimeout>
+    private delayedListenTimer?: ReturnType<typeof setTimeout>
     private cooldownUntil = 0
+    private readonly postTtsCooldownMs: number
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
         this.hermes = deps.hermes ?? new HermesClient()
@@ -67,6 +70,7 @@ export class Session {
         this.encodeWavToOpusFramesFn = deps.encodeWavToOpusFrames ?? encodeWavToOpusFrames
         this.transcribeWavFn = deps.transcribeWav ?? transcribeWithHermes
         this.synthesizeTextFn = deps.synthesizeText ?? synthesizeWithHermes
+        this.postTtsCooldownMs = deps.postTtsCooldownMs ?? POST_TTS_COOLDOWN_MS
         this.unregisterDeviceSession = (deps.registerDeviceSession ?? registerDeviceSession)(this)
     }
 
@@ -122,6 +126,7 @@ export class Session {
     private clearTimers(): void {
         if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = undefined }
         if (this.maxDurationTimer) { clearTimeout(this.maxDurationTimer); this.maxDurationTimer = undefined }
+        if (this.delayedListenTimer) { clearTimeout(this.delayedListenTimer); this.delayedListenTimer = undefined }
     }
 
     private triggerProcess(): void {
@@ -137,8 +142,31 @@ export class Session {
         this.process().catch((err) => {
             console.error(`[session ${this.sessionId}] process error:`, err)
         }).finally(() => {
-            this.state = 'idle'
+            if (this.state === 'processing') this.state = 'idle'
         })
+    }
+
+    private startListening(source: string): void {
+        this.clearTimers()
+        this.state = 'listening'
+        this.opusFrames = []
+        // 最長録音タイマーをセット
+        this.maxDurationTimer = setTimeout(() => {
+            console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
+            this.triggerProcess()
+        }, MAX_RECORDING_MS)
+        console.log(`[session ${this.sessionId}] listening started (${source})`)
+    }
+
+    private delayListeningUntilCooldownEnds(source: string): void {
+        if (this.delayedListenTimer) clearTimeout(this.delayedListenTimer)
+        this.opusFrames = []
+        const delayMs = Math.max(0, this.cooldownUntil - Date.now())
+        this.delayedListenTimer = setTimeout(() => {
+            this.delayedListenTimer = undefined
+            this.startListening(source)
+        }, delayMs)
+        console.log(`[session ${this.sessionId}] listen start delayed ${delayMs}ms (post-TTS cooldown)`)
     }
 
     private handleJson(msg: Record<string, unknown>): void {
@@ -163,20 +191,16 @@ export class Session {
             const listenState = msg['state'] as string | undefined
             if (listenState === 'start' || listenState === 'detect') {
                 const isWakeWordStart = listenState === 'detect'
+                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${String(msg['mode'] ?? '')}`
                 if (!isWakeWordStart && Date.now() < this.cooldownUntil) {
-                    console.log(`[session ${this.sessionId}] listen start ignored (post-TTS cooldown)`)
+                    if (this.state === 'listening') {
+                        console.log(`[session ${this.sessionId}] listen start already active (${source})`)
+                        return
+                    }
+                    this.delayListeningUntilCooldownEnds(source)
                     return
                 }
-                this.clearTimers()
-                this.state = 'listening'
-                this.opusFrames = []
-                // 最長録音タイマーをセット
-                this.maxDurationTimer = setTimeout(() => {
-                    console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
-                    this.triggerProcess()
-                }, MAX_RECORDING_MS)
-                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${String(msg['mode'] ?? '')}`
-                console.log(`[session ${this.sessionId}] listening started (${source})`)
+                this.startListening(source)
             } else if (listenState === 'stop') {
                 this.triggerProcess()
             }
@@ -258,7 +282,7 @@ export class Session {
         this.sendJson({ type: 'tts', state: 'stop' })
 
         // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
-        this.cooldownUntil = Date.now() + POST_TTS_COOLDOWN_MS
+        this.cooldownUntil = Date.now() + this.postTtsCooldownMs
         console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
     }
 

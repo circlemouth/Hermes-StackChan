@@ -122,10 +122,52 @@ test('Session accepts wake word detect during post-TTS cooldown', async () => {
     await delay(10)
 
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'detect', text: 'Hi StackChan' }))
+    for (let i = 0; i < 5; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 5; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => jsonMessages(ws).filter((msg) => msg['type'] === 'stt').length === 2)
+    assert.equal(transcribeCount, 2)
+
+    session.close()
+})
+
+test('Session delays auto listen start during post-TTS cooldown and drops cooldown audio', async () => {
+    const ws = new MockWebSocket()
+    const decodedFrameCounts: number[] = []
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        postTtsCooldownMs: 40,
+        decodeOpusFrames: (frames) => {
+            decodedFrameCounts.push(frames.length)
+            return Buffer.alloc(320)
+        },
+        transcribeWav: async () => `turn ${++transcribeCount}`,
+        hermes: {
+            submitPrompt: async (prompt) => `reply to ${prompt}`,
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([i]))
+    await delay(60)
     for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
 
     await waitFor(() => jsonMessages(ws).filter((msg) => msg['type'] === 'stt').length === 2)
+    assert.deepEqual(decodedFrameCounts, [10, 10])
     assert.equal(transcribeCount, 2)
 
     session.close()
