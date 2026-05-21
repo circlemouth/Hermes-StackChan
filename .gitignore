@@ -5,3 +5,7 @@ ai-server/node_modules
 .env
 ai-server/dist
 .mcp.json
+artifacts/
+review-bundles/
+*-review-*.zip
+Hermes-StackChan-main-review-*.zip
