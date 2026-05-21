@@ -64,14 +64,9 @@ static std::string get_websocket_url()
     return websocket_url;
 }
 
-static std::string load_websocket_url_from_sd_if_missing()
+static std::string load_websocket_url_from_sd()
 {
-    std::string websocket_url = get_websocket_url();
-    if (!websocket_url.empty()) {
-        return websocket_url;
-    }
-
-    ESP_LOGI(TAG, "websocket URL missing, trying SD config import");
+    ESP_LOGI(TAG, "trying SD config import");
     {
         LvglLockGuard lock;
         auto result = GetHAL().loadConfigFromSdCard(nullptr);
@@ -110,7 +105,7 @@ void AppAiAgent::onOpen()
     mclog::tagInfo(getAppInfo().name, "on open");
     ESP_LOGI(TAG, "AppAiAgent::onOpen entered");
 
-    std::string websocket_url = load_websocket_url_from_sd_if_missing();
+    std::string websocket_url = load_websocket_url_from_sd();
 
     const WifiStatus wifi_status      = GetHAL().getWifiStatus();
     const bool has_websocket_url      = !websocket_url.empty();
