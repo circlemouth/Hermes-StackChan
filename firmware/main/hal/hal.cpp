@@ -235,6 +235,18 @@ void Hal::setHermesBridgeConfig(HermesBridgeConfig_t config)
     });
 }
 
+void Hal::prepareHermesDisplay()
+{
+    ESP_LOGI(_tag.data(), "Preparing Hermes display");
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        ESP_LOGW(_tag.data(), "No display available while preparing Hermes display");
+        return;
+    }
+
+    display->SetupUI();
+}
+
 uint8_t Hal::getBatteryLevel()
 {
     return hal_bridge::board_get_battery_level();

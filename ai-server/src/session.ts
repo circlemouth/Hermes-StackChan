@@ -8,15 +8,58 @@ import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeec
 import { elapsedMs, nowMs, withTiming } from './timing.js'
 
 type State = 'idle' | 'listening' | 'processing'
+export type StackChanEmotion = 'neutral' | 'happy' | 'laughing' | 'angry' | 'sad' | 'crying' | 'sleepy' | 'doubtful'
+
+export type TurnControlConfig = {
+    silenceTimeoutMs: number
+    maxRecordingMs: number
+    minFramesForStt: number
+    postTtsCooldownMs: number
+}
+
+export function readEnvInt(
+    name: string,
+    fallback: number,
+    min: number,
+    max: number,
+    env: Record<string, string | undefined> = process.env,
+): number {
+    const raw = env[name]
+    if (!raw) return fallback
+    const value = Number(raw)
+    if (!Number.isFinite(value)) return fallback
+    return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+export function readTurnControlConfig(env: Record<string, string | undefined> = process.env): TurnControlConfig {
+    return {
+        silenceTimeoutMs: readEnvInt('STACKCHAN_SILENCE_TIMEOUT_MS', 1200, 300, 5000, env),
+        maxRecordingMs: readEnvInt('STACKCHAN_MAX_RECORDING_MS', 15000, 3000, 60000, env),
+        minFramesForStt: readEnvInt('STACKCHAN_MIN_FRAMES_FOR_STT', 10, 1, 100, env),
+        postTtsCooldownMs: readEnvInt('STACKCHAN_POST_TTS_COOLDOWN_MS', 1500, 0, 10000, env),
+    }
+}
+
+export function inferStackChanEmotion(text: string): StackChanEmotion {
+    const normalized = stripMediaForSpeech(text).toLowerCase()
+
+    if (/笑|www|haha|lol/.test(normalized)) return 'laughing'
+    if (/ありがとう|嬉しい|うれしい|よかった|できた|楽しい|いいね|great|nice|happy/.test(normalized)) return 'happy'
+    if (/ごめん|すみません|残念|悲しい|申し訳|sorry/.test(normalized)) return 'sad'
+    if (/眠い|おやすみ|sleepy|good night/.test(normalized)) return 'sleepy'
+    if (/うーん|確認|わからない|分からない|不明|たぶん|maybe|not sure/.test(normalized)) return 'doubtful'
+    return 'neutral'
+}
 
 // auto モード: フレームが途切れてから処理開始するまでの無音判定時間 (ms)
-const SILENCE_TIMEOUT_MS = 1500
+const TURN_CONTROL_CONFIG = readTurnControlConfig()
+const SILENCE_TIMEOUT_MS = TURN_CONTROL_CONFIG.silenceTimeoutMs
 // 最長録音時間 (ms) — 無音検知がなくても強制処理
-const MAX_RECORDING_MS = 15000
+const MAX_RECORDING_MS = TURN_CONTROL_CONFIG.maxRecordingMs
 // STT を呼ぶ最低フレーム数 (10フレーム × 60ms = 600ms 未満は無音とみなす)
-const MIN_FRAMES_FOR_STT = 10
+const MIN_FRAMES_FOR_STT = TURN_CONTROL_CONFIG.minFramesForStt
 // TTS 再生後、次の listen start を受け付けるまでのクールダウン (ms) — エコー誤検知防止
-const POST_TTS_COOLDOWN_MS = 2000
+const POST_TTS_COOLDOWN_MS = TURN_CONTROL_CONFIG.postTtsCooldownMs
 const MCP_REQUEST_TIMEOUT_MS = 10_000
 
 type PendingMcpRequest = {
@@ -253,7 +296,7 @@ export class Session {
             { textLength: text.length },
         )
         console.log(`[session ${this.sessionId}] LLM: "${reply}"`)
-        this.sendJson({ type: 'llm', emotion: 'neutral' })
+        this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
         void this.displayFirstImageFromReply(reply)
 
         // 3. Hermes TTS -> Opus -> device

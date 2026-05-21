@@ -115,9 +115,9 @@ void start_hermes_app()
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
-    ESP_LOGI(_tag, "Calling Application::Initialize");
+    ESP_LOGI(_tag, "Application::Initialize start");
     app.Initialize();
-    ESP_LOGI(_tag, "Calling Application::Run; this is expected not to return");
+    ESP_LOGI(_tag, "Application::Run start");
     app.Run();  // This function runs the main event loop and never returns
     ESP_LOGE(_tag, "Application::Run returned unexpectedly");
 }

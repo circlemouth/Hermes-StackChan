@@ -25,6 +25,7 @@ void AppLauncher::onLauncherCreate()
 void AppLauncher::onLauncherOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
+    mclog::tagInfo(getAppInfo().name, "Launcher started");
 
     LvglLockGuard lock;
 

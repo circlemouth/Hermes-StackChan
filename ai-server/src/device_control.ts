@@ -10,6 +10,9 @@ export type StackChanToolName =
     | 'stackchan_take_photo'
     | 'stackchan_display_image'
     | 'stackchan_capture_screen'
+    | 'stackchan_create_reminder'
+    | 'stackchan_get_reminders'
+    | 'stackchan_stop_reminder'
 
 export type StackChanDeviceSession = {
     callRobotTool(name: string, args: Record<string, unknown>): Promise<unknown>
@@ -24,6 +27,9 @@ const TOOL_MAP: Record<StackChanToolName, string> = {
     stackchan_take_photo: 'self.camera.capture_photo',
     stackchan_display_image: 'self.screen.preview_image_url',
     stackchan_capture_screen: 'self.screen.capture_screenshot',
+    stackchan_create_reminder: 'self.robot.create_reminder',
+    stackchan_get_reminders: 'self.robot.get_reminders',
+    stackchan_stop_reminder: 'self.robot.stop_reminder',
 }
 
 let activeSession: StackChanDeviceSession | null = null
@@ -77,6 +83,34 @@ function readImageSource(args: Record<string, unknown>): string | null {
     return typeof source === 'string' && source.trim() ? source : null
 }
 
+function clampReminderDurationSeconds(value: unknown): number {
+    const duration = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(duration)) {
+        throw new Error('duration_seconds must be a finite number')
+    }
+    return Math.max(1, Math.min(86400, Math.round(duration)))
+}
+
+function readReminderMessage(value: unknown): string {
+    const message = typeof value === 'string' ? value.trim() : ''
+    if (!message) throw new Error('message is required')
+    return message.slice(0, 120)
+}
+
+function readReminderRepeat(value: unknown): boolean {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') return value.toLowerCase() === 'true'
+    return false
+}
+
+function readReminderId(value: unknown): number {
+    const id = typeof value === 'number' ? value : Number(value)
+    if (!Number.isInteger(id) || id < 0) {
+        throw new Error('id must be a non-negative integer')
+    }
+    return id
+}
+
 async function callStackChanTool(name: StackChanToolName, args: Record<string, unknown>): Promise<unknown> {
     if (!activeSession) {
         throw new Error('No StackChan device is connected')
@@ -92,6 +126,20 @@ async function callStackChanTool(name: StackChanToolName, args: Record<string, u
         return await activeSession.callRobotTool(TOOL_MAP[name], {
             url,
             duration_seconds: clampDurationSeconds(args['duration_seconds']),
+        })
+    }
+
+    if (name === 'stackchan_create_reminder') {
+        return await activeSession.callRobotTool(TOOL_MAP[name], {
+            duration_seconds: clampReminderDurationSeconds(args['duration_seconds']),
+            message: readReminderMessage(args['message']),
+            repeat: readReminderRepeat(args['repeat']),
+        })
+    }
+
+    if (name === 'stackchan_stop_reminder') {
+        return await activeSession.callRobotTool(TOOL_MAP[name], {
+            id: readReminderId(args['id']),
         })
     }
 

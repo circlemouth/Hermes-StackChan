@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Session } from '../src/session.ts'
+import { inferStackChanEmotion, readEnvInt, readTurnControlConfig, Session } from '../src/session.ts'
 
 class MockWebSocket {
     sent: Array<string | Buffer> = []
@@ -71,6 +71,36 @@ test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus 
     assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2])])
 
     session.close()
+})
+
+test('inferStackChanEmotion maps reply text to StackChan expressions', () => {
+    assert.equal(inferStackChanEmotion('ありがとう、うまくできたよ'), 'happy')
+    assert.equal(inferStackChanEmotion('ごめん、少し失敗しました'), 'sad')
+    assert.equal(inferStackChanEmotion('うーん、確認します'), 'doubtful')
+    assert.equal(inferStackChanEmotion('おやすみ、また明日'), 'sleepy')
+    assert.equal(inferStackChanEmotion('了解しました。'), 'neutral')
+})
+
+test('readEnvInt uses fallback, parsed values, and clamping', () => {
+    assert.equal(readEnvInt('MISSING', 10, 1, 20, {}), 10)
+    assert.equal(readEnvInt('VALUE', 10, 1, 20, { VALUE: '12.6' }), 13)
+    assert.equal(readEnvInt('VALUE', 10, 1, 20, { VALUE: 'nope' }), 10)
+    assert.equal(readEnvInt('VALUE', 10, 1, 20, { VALUE: '-5' }), 1)
+    assert.equal(readEnvInt('VALUE', 10, 1, 20, { VALUE: '99' }), 20)
+})
+
+test('readTurnControlConfig reads StackChan voice turn environment values', () => {
+    assert.deepEqual(readTurnControlConfig({
+        STACKCHAN_SILENCE_TIMEOUT_MS: '800',
+        STACKCHAN_MAX_RECORDING_MS: '90000',
+        STACKCHAN_MIN_FRAMES_FOR_STT: '0',
+        STACKCHAN_POST_TTS_COOLDOWN_MS: '1750',
+    }), {
+        silenceTimeoutMs: 800,
+        maxRecordingMs: 60000,
+        minFramesForStt: 1,
+        postTtsCooldownMs: 1750,
+    })
 })
 
 test('Session forwards abort to Hermes interrupt and stops local capture state', async () => {

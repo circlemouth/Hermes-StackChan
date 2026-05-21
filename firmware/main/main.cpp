@@ -8,10 +8,40 @@
 #include <mooncake_log.h>
 #include <mooncake.h>
 #include <apps/apps.h>
+#include <apps/common/common.h>
 #include <hal/hal.h>
+#include <esp_log.h>
+#include <lvgl.h>
 
 using namespace mooncake;
 using namespace smooth_ui_toolkit;
+
+static const char* TAG = "MAIN";
+
+static void clean_lvgl_for_hermes_handoff()
+{
+    GetHAL().bootLogo.reset();
+    view::destroy_home_indicator();
+    view::destroy_status_bar();
+
+    lv_obj_t* top_layer = lv_layer_top();
+    if (top_layer != nullptr) {
+        lv_obj_clean(top_layer);
+    }
+
+    lv_obj_t* screen = lv_screen_active();
+    if (screen != nullptr) {
+        lv_obj_clean(screen);
+        lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_bg_color(screen, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_invalidate(screen);
+    }
+
+    lv_refr_now(nullptr);
+    ESP_LOGI(TAG, "LVGL handoff screen cleaned");
+}
 
 extern "C" void app_main(void)
 {
@@ -48,11 +78,16 @@ extern "C" void app_main(void)
 
     // App destructors own LVGL objects, so tear Mooncake down while the LVGL
     // port is locked before handing the screen to Hermes.
+    ESP_LOGI(TAG, "Mooncake teardown start");
     {
         LvglLockGuard lock;
         GetMooncake().uninstallAllApps();
         DestroyMooncake();
+        clean_lvgl_for_hermes_handoff();
     }
+    ESP_LOGI(TAG, "Mooncake teardown complete");
+
+    GetHAL().prepareHermesDisplay();
 
     // Start Hermes bridge runtime, never returns
     GetHAL().startHermes();

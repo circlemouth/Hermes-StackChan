@@ -49,15 +49,19 @@ flowchart LR
 
 The v1 robot tools are:
 
-- `stackchan_get_status`
-- `stackchan_get_head_angles`
-- `stackchan_set_head_angles`
-- `stackchan_set_led_color`
-- `stackchan_take_photo`
-- `stackchan_display_image`
-- `stackchan_capture_screen`
+- `stackchan_get_status`: read safe device status without exposing the full bridge URL or secrets.
+- `stackchan_get_head_angles`: read current yaw and pitch.
+- `stackchan_set_head_angles`: move the head for deliberate gestures.
+- `stackchan_set_led_color`: set the onboard RGB LEDs as a subtle cue.
+- `stackchan_power_off`: power off the physical StackChan when explicitly requested.
+- `stackchan_take_photo`: capture a still photo from the camera.
+- `stackchan_display_image`: preview an image on the screen.
+- `stackchan_capture_screen`: capture the current display.
+- `stackchan_create_reminder`: create a local relative-duration reminder.
+- `stackchan_get_reminders`: list active local reminders.
+- `stackchan_stop_reminder`: stop a local reminder by ID.
 
-Hermes should call movement and LED tools only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, and speaking-time motion. Camera, screen capture, and image preview tools are local-only helpers for the StackChan session.
+Hermes should call movement and LED tools only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, speaking-time motion, and local reminder notifications. Camera, screen capture, image preview, and reminder tools are local-only helpers for the StackChan session.
 
 ## Repository Layout
 
@@ -113,9 +117,15 @@ HERMES_CONNECT_MODE=dashboard_ws
 HERMES_DASHBOARD_URL=http://127.0.0.1:9119
 HERMES_ROOT=../hermes-agent
 HERMES_PYTHON=python3
+
+STACKCHAN_SILENCE_TIMEOUT_MS=1200
+STACKCHAN_MAX_RECORDING_MS=15000
+STACKCHAN_MIN_FRAMES_FOR_STT=10
+STACKCHAN_POST_TTS_COOLDOWN_MS=1500
 ```
 
 `HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
+The `STACKCHAN_*` voice turn values can be tuned for room acoustics and speaker echo behavior.
 
 Build and run:
 
@@ -170,13 +180,13 @@ The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "..."
 
 ### 5. Boot StackChan
 
-On first boot, the firmware shows `HERMES SETUP`.
+On first boot without configuration, the firmware shows `HERMES SETUP`. After the device has Wi-Fi and bridge settings, booting stays on Launcher by default; HERMES does not auto-open unless `CONFIG_HERMES_AUTOSTART=y` is explicitly enabled. Select the `HERMES` app from Launcher to start the Hermes runtime manually.
 
 Expected setup states:
 
 - `Bridge URL missing`: `websocket_url` was not imported from SD/NVS.
 - `Wi-Fi not connected`: Wi-Fi provisioning is still needed.
-- `Connecting to Hermes bridge`: firmware is starting the local WebSocket runtime.
+- `Starting Hermes...` / `Connecting to Hermes bridge`: firmware is starting the local WebSocket runtime.
 - `Hermes bridge ready`: StackChan is connected through `ai-server`.
 - `Check websocket_url and bridge host`: StackChan could not reach the bridge host.
 
@@ -203,6 +213,7 @@ Movement behavior:
 
 - Hermes can intentionally move the head or set LEDs through MCP tools.
 - Firmware continues autonomous blinking, idle motion, and speaking motion.
+- `ai-server` infers simple StackChan emotions from Hermes replies instead of always sending `neutral`.
 - This mixed-control model keeps robot behavior natural without requiring Hermes to micromanage every frame.
 
 ## Firmware Setup
