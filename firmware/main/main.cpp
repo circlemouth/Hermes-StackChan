@@ -46,9 +46,13 @@ extern "C" void app_main(void)
         }
     }
 
-    // Uninstall all apps and destroy mooncake
-    GetMooncake().uninstallAllApps();
-    DestroyMooncake();
+    // App destructors own LVGL objects, so tear Mooncake down while the LVGL
+    // port is locked before handing the screen to Hermes.
+    {
+        LvglLockGuard lock;
+        GetMooncake().uninstallAllApps();
+        DestroyMooncake();
+    }
 
     // Start Hermes bridge runtime, never returns
     GetHAL().startHermes();

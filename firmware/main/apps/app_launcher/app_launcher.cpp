@@ -55,10 +55,17 @@ void AppLauncher::onLauncherRunning()
             _startup_worker.reset();
             _startup_checked = true;
             create_launcher_view();
+            if (try_auto_open_hermes()) {
+                return;
+            }
         }
     } else {
-        _view->update();
-        try_auto_open_hermes();
+        if (_view) {
+            _view->update();
+        }
+        if (try_auto_open_hermes()) {
+            return;
+        }
         screensaver_update();
     }
 
@@ -110,11 +117,11 @@ void AppLauncher::screensaver_update()
     }
 }
 
-void AppLauncher::try_auto_open_hermes()
+bool AppLauncher::try_auto_open_hermes()
 {
 #if CONFIG_HERMES_AUTOSTART
-    if (_hermes_auto_open_attempted || !GetHAL().isAppConfiged()) {
-        return;
+    if (!_view || _hermes_auto_open_attempted || !GetHAL().isAppConfiged()) {
+        return false;
     }
 
     _hermes_auto_open_attempted = true;
@@ -123,10 +130,11 @@ void AppLauncher::try_auto_open_hermes()
         if (app.info.name == "HERMES") {
             mclog::tagInfo(getAppInfo().name, "auto opening HERMES app, app id: {}", app.appID);
             openApp(app.appID);
-            return;
+            return true;
         }
     }
 
     mclog::tagWarn(getAppInfo().name, "HERMES app not found for autostart");
 #endif
+    return false;
 }

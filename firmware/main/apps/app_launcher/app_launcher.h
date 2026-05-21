@@ -29,5 +29,5 @@ private:
 
     void create_launcher_view();
     void screensaver_update();
-    void try_auto_open_hermes();
+    bool try_auto_open_hermes();
 };

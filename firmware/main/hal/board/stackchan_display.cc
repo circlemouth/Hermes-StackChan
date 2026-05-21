@@ -30,6 +30,44 @@ LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
 
+static lv_obj_t* create_hermes_avatar_screen(lv_disp_t* display)
+{
+    if (display != nullptr) {
+        lv_display_set_default(display);
+    }
+
+    lv_obj_t* previous_screen = display != nullptr ? lv_display_get_screen_active(display) : lv_screen_active();
+    lv_obj_t* top_layer       = display != nullptr ? lv_display_get_layer_top(display) : lv_layer_top();
+    if (top_layer != nullptr) {
+        lv_obj_clean(top_layer);
+    }
+
+    lv_obj_t* screen = lv_obj_create(nullptr);
+    if (screen == nullptr) {
+        ESP_LOGW(TAG, "Failed to create Hermes avatar screen; reusing active screen");
+        screen = previous_screen;
+    }
+    if (screen == nullptr) {
+        return nullptr;
+    }
+
+    lv_obj_clean(screen);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_color(screen, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+
+    if (screen != previous_screen) {
+        lv_screen_load(screen);
+        if (previous_screen != nullptr) {
+            lv_obj_delete_async(previous_screen);
+        }
+    }
+
+    lv_obj_invalidate(screen);
+    return screen;
+}
+
 // Have to register themes, so the asset apply can update the text font
 void StackChanAvatarDisplay::InitializeLcdThemes()
 {
@@ -263,10 +301,11 @@ void StackChanAvatarDisplay::SetupUI()
     view::destroy_status_bar();
     stackchan.resetAvatar();
     stackchan.clearModifiers();
-    lv_obj_clean(lv_screen_active());
-    lv_obj_remove_flag(lv_screen_active(), LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_t* screen = create_hermes_avatar_screen(display_);
+    if (screen == nullptr) {
+        ESP_LOGE(TAG, "Cannot create Hermes avatar screen: active LVGL screen is null");
+        return;
+    }
 
     blink_modifier_id_           = -1;
     speaking_modifier_id_        = -1;
@@ -278,7 +317,7 @@ void StackChanAvatarDisplay::SetupUI()
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
     auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
+    avatar->init(screen);
     lv_obj_move_foreground(avatar->getPanel()->get());
     avatar->getPanel()->onClick().connect([]() {
         if (hal_bridge::is_hermes_ready()) {
@@ -292,7 +331,7 @@ void StackChanAvatarDisplay::SetupUI()
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
     stackchan.addModifier(std::make_unique<ImuEventModifier>());
 
-    preview_image_ = lv_image_create(lv_screen_active());
+    preview_image_ = lv_image_create(screen);
     lv_obj_set_size(preview_image_, 320, 240);
     lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
@@ -303,7 +342,7 @@ void StackChanAvatarDisplay::SetupUI()
     idle_motion_level_ = config.idleRandomMovementLevel;
 
     stackchan.update();
-    lv_obj_invalidate(lv_screen_active());
+    lv_obj_invalidate(screen);
     lv_refr_now(display_);
 
     ESP_LOGI(TAG, "Avatar created and started");
@@ -526,12 +565,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
 
     DisplayLockGuard lock(this);
 
     bool is_idle      = false;
-    bool is_listening = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
         if (speaking_modifier_id_ >= 0) {
@@ -590,12 +627,6 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             stackchan.removeModifier(idle_expression_modifier_id_);
             idle_expression_modifier_id_ = -1;
         }
-
-        // if (!is_listening) {
-        //     // Return to default pose
-        //     motion.pitchServo().moveWithSpeed(200, 350);
-        //     motion.yawServo().moveWithSpeed(0, 350);
-        // }
 
         _is_hermes_idle = false;
     }
