@@ -19,6 +19,7 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <apps/common/common.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -256,7 +257,10 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto& stackchan = GetStackChan();
 
+    ESP_LOGI(TAG, "SetupUI() rebuilding Hermes avatar screen");
     GetHAL().bootLogo.reset();
+    view::destroy_home_indicator();
+    view::destroy_status_bar();
     stackchan.resetAvatar();
     stackchan.clearModifiers();
     lv_obj_clean(lv_screen_active());
@@ -298,6 +302,7 @@ void StackChanAvatarDisplay::SetupUI()
     auto config        = hal_bridge::get_hermes_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
 
+    stackchan.update();
     lv_obj_invalidate(lv_screen_active());
     lv_refr_now(display_);
 
@@ -512,7 +517,7 @@ bool hal_bridge::is_hermes_idle()
 
 void StackChanAvatarDisplay::SetStatus(const char* status)
 {
-    // ESP_LOGE(TAG, "SetStatus: %s", status);
+    ESP_LOGI(TAG, "SetStatus: %s", status);
 
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
@@ -601,6 +606,10 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         avatar.setEmotion(Emotion::Neutral);
         is_sleeping_ = false;
     }
+
+    stackchan.update();
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(display_);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
