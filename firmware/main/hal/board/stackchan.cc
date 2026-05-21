@@ -398,7 +398,7 @@ private:
     {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num      = GPIO_NUM_37;
-        buscfg.miso_io_num      = GPIO_NUM_35;
+        buscfg.miso_io_num      = GPIO_NUM_NC;
         buscfg.sclk_io_num      = GPIO_NUM_36;
         buscfg.quadwp_io_num    = GPIO_NUM_NC;
         buscfg.quadhd_io_num    = GPIO_NUM_NC;
@@ -556,6 +556,11 @@ public:
     {
         return i2c_bus_;
     }
+
+    void PowerOff()
+    {
+        pmic_->PowerOff();
+    }
 };
 
 DECLARE_BOARD(M5StackCoreS3Board);
@@ -648,6 +653,12 @@ uint8_t hal_bridge::board_get_speaker_volume()
         volume = 10;
     }
     return volume;
+}
+
+void hal_bridge::board_power_off()
+{
+    auto& board = (M5StackCoreS3Board&)Board::GetInstance();
+    board.PowerOff();
 }
 
 void hal_bridge::toggle_hermes_chat_state()

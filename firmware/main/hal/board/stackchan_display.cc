@@ -13,6 +13,7 @@
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
 #include <system_info.h>
+#include <board.h>
 #include <lvgl.h>
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
@@ -242,6 +243,17 @@ void StackChanAvatarDisplay::SetupUI()
 
     DisplayLockGuard lock(this);
 
+    auto& board = Board::GetInstance();
+    if (auto* backlight = board.GetBacklight()) {
+        backlight->RestoreBrightness();
+    }
+    esp_err_t err = esp_lcd_panel_disp_on_off(panel_, true);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "Panel does not support disp_on_off; assuming ON");
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to turn display on during SetupUI: %s", esp_err_to_name(err));
+    }
+
     auto& stackchan = GetStackChan();
 
     GetHAL().bootLogo.reset();
@@ -263,6 +275,7 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
+    lv_obj_move_foreground(avatar->getPanel()->get());
     avatar->getPanel()->onClick().connect([]() {
         if (hal_bridge::is_hermes_ready()) {
             hal_bridge::toggle_hermes_chat_state();
@@ -284,6 +297,9 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto config        = hal_bridge::get_hermes_config();
     idle_motion_level_ = config.idleRandomMovementLevel;
+
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(display_);
 
     ESP_LOGI(TAG, "Avatar created and started");
 }

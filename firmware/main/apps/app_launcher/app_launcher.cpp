@@ -120,13 +120,13 @@ void AppLauncher::try_auto_open_hermes()
     _hermes_auto_open_attempted = true;
 
     for (const auto& app : getAppProps()) {
-        if (app.info.name == "AVATAR") {
-            mclog::tagInfo(getAppInfo().name, "auto opening AVATAR app, app id: {}", app.appID);
+        if (app.info.name == "HERMES") {
+            mclog::tagInfo(getAppInfo().name, "auto opening HERMES app, app id: {}", app.appID);
             openApp(app.appID);
             return;
         }
     }
 
-    mclog::tagWarn(getAppInfo().name, "AVATAR app not found for startup face");
+    mclog::tagWarn(getAppInfo().name, "HERMES app not found for autostart");
 #endif
 }

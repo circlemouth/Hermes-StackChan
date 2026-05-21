@@ -64,6 +64,15 @@ const tools: ToolDefinition[] = [
         },
     },
     {
+        name: 'stackchan_power_off',
+        description: 'Power off the physical StackChan. Use only when the user explicitly asks to turn it off.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
         name: 'stackchan_take_photo',
         description: [
             'Capture one still photo from StackChan camera and return it as an MCP image content block.',

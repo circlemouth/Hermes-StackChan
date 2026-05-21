@@ -37,7 +37,7 @@ type HermesTransport = {
 }
 
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
-const DEFAULT_TURN_TIMEOUT_MS = 180_000
+const DEFAULT_TURN_TIMEOUT_MS = 600_000
 const DEFAULT_DASHBOARD_URL = 'http://127.0.0.1:9119'
 
 function defaultHermesRoot(): string {
@@ -294,12 +294,19 @@ class RpcHermesClient {
     }
 
     async dispose(): Promise<void> {
+        if (this.disposed) return
         this.disposed = true
+        const error = new Error('Hermes client disposed')
         for (const [id, pending] of this.pending) {
             clearTimeout(pending.timer)
-            pending.reject(new Error('Hermes client disposed'))
+            pending.reject(error)
             this.pending.delete(id)
         }
+        for (const listener of [...this.closeListeners]) {
+            listener(error)
+        }
+        this.closeListeners.clear()
+        this.listeners.clear()
         await this.transport.dispose()
     }
 

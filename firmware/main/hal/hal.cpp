@@ -171,12 +171,10 @@ static void _stackchan_update_task(void* param)
             if (!is_setup_done) {
                 // Setup when the vendored audio runtime is ready
                 GetHAL().startSntp();
-                view::create_home_indicator([]() { GetHAL().requestWarmReboot(0); }, 0x81DBBD, 0x134233);
                 view::create_status_bar(0x81DBBD, 0x134233);
                 is_setup_done = true;
             }
 
-            view::update_home_indicator();
             view::update_status_bar();
         }
     }

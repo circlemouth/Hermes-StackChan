@@ -1,7 +1,9 @@
 import http from 'http'
-import { WebSocketServer, type WebSocket } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import { Session } from './session.js'
 import { serveMediaRequest, setObservedMediaBaseUrl } from './media.js'
+
+const DEVICE_KEEPALIVE_INTERVAL_MS = Math.max(1000, Number(process.env.STACKCHAN_WS_KEEPALIVE_MS ?? '3000') || 3000)
 
 export function startServer(port: number): void {
     const server = http.createServer((req, res) => {
@@ -24,12 +26,21 @@ export function startServer(port: number): void {
         console.log(`[server] connected: ${ip}`)
 
         const session = new Session(ws)
+        const keepaliveTimer = setInterval(() => {
+            if (ws.readyState !== WebSocket.OPEN) return
+            try {
+                ws.ping()
+            } catch {
+                // The close handler will clean up the session.
+            }
+        }, DEVICE_KEEPALIVE_INTERVAL_MS)
 
         ws.on('message', (data: Buffer | string) => {
             session.handleMessage(data)
         })
 
         ws.on('close', () => {
+            clearInterval(keepaliveTimer)
             console.log(`[server] disconnected: ${ip}`)
             session.close()
         })

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import { setTimeout as delay } from 'node:timers/promises'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { HermesClient, extractDashboardSessionToken } from '../src/hermes.ts'
 
@@ -8,6 +9,10 @@ type DashboardMock = {
     url: string
     requests: Array<Record<string, unknown>>
     close: () => Promise<void>
+}
+
+type DashboardMockOptions = {
+    completePrompt?: boolean
 }
 
 const originalEnv = {
@@ -27,7 +32,8 @@ function send(socket: WebSocket, payload: Record<string, unknown>): void {
     socket.send(JSON.stringify(payload))
 }
 
-async function startDashboardMock(html: string): Promise<DashboardMock> {
+async function startDashboardMock(html: string, options: DashboardMockOptions = {}): Promise<DashboardMock> {
+    const completePrompt = options.completePrompt ?? true
     const requests: Array<Record<string, unknown>> = []
     const server = http.createServer((_req, res) => {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -57,6 +63,7 @@ async function startDashboardMock(html: string): Promise<DashboardMock> {
             }
             if (message['method'] === 'prompt.submit') {
                 send(ws, { jsonrpc: '2.0', id: message['id'], result: { status: 'streaming' } })
+                if (!completePrompt) return
                 send(ws, {
                     jsonrpc: '2.0',
                     method: 'event',
@@ -95,6 +102,14 @@ async function startDashboardMock(html: string): Promise<DashboardMock> {
             await new Promise<void>((resolve) => server.close(() => resolve()))
         },
     }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+        if (predicate()) return
+        await delay(10)
+    }
+    assert.fail('condition was not reached')
 }
 
 test.afterEach(() => {
@@ -158,4 +173,23 @@ test('HermesClient reports a clear error when Dashboard token is missing', async
         await client.dispose()
         await dashboard.close()
     }
+})
+
+test('HermesClient rejects an in-flight prompt when disposed', async () => {
+    const dashboard = await startDashboardMock(
+        '<script>window.__HERMES_SESSION_TOKEN__="abc123";</script>',
+        { completePrompt: false },
+    )
+    process.env.HERMES_CONNECT_MODE = 'dashboard_ws'
+    process.env.HERMES_DASHBOARD_URL = dashboard.url
+    delete process.env.HERMES_DASHBOARD_TOKEN
+
+    const client = new HermesClient()
+    const pending = client.submitPrompt('時間がかかる質問')
+    await waitFor(() => dashboard.requests.some((request) => request['method'] === 'prompt.submit'))
+
+    const rejected = assert.rejects(pending, /Hermes client disposed/)
+    await client.dispose()
+    await rejected
+    await dashboard.close()
 })

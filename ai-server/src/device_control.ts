@@ -6,6 +6,7 @@ export type StackChanToolName =
     | 'stackchan_get_head_angles'
     | 'stackchan_set_head_angles'
     | 'stackchan_set_led_color'
+    | 'stackchan_power_off'
     | 'stackchan_take_photo'
     | 'stackchan_display_image'
     | 'stackchan_capture_screen'
@@ -19,6 +20,7 @@ const TOOL_MAP: Record<StackChanToolName, string> = {
     stackchan_get_head_angles: 'self.robot.get_head_angles',
     stackchan_set_head_angles: 'self.robot.set_head_angles',
     stackchan_set_led_color: 'self.robot.set_led_color',
+    stackchan_power_off: 'self.robot.power_off',
     stackchan_take_photo: 'self.camera.capture_photo',
     stackchan_display_image: 'self.screen.preview_image_url',
     stackchan_capture_screen: 'self.screen.capture_screenshot',

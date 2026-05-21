@@ -17,7 +17,10 @@
 #include <settings.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "sdkconfig.h"
+#include "board/hal_bridge.h"
 #include "board/stackchan_camera.h"
 #include "board/stackchan_display.h"
 
@@ -262,6 +265,21 @@ void Hal::robot_mcp_init()
 
             return true;
         });
+
+    mclog::tagInfo(_tag, "add robot.power_off tool");
+    mcp_server.AddTool("self.robot.power_off",
+                       "Power off the physical StackChan. Use only when the user explicitly asks to turn it off.",
+                       std::vector<Property>{}, [](const PropertyList& properties) -> ReturnValue {
+                           mclog::tagInfo(_tag, "power_off requested");
+                           xTaskCreate(
+                               [](void*) {
+                                   vTaskDelay(pdMS_TO_TICKS(300));
+                                   hal_bridge::board_power_off();
+                                   vTaskDelete(nullptr);
+                               },
+                               "power_off", 2048, nullptr, 5, nullptr);
+                           return true;
+                       });
 
 #ifndef CONFIG_IDF_TARGET_ESP32
     mclog::tagInfo(_tag, "add camera.capture_photo tool");
