@@ -41,6 +41,16 @@ static lv_obj_t* create_hermes_avatar_screen(lv_disp_t* display)
     if (top_layer != nullptr) {
         lv_obj_clean(top_layer);
     }
+    if (display != nullptr) {
+        lv_obj_t* sys_layer = lv_display_get_layer_sys(display);
+        if (sys_layer != nullptr) {
+            lv_obj_clean(sys_layer);
+        }
+        lv_obj_t* bottom_layer = lv_display_get_layer_bottom(display);
+        if (bottom_layer != nullptr) {
+            lv_obj_clean(bottom_layer);
+        }
+    }
 
     lv_obj_t* screen = lv_obj_create(nullptr);
     if (screen == nullptr) {
@@ -60,11 +70,13 @@ static lv_obj_t* create_hermes_avatar_screen(lv_disp_t* display)
     if (screen != previous_screen) {
         lv_screen_load(screen);
         if (previous_screen != nullptr) {
-            lv_obj_delete_async(previous_screen);
+            lv_obj_delete(previous_screen);
         }
     }
 
     lv_obj_invalidate(screen);
+    lv_refr_now(display);
+    ESP_LOGI(TAG, "Hermes avatar screen loaded: display=%p previous=%p screen=%p", display, previous_screen, screen);
     return screen;
 }
 
@@ -268,16 +280,96 @@ lv_disp_t* StackChanAvatarDisplay::GetLvglDisplay()
     return display_;
 }
 
+void StackChanAvatarDisplay::ClearPanelBlackLocked()
+{
+    if (panel_ == nullptr) {
+        ESP_LOGW(TAG, "Cannot clear panel for Hermes handoff: panel is null");
+        return;
+    }
+    if (width_ <= 0 || height_ <= 0) {
+        ESP_LOGW(TAG, "Cannot clear panel for Hermes handoff: invalid size %dx%d", width_, height_);
+        return;
+    }
+
+    std::vector<uint16_t> line_buffer(width_, 0x0000);
+    for (int y = 0; y < height_; ++y) {
+        esp_err_t err = esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, line_buffer.data());
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to clear panel for Hermes handoff at y=%d: %s", y, esp_err_to_name(err));
+            return;
+        }
+    }
+}
+
+void StackChanAvatarDisplay::ResetForHermesHandoffLocked()
+{
+    ESP_LOGI(TAG, "LVGL Hermes handoff reset start");
+    if (display_ == nullptr) {
+        ESP_LOGW(TAG, "Cannot reset Hermes handoff display: LVGL display is null");
+        return;
+    }
+
+    lv_display_set_default(display_);
+
+    lv_obj_t* top_layer = lv_display_get_layer_top(display_);
+    if (top_layer != nullptr) {
+        lv_obj_clean(top_layer);
+    }
+    lv_obj_t* sys_layer = lv_display_get_layer_sys(display_);
+    if (sys_layer != nullptr) {
+        lv_obj_clean(sys_layer);
+    }
+    lv_obj_t* bottom_layer = lv_display_get_layer_bottom(display_);
+    if (bottom_layer != nullptr) {
+        lv_obj_clean(bottom_layer);
+    }
+
+    lv_obj_t* active_screen = lv_display_get_screen_active(display_);
+    if (active_screen != nullptr) {
+        lv_obj_clean(active_screen);
+        lv_obj_remove_flag(active_screen, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(active_screen, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_bg_color(active_screen, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(active_screen, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_invalidate(active_screen);
+    }
+
+    ClearPanelBlackLocked();
+    lv_refr_now(display_);
+    ESP_LOGI(TAG, "LVGL Hermes handoff reset complete: display=%p active=%p", display_, active_screen);
+}
+
+void StackChanAvatarDisplay::ResetForHermesHandoff()
+{
+    DisplayLockGuard lock(this);
+    ResetForHermesHandoffLocked();
+}
+
 #include <hal/board/hal_bridge.h>
 
 void StackChanAvatarDisplay::SetupUI()
 {
     ESP_LOGI(TAG, "Hermes avatar SetupUI start");
 
-    // Prevent duplicate calls - if already called, return early
-    if (setup_ui_called_) {
-        ESP_LOGW(TAG, "SetupUI() called multiple times, skipping duplicate call");
+    auto& stackchan = GetStackChan();
+    if (setup_ui_called_ && stackchan.hasAvatar()) {
+        DisplayLockGuard lock(this);
+        if (display_ != nullptr) {
+            lv_display_set_default(display_);
+            lv_obj_t* active_screen = lv_display_get_screen_active(display_);
+            if (active_screen != nullptr) {
+                lv_obj_invalidate(active_screen);
+            }
+            lv_refr_now(display_);
+        } else {
+            ESP_LOGW(TAG, "SetupUI() already complete but LVGL display is null; refreshing default display");
+            lv_refr_now(nullptr);
+        }
+        ESP_LOGI(TAG, "SetupUI() already complete; refreshed existing avatar screen");
         return;
+    }
+    if (setup_ui_called_) {
+        ESP_LOGW(TAG, "SetupUI() was marked called but avatar is missing; rebuilding");
     }
 
     DisplayLockGuard lock(this);
@@ -292,8 +384,6 @@ void StackChanAvatarDisplay::SetupUI()
     } else if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to turn display on during SetupUI: %s", esp_err_to_name(err));
     }
-
-    auto& stackchan = GetStackChan();
 
     ESP_LOGI(TAG, "SetupUI() rebuilding Hermes avatar screen");
     GetHAL().bootLogo.reset();
@@ -562,13 +652,16 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     auto& stackchan = GetStackChan();
     if (!stackchan.hasAvatar()) {
-        ESP_LOGE(TAG, "Avatar is invalid");
-        return;
+        ESP_LOGW(TAG, "SetStatus called before avatar exists; attempting SetupUI()");
+        SetupUI();
+        if (!stackchan.hasAvatar()) {
+            ESP_LOGE(TAG, "Avatar is invalid after SetupUI()");
+            return;
+        }
     }
 
-    auto& avatar = stackchan.avatar();
-
     DisplayLockGuard lock(this);
+    auto& avatar = stackchan.avatar();
 
     bool is_idle      = false;
 
@@ -641,8 +734,16 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     }
 
     stackchan.update();
-    lv_obj_invalidate(lv_screen_active());
-    lv_refr_now(display_);
+    if (display_ != nullptr) {
+        lv_obj_t* active_screen = lv_display_get_screen_active(display_);
+        if (active_screen != nullptr) {
+            lv_obj_invalidate(active_screen);
+        }
+        lv_refr_now(display_);
+    } else {
+        ESP_LOGW(TAG, "SetStatus refresh fallback: LVGL display is null");
+        lv_refr_now(nullptr);
+    }
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)

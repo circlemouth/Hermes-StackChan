@@ -26,6 +26,7 @@ private:
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
 
     void CreateIdleMotionModifier();
+    void ClearPanelBlackLocked();
 
 protected:
     virtual bool Lock(int timeout_ms = 0) override;
@@ -50,6 +51,8 @@ public:
     virtual void SetStatus(const char* status) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000) override;
 
+    void ResetForHermesHandoffLocked();
+    void ResetForHermesHandoff();
     void LvglLock();
     void LvglUnlock();
     lv_disp_t* GetLvglDisplay();

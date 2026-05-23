@@ -15,7 +15,10 @@
       "text": "after reset"
     }
   },
-  { "t": 2800, "reset_scene": true },
-  { "t": 3500, "emotion": "happy", "status": "speaking" },
+  { "t": 2800, "reset_scene": true, "assert": ["face_visible", "bubble_hidden"] },
+  { "t": 3100, "fake_launcher_screen": true },
+  { "t": 3300, "launch_hermes_app": true },
+  { "t": 3500, "assert": ["face_visible", "no_launcher_fragment", "bubble_hidden"] },
+  { "t": 3700, "emotion": "happy", "status": "speaking" },
   { "t": 4700, "status": "standby", "clear_chat": true }
 ]

@@ -131,6 +131,7 @@ void Hal::updateHeapStatusLog()
 /*                                Hermes Bridge                              */
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
+#include "board/stackchan_display.h"
 #include <board.h>
 #include <display.h>
 #include <stackchan/stackchan.h>
@@ -245,7 +246,25 @@ void Hal::prepareHermesDisplay()
         return;
     }
 
+    auto* stackchan_display = static_cast<StackChanAvatarDisplay*>(display);
+    lv_disp_t* lvgl_display = stackchan_display->GetLvglDisplay();
+    ESP_LOGI(_tag.data(), "Preparing Hermes display: SetupUI start display=%p active=%p", lvgl_display,
+             lvgl_display != nullptr ? lv_display_get_screen_active(lvgl_display) : nullptr);
     display->SetupUI();
+    ESP_LOGI(_tag.data(), "Preparing Hermes display: SetupUI done display=%p active=%p", lvgl_display,
+             lvgl_display != nullptr ? lv_display_get_screen_active(lvgl_display) : nullptr);
+}
+
+void Hal::resetHermesHandoffDisplayLocked()
+{
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        ESP_LOGW(_tag.data(), "No display available while resetting Hermes handoff display");
+        return;
+    }
+
+    auto* stackchan_display = static_cast<StackChanAvatarDisplay*>(display);
+    stackchan_display->ResetForHermesHandoffLocked();
 }
 
 uint8_t Hal::getBatteryLevel()

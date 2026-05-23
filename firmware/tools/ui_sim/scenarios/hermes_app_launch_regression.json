@@ -30,5 +30,16 @@
     }
   },
   { "t": 2200, "assert": "face_visible" },
-  { "t": 2800, "clear_chat": true, "assert": ["face_visible", "bubble_hidden"] }
+  { "t": 2800, "clear_chat": true, "assert": ["face_visible", "bubble_hidden"] },
+  { "t": 3400, "fake_launcher_screen": true },
+  { "t": 3600, "launch_hermes_app": true },
+  {
+    "t": 3800,
+    "assert": [
+      "face_visible",
+      "no_launcher_fragment",
+      "bubble_hidden"
+    ]
+  },
+  { "t": 4200, "status": "standby", "assert": ["non_black", "face_visible", "no_text_fragment"] }
 ]

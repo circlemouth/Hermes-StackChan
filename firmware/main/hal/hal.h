@@ -158,6 +158,7 @@ public:
         return _hermes_start_requested;
     }
     void prepareHermesDisplay();
+    void resetHermesHandoffDisplayLocked();
     void startHermes();
     HermesBridgeConfig_t getHermesBridgeConfig();
     void setHermesBridgeConfig(HermesBridgeConfig_t config);

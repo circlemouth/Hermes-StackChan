@@ -80,21 +80,40 @@ void set_hermes_mode(bool mode)
 /* -------------------------------------------------------------------------- */
 #define DISPLAY_TYPE StackChanAvatarDisplay
 
+static DISPLAY_TYPE* get_stackchan_display()
+{
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        ESP_LOGW(_tag, "Board display is null");
+        return nullptr;
+    }
+    return static_cast<DISPLAY_TYPE*>(display);
+}
+
 lv_disp_t* display_get_lvgl_display()
 {
-    auto display = static_cast<DISPLAY_TYPE*>(Board::GetInstance().GetDisplay());
+    auto* display = get_stackchan_display();
+    if (display == nullptr) {
+        return nullptr;
+    }
     return display->GetLvglDisplay();
 }
 
 void disply_lvgl_lock()
 {
-    auto display = static_cast<DISPLAY_TYPE*>(Board::GetInstance().GetDisplay());
+    auto* display = get_stackchan_display();
+    if (display == nullptr) {
+        return;
+    }
     display->LvglLock();
 }
 
 void disply_lvgl_unlock()
 {
-    auto display = static_cast<DISPLAY_TYPE*>(Board::GetInstance().GetDisplay());
+    auto* display = get_stackchan_display();
+    if (display == nullptr) {
+        return;
+    }
     display->LvglUnlock();
 }
 

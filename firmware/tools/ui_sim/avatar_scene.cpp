@@ -59,10 +59,20 @@ bool AvatarScene::launchHermesApp()
         lv_display_set_default(display_);
     }
 
-    lv_obj_t* previous_screen = lv_screen_active();
-    lv_obj_t* top_layer       = lv_layer_top();
+    lv_obj_t* previous_screen = display_ != nullptr ? lv_display_get_screen_active(display_) : lv_screen_active();
+    lv_obj_t* top_layer       = display_ != nullptr ? lv_display_get_layer_top(display_) : lv_layer_top();
     if (top_layer != nullptr) {
         lv_obj_clean(top_layer);
+    }
+    if (display_ != nullptr) {
+        lv_obj_t* sys_layer = lv_display_get_layer_sys(display_);
+        if (sys_layer != nullptr) {
+            lv_obj_clean(sys_layer);
+        }
+        lv_obj_t* bottom_layer = lv_display_get_layer_bottom(display_);
+        if (bottom_layer != nullptr) {
+            lv_obj_clean(bottom_layer);
+        }
     }
 
     lv_obj_t* screen = lv_obj_create(nullptr);
@@ -77,7 +87,11 @@ bool AvatarScene::launchHermesApp()
     lv_screen_load(screen);
 
     if (previous_screen != nullptr && previous_screen != screen) {
-        lv_obj_delete_async(previous_screen);
+        lv_obj_delete(previous_screen);
+    }
+
+    if (display_ != nullptr) {
+        lv_refr_now(display_);
     }
 
     return setup(screen, display_);
