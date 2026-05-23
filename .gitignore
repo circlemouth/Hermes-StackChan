@@ -1,6 +1,7 @@
 .DS_Store
 .idea/
 .claude
+.codex/
 ai-server/node_modules
 .env
 ai-server/dist
@@ -9,3 +10,7 @@ artifacts/
 review-bundles/
 *-review-*.zip
 Hermes-StackChan-main-review-*.zip
+firmware/tools/ui_sim/build*/
+firmware/tools/ui_sim/.deps/
+firmware/tools/ui_sim/out/
+*.ppm

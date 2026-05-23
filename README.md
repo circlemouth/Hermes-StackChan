@@ -72,6 +72,30 @@ Hermes should call movement and LED tools only for deliberate actions. Firmware 
 - `app/`: Flutter app. It can still be useful as a BLE Wi-Fi provisioning client, but it is not required for the Hermes voice loop.
 - `server/`: Go backend from the broader product stack. It is not required for the local Hermes voice loop.
 
+## Desktop UI Simulator
+
+The firmware avatar UI can be checked on a desktop before flashing an M5Stack. The simulator is a standalone CMake project under `firmware/tools/ui_sim/`; it reuses the LVGL `DefaultAvatar`, `BreathModifier`, and `BlinkModifier`, but does not link production HAL, LCD, touch, servo, audio, camera, PMIC, or ESP-IDF initialization code.
+
+The maintained target is currently macOS. Headless mode is intentionally SDL-free and should be portable to other Unix-like environments with CMake and a C++ compiler, but non-macOS desktop runs are not yet treated as supported release paths.
+
+Quick smoke test:
+
+```bash
+./scripts/run-ui-sim.sh --headless \
+  --scenario firmware/tools/ui_sim/scenarios/avatar_smoke.json \
+  --screenshot /tmp/stackchan-ui-smoke.ppm
+```
+
+Open a visible 320x240 simulator window on a Mac with SDL2 available:
+
+```bash
+./scripts/run-ui-sim.sh --scenario firmware/tools/ui_sim/scenarios/avatar_smoke.json
+```
+
+The scripts do not run `sudo`, `brew install`, global `pip install`, global npm installs, or shell profile edits. Build output and fallback dependencies stay under `firmware/tools/ui_sim/build*` and `firmware/tools/ui_sim/.deps`.
+
+See `firmware/tools/ui_sim/README.md` for dependency details, PPM screenshot notes, troubleshooting, and hardware-only checks.
+
 ## Required Server Terminal
 
 Use a PC or server on the same LAN as StackChan. The M5Stack must be able to reach this machine by LAN IP address.

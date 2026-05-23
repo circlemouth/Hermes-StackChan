@@ -1,0 +1,13 @@
+[
+  { "t": 0, "emotion": "neutral" },
+  {
+    "t": 1000,
+    "chat": {
+      "role": "assistant",
+      "text": "こんにちは。StackChan UI simulatorです。"
+    }
+  },
+  { "t": 2500, "emotion": "happy" },
+  { "t": 4000, "status": "speaking" },
+  { "t": 6000, "status": "standby" }
+]
