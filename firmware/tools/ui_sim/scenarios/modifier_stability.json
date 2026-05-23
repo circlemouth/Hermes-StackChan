@@ -1,0 +1,16 @@
+[
+  { "t": 0, "emotion": "neutral", "status": "standby" },
+  {
+    "t": 1000,
+    "chat": {
+      "role": "assistant",
+      "text": "Breath and blink modifiers run through this scenario."
+    }
+  },
+  { "t": 4500, "emotion": "happy" },
+  { "t": 7500, "emotion": "doubtful" },
+  { "t": 10500, "emotion": "sleepy" },
+  { "t": 13500, "emotion": "neutral", "clear_chat": true },
+  { "t": 16500, "status": "speaking" },
+  { "t": 18500, "status": "standby" }
+]

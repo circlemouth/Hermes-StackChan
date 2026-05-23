@@ -78,6 +78,17 @@ Supported emotions: `neutral`, `happy`, `laughing`, `angry`, `sad`, `crying`, `s
 
 Supported status values: `speaking`, `listening`, `standby`. Unknown status text is shown in the speech bubble.
 
+Additional regression scenarios live under `firmware/tools/ui_sim/scenarios/`:
+
+- `emotion_cycle.json`: cycles all supported emotion strings.
+- `chat_bubble_regression.json`: checks short, long, Japanese, empty, consecutive, and cleared chat bubbles.
+- `status_cycle.json`: switches standby, listening, and speaking status in quick succession.
+- `lifecycle_regression.json`: rebuilds the avatar scene during playback to catch duplicate setup or stale screen fragments.
+- `hermes_app_launch_regression.json`: draws fake Launcher/HERMES app fragments, then loads a fresh Hermes avatar screen.
+- `modifier_stability.json`: runs breath, blink, emotion, and speaking animation transitions for a longer smoke check.
+
+Scenario events may also include `"clear_chat": true` to hide the speech bubble, `"reset_scene": true` to rebuild the simulator avatar scene, `"fake_launcher_screen": true` to draw stale app UI fragments, or `"launch_hermes_app": true` to simulate the Hermes app screen handoff.
+
 ## Troubleshooting
 
 - `SDL2 development files were not found via pkg-config`: visible mode cannot build. Use `--headless`, or install SDL2 outside this script using your normal local development setup.

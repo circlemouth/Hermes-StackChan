@@ -1,0 +1,9 @@
+[
+  { "t": 0, "status": "standby" },
+  { "t": 700, "status": "listening" },
+  { "t": 1400, "status": "speaking" },
+  { "t": 2600, "status": "listening" },
+  { "t": 3300, "status": "standby" },
+  { "t": 4100, "status": "speaking" },
+  { "t": 5200, "status": "standby" }
+]

@@ -1,0 +1,45 @@
+[
+  {
+    "t": 0,
+    "chat": {
+      "role": "assistant",
+      "text": "OK"
+    }
+  },
+  {
+    "t": 900,
+    "chat": {
+      "role": "assistant",
+      "text": "This is a longer StackChan simulator message that should stay inside the 320x240 display."
+    }
+  },
+  {
+    "t": 2200,
+    "chat": {
+      "role": "assistant",
+      "text": "こんにちは。長い日本語メッセージでも吹き出しが画面外にはみ出さないことを確認します。"
+    }
+  },
+  {
+    "t": 3600,
+    "chat": {
+      "role": "assistant",
+      "text": ""
+    }
+  },
+  {
+    "t": 4300,
+    "chat": {
+      "role": "system",
+      "text": "system update"
+    }
+  },
+  {
+    "t": 5000,
+    "chat": {
+      "role": "assistant",
+      "text": "final bubble"
+    }
+  },
+  { "t": 6000, "clear_chat": true }
+]

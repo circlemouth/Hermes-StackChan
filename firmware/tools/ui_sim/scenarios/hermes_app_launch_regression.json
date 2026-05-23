@@ -1,0 +1,13 @@
+[
+  { "t": 0, "fake_launcher_screen": true },
+  { "t": 600, "launch_hermes_app": true },
+  { "t": 1000, "emotion": "neutral", "status": "standby" },
+  {
+    "t": 1600,
+    "chat": {
+      "role": "assistant",
+      "text": "Hermes app launch path"
+    }
+  },
+  { "t": 2800, "clear_chat": true }
+]

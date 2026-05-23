@@ -13,6 +13,10 @@ struct ScenarioEvent {
     std::string chat_role;
     std::string chat_text;
     bool clear_chat = false;
+    bool has_chat = false;
+    bool reset_scene = false;
+    bool fake_launcher_screen = false;
+    bool launch_hermes_app = false;
 };
 
 class ScenarioRunner {

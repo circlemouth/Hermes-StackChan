@@ -52,6 +52,75 @@ bool AvatarScene::setup(lv_obj_t* root, lv_display_t* display)
     return true;
 }
 
+bool AvatarScene::launchHermesApp()
+{
+    if (display_ != nullptr) {
+        lv_display_set_default(display_);
+    }
+
+    lv_obj_t* previous_screen = lv_screen_active();
+    lv_obj_t* top_layer       = lv_layer_top();
+    if (top_layer != nullptr) {
+        lv_obj_clean(top_layer);
+    }
+
+    lv_obj_t* screen = lv_obj_create(nullptr);
+    if (screen == nullptr) {
+        return setup(previous_screen, display_);
+    }
+
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_color(screen, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_screen_load(screen);
+
+    if (previous_screen != nullptr && previous_screen != screen) {
+        lv_obj_delete_async(previous_screen);
+    }
+
+    return setup(screen, display_);
+}
+
+void AvatarScene::showFakeLauncherScreen()
+{
+    lv_obj_t* screen = lv_screen_active();
+    if (screen == nullptr) {
+        return;
+    }
+
+    auto& stackchan = GetStackChan();
+    stackchan.resetAvatar();
+    stackchan.clearModifiers();
+
+    lv_obj_clean(screen);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x20242A), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+
+    lv_obj_t* title = lv_label_create(screen);
+    lv_label_set_text(title, "Launcher");
+    lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    lv_obj_t* icon = lv_obj_create(screen);
+    lv_obj_set_size(icon, 48, 48);
+    lv_obj_set_style_radius(icon, 8, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(icon, lv_color_hex(0x4F8CFF), LV_PART_MAIN);
+    lv_obj_align(icon, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+    lv_obj_t* label = lv_label_create(screen);
+    lv_label_set_text(label, "HERMES");
+    lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    if (display_ != nullptr) {
+        lv_refr_now(display_);
+    }
+}
+
 void AvatarScene::update()
 {
     auto& stackchan = GetStackChan();

@@ -14,7 +14,7 @@ static const Vector2i _container_size = Vector2i(320, 74);
 static const Vector2i _arrow_offset   = Vector2i(40, -15);
 static const int _text_mx             = 20;
 static const int _bubble_min_width    = 90;
-static const int _bubble_max_width    = 340;
+static const int _bubble_max_width    = 300;
 static const int _bubble_height       = 52;
 static const int _bubble_min_offset_x = 66;
 static const int _bubble_max_offset_x = 0;
@@ -56,7 +56,7 @@ DefaultSpeechBubble::DefaultSpeechBubble(lv_obj_t* parent, lv_color_t primaryCol
     _text->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _text->setAlign(LV_ALIGN_CENTER);
     _text->setPos(0, 0);
-    _text->setWidth(320 - _text_mx * 2);
+    _text->setWidth(_bubble_max_width - _text_mx * 2);
     _text->setLongMode(LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
 
     clearSpeech();
@@ -90,6 +90,7 @@ void DefaultSpeechBubble::setSpeech(std::string_view text)
 
     _bubble->setWidth(bubble_width);
     _bubble->setX(bubble_offset_x);
+    _text->setWidth(max(1, bubble_width - _text_mx * 2));
 
     setVisible(true);
 }

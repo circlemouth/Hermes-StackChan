@@ -1,0 +1,21 @@
+[
+  { "t": 0, "emotion": "neutral", "status": "standby" },
+  {
+    "t": 700,
+    "chat": {
+      "role": "assistant",
+      "text": "before reset"
+    }
+  },
+  { "t": 1400, "reset_scene": true },
+  {
+    "t": 2100,
+    "chat": {
+      "role": "assistant",
+      "text": "after reset"
+    }
+  },
+  { "t": 2800, "reset_scene": true },
+  { "t": 3500, "emotion": "happy", "status": "speaking" },
+  { "t": 4700, "status": "standby", "clear_chat": true }
+]

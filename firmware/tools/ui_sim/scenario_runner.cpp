@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include <ArduinoJson.h>
+#include <lvgl.h>
 
 bool ScenarioRunner::load(const std::string& path, std::string& error)
 {
@@ -43,10 +44,20 @@ bool ScenarioRunner::load(const std::string& path, std::string& error)
         if (obj["clear_chat"] | false) {
             event.clear_chat = true;
         }
+        if (obj["reset_scene"] | false) {
+            event.reset_scene = true;
+        }
+        if (obj["fake_launcher_screen"] | false) {
+            event.fake_launcher_screen = true;
+        }
+        if (obj["launch_hermes_app"] | false) {
+            event.launch_hermes_app = true;
+        }
         if (obj["chat"].is<JsonObject>()) {
             JsonObject chat = obj["chat"].as<JsonObject>();
             event.chat_role = chat["role"] | "assistant";
             event.chat_text = chat["text"] | "";
+            event.has_chat = true;
         }
 
         events_.push_back(std::move(event));
@@ -63,6 +74,15 @@ void ScenarioRunner::update(std::uint32_t elapsed_ms, AvatarScene& scene)
 {
     while (next_event_ < events_.size() && events_[next_event_].t <= elapsed_ms) {
         const auto& event = events_[next_event_];
+        if (event.fake_launcher_screen) {
+            scene.showFakeLauncherScreen();
+        }
+        if (event.launch_hermes_app) {
+            scene.launchHermesApp();
+        }
+        if (event.reset_scene) {
+            scene.setup(lv_screen_active(), lv_display_get_default());
+        }
         if (!event.emotion.empty()) {
             scene.setEmotion(event.emotion.c_str());
         }
@@ -72,7 +92,7 @@ void ScenarioRunner::update(std::uint32_t elapsed_ms, AvatarScene& scene)
         if (event.clear_chat) {
             scene.clearChatMessages();
         }
-        if (!event.chat_text.empty()) {
+        if (event.has_chat) {
             const char* role = event.chat_role.empty() ? "assistant" : event.chat_role.c_str();
             scene.setChatMessage(role, event.chat_text.c_str());
         }

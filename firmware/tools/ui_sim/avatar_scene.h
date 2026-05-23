@@ -10,8 +10,10 @@
 class AvatarScene {
 public:
     bool setup(lv_obj_t* root, lv_display_t* display = nullptr);
+    bool launchHermesApp();
     void update();
 
+    void showFakeLauncherScreen();
     void setEmotion(const char* emotion);
     void setChatMessage(const char* role, const char* content);
     void clearChatMessages();

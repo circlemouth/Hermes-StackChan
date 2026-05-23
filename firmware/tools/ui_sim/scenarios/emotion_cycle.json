@@ -1,0 +1,11 @@
+[
+  { "t": 0, "emotion": "neutral", "status": "standby" },
+  { "t": 800, "emotion": "happy" },
+  { "t": 1600, "emotion": "laughing" },
+  { "t": 2400, "emotion": "angry" },
+  { "t": 3200, "emotion": "sad" },
+  { "t": 4000, "emotion": "crying" },
+  { "t": 4800, "emotion": "sleepy" },
+  { "t": 5600, "emotion": "doubtful" },
+  { "t": 6400, "emotion": "neutral", "clear_chat": true }
+]
