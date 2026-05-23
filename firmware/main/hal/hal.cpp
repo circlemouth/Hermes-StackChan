@@ -132,6 +132,7 @@ void Hal::updateHeapStatusLog()
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 #include <board.h>
+#include <display.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <assets/assets.h>
