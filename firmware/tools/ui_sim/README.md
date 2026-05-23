@@ -8,6 +8,8 @@ This is a standalone desktop simulator for the StackChan LVGL avatar UI. It is s
 - Existing `DefaultAvatar` skin from `firmware/main/stackchan/avatar/skins/default/`.
 - Existing `BreathModifier` and `BlinkModifier`.
 - Scenario-driven emotion, chat bubble, and status changes.
+- Simulator-only preview, notification, HERMES app readiness, and screen-handoff debug states.
+- Headless scenario assertions for framebuffer/layout regressions.
 - Headless framebuffer smoke test with PPM screenshot output.
 
 Production firmware HAL, LCD, I2C, SPI, PMIC, camera, touch, servo, and audio initialization are not linked into this simulator.
@@ -85,9 +87,47 @@ Additional regression scenarios live under `firmware/tools/ui_sim/scenarios/`:
 - `status_cycle.json`: switches standby, listening, and speaking status in quick succession.
 - `lifecycle_regression.json`: rebuilds the avatar scene during playback to catch duplicate setup or stale screen fragments.
 - `hermes_app_launch_regression.json`: draws fake Launcher/HERMES app fragments, then loads a fresh Hermes avatar screen.
+- `preview_image_regression.json`: checks simulator preview overlay visibility, foreground behavior, and clear/expiry.
+- `notification_regression.json`: checks short and long notification display plus auto hide.
+- `app_not_ready_regression.json`: checks HERMES app not-ready screens for missing bridge URL and Wi-Fi.
+- `combined_overlay_regression.json`: checks status, chat, preview, and notification stacking.
 - `modifier_stability.json`: runs breath, blink, emotion, and speaking animation transitions for a longer smoke check.
 
 Scenario events may also include `"clear_chat": true` to hide the speech bubble, `"reset_scene": true` to rebuild the simulator avatar scene, `"fake_launcher_screen": true` to draw stale app UI fragments, or `"launch_hermes_app": true` to simulate the Hermes app screen handoff.
+
+Simulator-only debug events:
+
+```json
+[
+  { "t": 0, "preview_image": { "duration_ms": 900 } },
+  { "t": 1000, "notification": { "text": "Notice", "duration_ms": 1000 } },
+  { "t": 2200, "app_ready_state": "missing_url" }
+]
+```
+
+Supported `app_ready_state` values are `ready`, `missing_url`, and `wifi_missing`. `ready` runs the Hermes avatar handoff path. `clear_preview` and `clear_notification` remove simulator overlays explicitly.
+
+For the suspected "HERMES app opens but the face is not drawn" regression, run:
+
+```bash
+./scripts/run-ui-sim.sh --headless \
+  --scenario firmware/tools/ui_sim/scenarios/hermes_app_launch_regression.json \
+  --screenshot /tmp/stackchan-ui-hermes-launch.ppm
+```
+
+That scenario first draws fake Launcher/HERMES fragments, then runs the Hermes avatar screen handoff and asserts that the avatar face pixels are present in the central 320x240 surface while stale app fragments are gone.
+
+Headless scenarios may include `assert` as a string, object, or array. Supported assertion types are `non_black`, `face_visible`, `no_text_fragment`, `bbox_within`, `bubble_hidden`, `preview_visible`, `preview_hidden`, `notification_visible`, and `notification_hidden`.
+
+```json
+{
+  "t": 1000,
+  "assert": [
+    "non_black",
+    { "type": "bbox_within", "target": "notification", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+  ]
+}
+```
 
 ## Troubleshooting
 

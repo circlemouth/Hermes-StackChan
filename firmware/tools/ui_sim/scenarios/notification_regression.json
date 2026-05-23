@@ -1,0 +1,29 @@
+[
+  {
+    "t": 0,
+    "notification": {
+      "text": "Short notice",
+      "duration_ms": 700
+    }
+  },
+  {
+    "t": 100,
+    "assert": [
+      "notification_visible",
+      { "type": "bbox_within", "target": "notification", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  { "t": 900, "assert": "notification_hidden" },
+  {
+    "t": 1200,
+    "notification": {
+      "text": "This is a longer notification that should be clipped inside the 320x240 simulator surface.",
+      "duration_ms": 1000
+    }
+  },
+  {
+    "t": 1300,
+    "assert": "notification_visible"
+  },
+  { "t": 2400, "assert": "notification_hidden" }
+]

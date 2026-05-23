@@ -87,11 +87,21 @@ headless smoke test:
   --screenshot /tmp/stackchan-ui-smoke.ppm
 ```
 
+HERMES app 起動時の画面引き渡しを確認し、古い Launcher/HERMES 断片が消えた後に avatar の顔が実際に描画されることを assertion 付きで確認する:
+
+```bash
+./scripts/run-ui-sim.sh --headless \
+  --scenario firmware/tools/ui_sim/scenarios/hermes_app_launch_regression.json \
+  --screenshot /tmp/stackchan-ui-hermes-launch.ppm
+```
+
 SDL2 が使える Mac で 320x240 の visible window を開く:
 
 ```bash
 ./scripts/run-ui-sim.sh --scenario firmware/tools/ui_sim/scenarios/avatar_smoke.json
 ```
+
+simulator には preview overlay、notification、app not-ready 画面、status/chat/emotion 遷移、lifecycle reset、overlay stacking の headless regression scenario もあります。scenario assertion で黒画面、顔 pixel の欠落、古い launcher 断片、画面外 bbox、overlay 表示状態の regression を検出できます。
 
 script は `sudo`、`brew install`、global `pip install`、global npm install、shell profile 変更を行いません。build output と fallback dependency は `firmware/tools/ui_sim/build*` と `firmware/tools/ui_sim/.deps` に閉じ込めます。
 

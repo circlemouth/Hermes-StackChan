@@ -86,11 +86,21 @@ Quick smoke test:
   --screenshot /tmp/stackchan-ui-smoke.ppm
 ```
 
+Check the HERMES app launch handoff and assert that the avatar face is actually drawn after stale Launcher/HERMES fragments are cleared:
+
+```bash
+./scripts/run-ui-sim.sh --headless \
+  --scenario firmware/tools/ui_sim/scenarios/hermes_app_launch_regression.json \
+  --screenshot /tmp/stackchan-ui-hermes-launch.ppm
+```
+
 Open a visible 320x240 simulator window on a Mac with SDL2 available:
 
 ```bash
 ./scripts/run-ui-sim.sh --scenario firmware/tools/ui_sim/scenarios/avatar_smoke.json
 ```
+
+The simulator also has headless regression scenarios for preview overlays, notifications, app-not-ready screens, status/chat/emotion transitions, lifecycle resets, and overlay stacking. Scenario assertions can catch black screens, missing face pixels, stale launcher fragments, off-surface bounding boxes, and overlay visibility regressions.
 
 The scripts do not run `sudo`, `brew install`, global `pip install`, global npm installs, or shell profile edits. Build output and fallback dependencies stay under `firmware/tools/ui_sim/build*` and `firmware/tools/ui_sim/.deps`.
 

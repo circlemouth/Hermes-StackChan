@@ -1,0 +1,28 @@
+[
+  {
+    "t": 0,
+    "preview_image": { "duration_ms": 900 }
+  },
+  {
+    "t": 100,
+    "assert": [
+      "preview_visible",
+      { "type": "bbox_within", "target": "preview", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  { "t": 1100, "assert": "preview_hidden" },
+  {
+    "t": 1400,
+    "preview_image": { "duration_ms": 0 },
+    "notification": { "text": "Preview should stay behind this notification.", "duration_ms": 900 }
+  },
+  {
+    "t": 1500,
+    "assert": [
+      "preview_visible",
+      "notification_visible",
+      { "type": "bbox_within", "target": "notification", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  { "t": 2300, "clear_preview": true, "assert": "preview_hidden" }
+]

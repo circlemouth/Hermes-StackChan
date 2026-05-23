@@ -190,6 +190,14 @@ int main(int argc, char** argv)
         lv_timer_handler();
         lv_refr_now(display);
 
+        if (options.headless) {
+            std::string assertion_error;
+            if (!scenario.verifyDueAssertions(elapsed, g_framebuffer, kWidth, kHeight, assertion_error)) {
+                std::cerr << assertion_error << "\n";
+                return 1;
+            }
+        }
+
         if (options.duration_ms > 0 && elapsed >= options.duration_ms) {
             break;
         }

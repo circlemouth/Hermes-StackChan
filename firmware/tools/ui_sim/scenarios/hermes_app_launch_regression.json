@@ -1,7 +1,27 @@
 [
   { "t": 0, "fake_launcher_screen": true },
   { "t": 600, "launch_hermes_app": true },
-  { "t": 1000, "emotion": "neutral", "status": "standby" },
+  {
+    "t": 800,
+    "assert": [
+      "face_visible",
+      "no_text_fragment",
+      "bubble_hidden"
+    ]
+  },
+  {
+    "t": 1000,
+    "emotion": "neutral",
+    "status": "standby",
+    "assert": [
+      "non_black",
+      "face_visible",
+      "no_text_fragment",
+      { "type": "bbox_within", "target": "face", "x_min": 50, "y_min": 60, "x_max": 270, "y_max": 180 },
+      { "type": "bbox_within", "target": "status_dot", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 },
+      "bubble_hidden"
+    ]
+  },
   {
     "t": 1600,
     "chat": {
@@ -9,5 +29,6 @@
       "text": "Hermes app launch path"
     }
   },
-  { "t": 2800, "clear_chat": true }
+  { "t": 2200, "assert": "face_visible" },
+  { "t": 2800, "clear_chat": true, "assert": ["face_visible", "bubble_hidden"] }
 ]

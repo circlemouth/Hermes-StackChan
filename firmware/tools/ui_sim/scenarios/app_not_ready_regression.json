@@ -1,0 +1,36 @@
+[
+  {
+    "t": 0,
+    "app_ready_state": "missing_url"
+  },
+  {
+    "t": 200,
+    "assert": [
+      "non_black",
+      { "type": "bbox_within", "target": "non_black", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  {
+    "t": 1200,
+    "app_ready_state": "wifi_missing"
+  },
+  {
+    "t": 1400,
+    "assert": [
+      "non_black",
+      { "type": "bbox_within", "target": "non_black", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  {
+    "t": 2400,
+    "app_ready_state": "ready"
+  },
+  {
+    "t": 2600,
+    "assert": [
+      "non_black",
+      "no_text_fragment",
+      "bubble_hidden"
+    ]
+  }
+]

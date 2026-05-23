@@ -1,0 +1,30 @@
+[
+  { "t": 0, "emotion": "happy", "status": "speaking" },
+  {
+    "t": 500,
+    "chat": {
+      "role": "assistant",
+      "text": "Overlay stacking check"
+    }
+  },
+  {
+    "t": 900,
+    "preview_image": { "duration_ms": 1600 },
+    "notification": {
+      "text": "Notification stays foreground",
+      "duration_ms": 1200
+    }
+  },
+  {
+    "t": 1000,
+    "assert": [
+      "preview_visible",
+      "notification_visible",
+      { "type": "bbox_within", "target": "preview", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 },
+      { "type": "bbox_within", "target": "notification", "x_min": 0, "y_min": 0, "x_max": 319, "y_max": 239 }
+    ]
+  },
+  { "t": 2300, "assert": "notification_hidden" },
+  { "t": 2700, "assert": "preview_hidden" },
+  { "t": 3100, "status": "standby", "clear_chat": true, "assert": "bubble_hidden" }
+]
