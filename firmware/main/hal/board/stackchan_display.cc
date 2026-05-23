@@ -272,13 +272,13 @@ lv_disp_t* StackChanAvatarDisplay::GetLvglDisplay()
 
 void StackChanAvatarDisplay::SetupUI()
 {
+    ESP_LOGI(TAG, "Hermes avatar SetupUI start");
+
     // Prevent duplicate calls - if already called, return early
     if (setup_ui_called_) {
         ESP_LOGW(TAG, "SetupUI() called multiple times, skipping duplicate call");
         return;
     }
-
-    Display::SetupUI();  // Mark SetupUI as called
 
     DisplayLockGuard lock(this);
 
@@ -306,6 +306,8 @@ void StackChanAvatarDisplay::SetupUI()
         ESP_LOGE(TAG, "Cannot create Hermes avatar screen: active LVGL screen is null");
         return;
     }
+
+    Display::SetupUI();  // Mark SetupUI as called after the Hermes screen exists.
 
     blink_modifier_id_           = -1;
     speaking_modifier_id_        = -1;
@@ -345,7 +347,7 @@ void StackChanAvatarDisplay::SetupUI()
     lv_obj_invalidate(screen);
     lv_refr_now(display_);
 
-    ESP_LOGI(TAG, "Avatar created and started");
+    ESP_LOGI(TAG, "Hermes avatar SetupUI complete");
 }
 
 void StackChanAvatarDisplay::LvglLock()

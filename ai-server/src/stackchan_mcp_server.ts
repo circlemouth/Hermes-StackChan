@@ -13,12 +13,12 @@ type ToolDefinition = {
     inputSchema: Record<string, unknown>
 }
 
-const tools: ToolDefinition[] = [
+export const tools: ToolDefinition[] = [
     {
         name: 'stackchan_get_status',
         description: [
             'Get local StackChan status, including battery, charging, Wi-Fi state, volume, brightness, firmware version,',
-            'Hermes autostart, and whether the bridge WebSocket is configured.',
+            'HERMES Launcher auto-open setting, and whether the bridge WebSocket is configured.',
             'The firmware does not expose the full bridge URL or secrets.',
         ].join(' '),
         inputSchema: {
@@ -38,20 +38,29 @@ const tools: ToolDefinition[] = [
     },
     {
         name: 'stackchan_set_head_angles',
-        description: 'Move StackChan head to the specified yaw and/or pitch angles.',
+        description: [
+            'Move StackChan head to a yaw and/or pitch angle.',
+            'Use small, infrequent movements during conversation so the robot feels alive without being distracting.',
+            'For attention, return yaw near 0 and pitch slightly upward.',
+            'Do not narrate the motion unless the user asks what you are doing.',
+        ].join(' '),
         inputSchema: {
             type: 'object',
             properties: {
                 yaw: { type: 'number', minimum: -128, maximum: 128 },
-                pitch: { type: 'number', minimum: -128, maximum: 128 },
-                speed: { type: 'number', minimum: 1, maximum: 255, default: 150 },
+                pitch: { type: 'number', minimum: 0, maximum: 90 },
+                speed: { type: 'number', minimum: 100, maximum: 1000, default: 150 },
             },
             additionalProperties: false,
         },
     },
     {
         name: 'stackchan_set_led_color',
-        description: 'Set StackChan RGB LED color.',
+        description: [
+            'Set StackChan RGB LED color as a subtle nonverbal cue.',
+            'Use this sparingly, for example soft green while listening, soft blue while speaking, or off when idle.',
+            'Values are limited to 0..168 for safe brightness.',
+        ].join(' '),
         inputSchema: {
             type: 'object',
             properties: {
@@ -120,6 +129,63 @@ const tools: ToolDefinition[] = [
             properties: {
                 quality: { type: 'integer', minimum: 1, maximum: 100, default: 80 },
             },
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_create_reminder',
+        description: [
+            'Create a local reminder on the physical StackChan.',
+            'Use this when the user asks StackChan to remind them after a relative duration, such as "remind me in 10 minutes".',
+            'The device will display and play a local notification when the reminder fires.',
+            'Do not use this for calendar scheduling at an absolute date unless you can convert it to a relative duration.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                duration_seconds: {
+                    type: 'integer',
+                    minimum: 1,
+                    maximum: 86400,
+                    description: 'Relative reminder delay in seconds.',
+                },
+                message: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 120,
+                    description: 'Short message to show when the reminder fires.',
+                },
+                repeat: {
+                    type: 'boolean',
+                    default: false,
+                    description: 'Whether the reminder repeats using the same duration.',
+                },
+            },
+            required: ['duration_seconds', 'message'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_get_reminders',
+        description: 'Get active local StackChan reminders.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_stop_reminder',
+        description: 'Stop a local StackChan reminder by ID. Use stackchan_get_reminders first if the ID is unknown.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'integer',
+                    description: 'Reminder ID returned by stackchan_create_reminder or stackchan_get_reminders.',
+                },
+            },
+            required: ['id'],
             additionalProperties: false,
         },
     },

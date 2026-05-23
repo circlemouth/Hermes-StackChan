@@ -45,15 +45,6 @@ static std::string websocket_scheme(std::string_view url)
     return std::string(url.substr(0, scheme_end));
 }
 
-static bool hermes_autostart_enabled()
-{
-#if CONFIG_HERMES_AUTOSTART
-    return true;
-#else
-    return false;
-#endif
-}
-
 static std::string get_websocket_url()
 {
     Settings ws_settings("websocket", false);
@@ -104,6 +95,7 @@ void AppAiAgent::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "on open");
     ESP_LOGI(TAG, "AppAiAgent::onOpen entered");
+    ESP_LOGI(TAG, "HERMES explicit open");
 
     std::string websocket_url = load_websocket_url_from_sd();
 
@@ -113,17 +105,19 @@ void AppAiAgent::onOpen()
     const bool has_wifi_config        = GetHAL().isAppConfiged();
     const bool wifi_ready_for_runtime = is_wifi_connected || has_wifi_config;
     const bool is_hermes_start_ready  = has_websocket_url && wifi_ready_for_runtime;
-    const bool is_hermes_autostart_enabled = hermes_autostart_enabled();
     const std::string scheme          = websocket_scheme(websocket_url);
 
     ESP_LOGI(TAG, "websocket_url configured=%d, length=%u, scheme=%s", has_websocket_url,
              static_cast<unsigned>(websocket_url.length()), scheme.c_str());
     ESP_LOGI(TAG, "Wi-Fi status=%s, wifi_configured=%d", wifi_status_to_string(wifi_status), has_wifi_config);
+    ESP_LOGI(TAG, "Hermes start readiness: websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
+             has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
 
-    if (is_hermes_autostart_enabled && is_hermes_start_ready) {
+    if (is_hermes_start_ready) {
         // Mooncake apps are stopped before the Hermes bridge runtime starts, so
         // avoid creating a temporary LVGL screen that would be torn down at once.
-        ESP_LOGI(TAG, "Hermes start requested");
+        ESP_LOGI(TAG, "Starting Hermes...");
+        ESP_LOGI(TAG, "Hermes start requested by explicit HERMES app open");
         GetHAL().requestHermesStart();
         return;
     }
@@ -133,8 +127,6 @@ void AppAiAgent::onOpen()
         status_text = "Bridge URL missing";
     } else if (!wifi_ready_for_runtime) {
         status_text = "Wi-Fi not connected";
-    } else if (!is_hermes_autostart_enabled) {
-        status_text = "Hermes autostart disabled";
     }
 
     {
@@ -176,11 +168,6 @@ void AppAiAgent::onOpen()
         _device_id->align(LV_ALIGN_TOP_MID, 0, 156);
         _device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
         _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
-    }
-
-    if (!is_hermes_autostart_enabled) {
-        ESP_LOGW(TAG, "Hermes start deferred: autostart disabled by CONFIG_HERMES_AUTOSTART");
-        return;
     }
 
     if (!is_hermes_start_ready) {

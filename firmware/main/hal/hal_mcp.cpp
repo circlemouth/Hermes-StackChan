@@ -369,19 +369,35 @@ void Hal::robot_mcp_init()
     mcp_server.AddTool("self.robot.get_reminders", "Get list of active reminders.", std::vector<Property>{},
                        [this](const PropertyList& properties) -> ReturnValue {
                            mclog::tagInfo(_tag, "get_reminders");
-                           auto reminders          = tools::get_active_reminders();
-                           std::string result_json = "[";
-                           for (size_t i = 0; i < reminders.size(); ++i) {
-                               const auto& r = reminders[i];
-                               result_json +=
-                                   fmt::format(R"({{"id": {}, "duration_ms": {}, "message": "{}", "repeat": {}}})",
-                                               r.id, r.durationMs, r.message, r.repeat ? "true" : "false");
-                               if (i < reminders.size() - 1) {
-                                   result_json += ", ";
-                               }
+                           auto reminders = tools::get_active_reminders();
+                           cJSON* result  = cJSON_CreateArray();
+                           if (result == nullptr) {
+                               throw std::runtime_error("Failed to allocate reminders JSON");
                            }
-                           result_json += "]";
-                           mclog::tagInfo(_tag, "get_reminders result: {}", result_json);
+
+                           for (const auto& r : reminders) {
+                               cJSON* item = cJSON_CreateObject();
+                               if (item == nullptr) {
+                                   cJSON_Delete(result);
+                                   throw std::runtime_error("Failed to allocate reminder JSON item");
+                               }
+
+                               cJSON_AddNumberToObject(item, "id", r.id);
+                               cJSON_AddNumberToObject(item, "duration_ms", r.durationMs);
+                               cJSON_AddNumberToObject(item, "duration_seconds", r.durationMs / 1000);
+                               cJSON_AddStringToObject(item, "message", r.message.c_str());
+                               cJSON_AddBoolToObject(item, "repeat", r.repeat);
+                               cJSON_AddItemToArray(result, item);
+                           }
+
+                           char* json = cJSON_PrintUnformatted(result);
+                           std::string result_json = json != nullptr ? json : "[]";
+                           if (json != nullptr) {
+                               cJSON_free(json);
+                           }
+                           cJSON_Delete(result);
+
+                           mclog::tagInfo(_tag, "get_reminders result count: {}", reminders.size());
                            return result_json;
                        });
 

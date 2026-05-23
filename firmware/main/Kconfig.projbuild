@@ -8,13 +8,13 @@ config OTA_URL
         Hermes firmware leaves this empty to avoid cloud OTA checks by default.
 
 config HERMES_AUTOSTART
-    bool "Automatically start Hermes runtime from HERMES app"
-    default y
+    bool "Automatically open HERMES app from Launcher"
+    default n
     help
-        When enabled, the HERMES launcher screen may request the Hermes runtime
-        after a websocket URL is configured and Wi-Fi is connected. Disable this
-        for display and setup debugging; missing URL or disconnected Wi-Fi still
-        prevent runtime start even when this option is enabled.
+        When enabled, Launcher may automatically open the HERMES app after the
+        device is configured. This option only controls Launcher auto-open and
+        does not disable manual Hermes startup when the user explicitly opens
+        the HERMES app.
 
 choice
     prompt "Flash Assets"
