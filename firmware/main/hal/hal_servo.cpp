@@ -70,8 +70,10 @@ public:
     {
         set_angle_limit(_config.angleLimit);
         if (!restore_position_mode()) {
-            _available = false;
-            mclog::tagError(_tag, "id: {} disabled because position mode recovery failed", _config.id);
+            mclog::tagWarn(
+                _tag,
+                "id: {} position mode recovery is unverified; keeping servo write-only instead of disabling it",
+                _config.id);
         }
         get_zero_pos_from_nvs();
         Servo::init();
@@ -121,9 +123,18 @@ public:
             return;
         }
 
+        if (!_torque_enabled_cache) {
+            setTorqueEnabled(true);
+        }
+
         const int ret = _scs_bus.WritePos(_config.id, mapped_angle, 20, 0);
+        mclog::tagInfo(_tag, "id: {} WritePos({}, 20, 0) ret: {}", _config.id, mapped_angle, ret);
         if (ret != 1) {
-            mclog::tagWarn(_tag, "id: {} WritePos failed, ret: {}", _config.id, ret);
+            mclog::tagWarn(
+                _tag,
+                "id: {} WritePos ACK/readback failed, ret: {}; command may still have been delivered",
+                _config.id,
+                ret);
         }
     }
 
@@ -168,8 +179,15 @@ public:
 
         Servo::setTorqueEnabled(enabled);
         const int ret = _scs_bus.EnableTorque(_config.id, enabled ? 1 : 0);
+        _torque_enabled_cache = enabled;
+        mclog::tagInfo(_tag, "id: {} EnableTorque({}) ret: {}", _config.id, enabled, ret);
         if (ret != 1) {
-            mclog::tagWarn(_tag, "id: {} EnableTorque({}) failed, ret: {}", _config.id, enabled, ret);
+            mclog::tagWarn(
+                _tag,
+                "id: {} EnableTorque({}) ACK/readback failed, ret: {}; cache updated optimistically",
+                _config.id,
+                enabled,
+                ret);
         }
         // mclog::tagInfo(_tag, "id: {} set torque: {}", _id, enabled);
     }
@@ -238,9 +256,18 @@ public:
             return;
         }
 
+        if (!_torque_enabled_cache) {
+            setTorqueEnabled(true);
+        }
+
         const int ret = _scs_bus.WritePWM(_config.id, mapped_velocity);
+        mclog::tagInfo(_tag, "id: {} WritePWM({}) ret: {}", _config.id, mapped_velocity, ret);
         if (ret != 1) {
-            mclog::tagWarn(_tag, "id: {} WritePWM failed, ret: {}", _config.id, ret);
+            mclog::tagWarn(
+                _tag,
+                "id: {} WritePWM ACK/readback failed, ret: {}; command may still have been delivered",
+                _config.id,
+                ret);
         }
     }
 
@@ -251,14 +278,21 @@ private:
     int _zero_pos      = 0;
     Mode _current_mode = Mode::Position;
     bool _available    = true;
+    bool _torque_enabled_cache = false;
 
     bool restore_position_mode()
     {
         const int current_min = _scs_bus.readWord(_config.id, SCSCL_MIN_ANGLE_LIMIT_L);
         const int current_max = _scs_bus.readWord(_config.id, SCSCL_MAX_ANGLE_LIMIT_L);
         if (current_min < 0 || current_max < 0) {
-            mclog::tagWarn(_tag, "id: {} failed to read angle limit, min: {}, max: {}", _config.id, current_min, current_max);
-            return false;
+            mclog::tagWarn(
+                _tag,
+                "id: {} failed to read angle limit, min: {}, max: {}; keeping write-only degraded mode",
+                _config.id,
+                current_min,
+                current_max);
+            _current_mode = Mode::Position;
+            return true;
         }
 
         const int expected_min = _config.rawPosLimit.x;
@@ -279,14 +313,20 @@ private:
 
         const int min_ret = _scs_bus.writeWord(_config.id, SCSCL_MIN_ANGLE_LIMIT_L, static_cast<u16>(expected_min));
         if (min_ret != 1) {
-            mclog::tagError(_tag, "id: {} failed to restore min angle limit, ret: {}", _config.id, min_ret);
-            return false;
+            mclog::tagWarn(
+                _tag,
+                "id: {} failed to restore min angle limit, ret: {}; keeping servo write-only",
+                _config.id,
+                min_ret);
         }
 
         const int max_ret = _scs_bus.writeWord(_config.id, SCSCL_MAX_ANGLE_LIMIT_L, static_cast<u16>(expected_max));
         if (max_ret != 1) {
-            mclog::tagError(_tag, "id: {} failed to restore max angle limit, ret: {}", _config.id, max_ret);
-            return false;
+            mclog::tagWarn(
+                _tag,
+                "id: {} failed to restore max angle limit, ret: {}; keeping servo write-only",
+                _config.id,
+                max_ret);
         }
 
         _current_mode = Mode::Position;
@@ -306,23 +346,42 @@ private:
         const int ret = _scs_bus.SwitchMode(_config.id, static_cast<uint8_t>(targetMode));
         if (ret != 1 && !(targetMode == Mode::Position && ret == 0)) {
             mclog::tagWarn(
-                _tag, "id: {} SwitchMode({}) failed, ret: {}", _config.id, static_cast<int>(targetMode), ret);
-            return false;
+                _tag,
+                "id: {} SwitchMode({}) ACK/readback failed, ret: {}; continuing in requested mode optimistically",
+                _config.id,
+                static_cast<int>(targetMode),
+                ret);
         }
         _current_mode = targetMode;
         return true;
     }
 };
 
-static bool servo_responds(const ServoConfig_t& config)
+static void log_servo_readback_status(const ServoConfig_t& config, const char* axis)
 {
     const int ping_id = _scs_bus.Ping(static_cast<u8>(config.id));
     if (ping_id == config.id) {
-        return true;
+        mclog::tagInfo(_hal_servo_tag, "{} servo id {} Ping OK", axis, config.id);
+    } else {
+        mclog::tagWarn(
+            _hal_servo_tag,
+            "{} servo id {} Ping failed, ret: {}; not falling back to NullServo",
+            axis,
+            config.id,
+            ping_id);
     }
 
     const int current_pos = _scs_bus.ReadPos(config.id);
-    return current_pos >= 0;
+    if (current_pos >= 0) {
+        mclog::tagInfo(_hal_servo_tag, "{} servo id {} ReadPos OK: {}", axis, config.id, current_pos);
+    } else {
+        mclog::tagWarn(
+            _hal_servo_tag,
+            "{} servo id {} ReadPos failed, ret: {}; keeping ScsServo in readback_unverified mode",
+            axis,
+            config.id,
+            current_pos);
+    }
 }
 
 void Hal::servo_init()
@@ -354,19 +413,10 @@ void Hal::servo_init()
         yaw_servo   = std::make_unique<NullServo>(yaw_servo_config.angleLimit);
         pitch_servo = std::make_unique<NullServo>(pitch_servo_config.angleLimit);
     } else {
-        if (servo_responds(yaw_servo_config)) {
-            yaw_servo = std::make_unique<ScsServo>(yaw_servo_config);
-        } else {
-            mclog::tagWarn(_hal_servo_tag, "yaw servo id {} not responding", yaw_servo_config.id);
-            yaw_servo = std::make_unique<NullServo>(yaw_servo_config.angleLimit);
-        }
-
-        if (servo_responds(pitch_servo_config)) {
-            pitch_servo = std::make_unique<ScsServo>(pitch_servo_config);
-        } else {
-            mclog::tagWarn(_hal_servo_tag, "pitch servo id {} not responding", pitch_servo_config.id);
-            pitch_servo = std::make_unique<NullServo>(pitch_servo_config.angleLimit);
-        }
+        log_servo_readback_status(yaw_servo_config, "yaw");
+        log_servo_readback_status(pitch_servo_config, "pitch");
+        yaw_servo   = std::make_unique<ScsServo>(yaw_servo_config);
+        pitch_servo = std::make_unique<ScsServo>(pitch_servo_config);
     }
 
     auto motion      = std::make_unique<Motion>(std::move(yaw_servo), std::move(pitch_servo));

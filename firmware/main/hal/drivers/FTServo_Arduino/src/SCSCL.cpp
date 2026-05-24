@@ -239,5 +239,5 @@ int SCSCL::SwitchMode(int ID, u8 mode)
 
 int SCSCL::ReadToqueEnable(int ID)
 {
-	return readWord(ID, SCSCL_TORQUE_ENABLE);
+	return readByte(ID, SCSCL_TORQUE_ENABLE);
 }

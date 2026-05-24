@@ -285,6 +285,8 @@ public:
 
         auto& motion = GetStackChan().motion();
         motion.setAutoAngleSyncEnabled(true);
+        motion.setAutoTorqueReleaseEnabled(false);
+        motion.setTorqueEnabled(true);
     }
 
     void update() override
