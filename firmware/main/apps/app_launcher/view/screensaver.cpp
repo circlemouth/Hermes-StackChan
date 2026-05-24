@@ -32,6 +32,7 @@ void Screensaver::onInit()
 
     _screen = std::make_unique<Screen>();
     _screen->setBgColor(lv_color_hex(_bg_color));
+    _screen->setBgOpa(LV_OPA_COVER);
     _screen->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
     _screen->setPadding(0, 0, 0, 0);
     _screen->load();
@@ -39,7 +40,8 @@ void Screensaver::onInit()
     _logo = std::make_unique<Container>(_screen->get());
     _logo->setSize(_logo_size.width, _logo_size.height);
     _logo->setBgColor(lv_color_hex(_logo_colors[0]));
-    _logo->align(LV_ALIGN_CENTER, 0, 0);
+    _logo->setAlign(LV_ALIGN_TOP_LEFT);
+    _logo->setPos((_screen_size.width - _logo_size.width) / 2, (_screen_size.height - _logo_size.height) / 2);
     _logo->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
     _logo->setPadding(0, 0, 0, 0);
     _logo->setBorderWidth(0);
@@ -86,7 +88,9 @@ void Screensaver::onRender(float dt)
     getWorld().forEachObject([&](GameObject* obj) {
         if (obj->groupId == _logo_id) {
             auto p = obj->get<Transform>()->position;
-            _logo->setPos((int)p.x - _logo_size.width / 2, (int)p.y - _logo_size.height / 2);
+            const int x = static_cast<int>(p.x - _logo_size.width / 2);
+            const int y = static_cast<int>(p.y - _logo_size.height / 2);
+            _logo->setPos(x, y);
         }
     });
 }
