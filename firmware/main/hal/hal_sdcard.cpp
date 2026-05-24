@@ -11,6 +11,7 @@
 #include <driver/gpio.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
+#include <esp_log.h>
 #include <esp_rom_gpio.h>
 #include <soc/spi_periph.h>
 
@@ -46,10 +47,30 @@ static void prepare_shared_spi_for_sd()
 
 static void restore_shared_spi_for_display()
 {
-    gpio_set_direction(SD_MISO_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(SD_MISO_PIN, 1);
-    gpio_set_level(LCD_CS_PIN, 1);
+    ESP_LOGI(TAG, "restoring shared SPI pins for LCD");
+
     gpio_set_level(SD_CS_PIN, 1);
+    gpio_set_level(LCD_CS_PIN, 1);
+
+    gpio_reset_pin(SD_MISO_PIN);
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << SD_MISO_PIN);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+
+    esp_err_t err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to restore LCD DC GPIO config: %s", esp_err_to_name(err));
+    }
+
+    gpio_set_level(SD_MISO_PIN, 1);
+    gpio_set_level(SD_CS_PIN, 1);
+    gpio_set_level(LCD_CS_PIN, 1);
+
+    ESP_LOGI(TAG, "shared SPI pins restored for LCD");
 }
 
 static esp_err_t mount_sd_card()

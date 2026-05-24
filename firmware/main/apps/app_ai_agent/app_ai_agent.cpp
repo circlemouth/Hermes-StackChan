@@ -97,12 +97,24 @@ void AppAiAgent::onOpen()
     ESP_LOGI(TAG, "AppAiAgent::onOpen entered");
     ESP_LOGI(TAG, "HERMES explicit open");
 
-    std::string websocket_url = load_websocket_url_from_sd();
+    std::string websocket_url = get_websocket_url();
+    bool has_wifi_config      = GetHAL().isAppConfiged();
 
-    const WifiStatus wifi_status      = GetHAL().getWifiStatus();
+    const bool need_sd_config_import = websocket_url.empty() || !has_wifi_config;
+    if (need_sd_config_import) {
+        ESP_LOGI(TAG, "SD config import required: websocket_url_configured=%d, wifi_configured=%d",
+                 !websocket_url.empty(), has_wifi_config);
+        websocket_url = load_websocket_url_from_sd();
+        ESP_LOGI(TAG, "SD config import path completed; LCD handoff will continue");
+    } else {
+        ESP_LOGI(TAG, "SD config import skipped: websocket_url already configured and Wi-Fi config exists");
+    }
+
+    const WifiStatus wifi_status = GetHAL().getWifiStatus();
+    has_wifi_config             = GetHAL().isAppConfiged();
+
     const bool has_websocket_url      = !websocket_url.empty();
     const bool is_wifi_connected      = wifi_status != WifiStatus::None;
-    const bool has_wifi_config        = GetHAL().isAppConfiged();
     const bool wifi_ready_for_runtime = is_wifi_connected || has_wifi_config;
     const bool is_hermes_start_ready  = has_websocket_url && wifi_ready_for_runtime;
     const std::string scheme          = websocket_scheme(websocket_url);

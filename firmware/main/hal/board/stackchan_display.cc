@@ -394,7 +394,10 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(screen);
-    lv_obj_move_foreground(avatar->getPanel()->get());
+    auto* avatar_panel = avatar->getPanel() != nullptr ? avatar->getPanel()->get() : nullptr;
+    if (avatar_panel != nullptr) {
+        lv_obj_move_foreground(avatar_panel);
+    }
     avatar->getPanel()->onClick().connect([]() {
         if (hal_bridge::is_hermes_ready()) {
             hal_bridge::toggle_hermes_chat_state();
@@ -420,6 +423,12 @@ void StackChanAvatarDisplay::SetupUI()
     stackchan.update();
     lv_obj_invalidate(screen);
     lv_refr_now(display_);
+
+    auto* active_screen = display_ != nullptr ? lv_display_get_screen_active(display_) : nullptr;
+    ESP_LOGI(TAG, "Hermes avatar diagnostics: screen=%p active=%p panel=%p child_count=%u hidden=%d", screen,
+             active_screen, avatar_panel,
+             avatar_panel != nullptr ? static_cast<unsigned>(lv_obj_get_child_count(avatar_panel)) : 0,
+             avatar_panel != nullptr ? lv_obj_has_flag(avatar_panel, LV_OBJ_FLAG_HIDDEN) : -1);
 
     ESP_LOGI(TAG, "Hermes avatar SetupUI complete");
 }
