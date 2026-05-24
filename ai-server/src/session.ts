@@ -62,6 +62,7 @@ const MIN_FRAMES_FOR_STT = TURN_CONTROL_CONFIG.minFramesForStt
 // TTS 再生後、次の listen start を受け付けるまでのクールダウン (ms) — エコー誤検知防止
 const POST_TTS_COOLDOWN_MS = TURN_CONTROL_CONFIG.postTtsCooldownMs
 const MCP_REQUEST_TIMEOUT_MS = 10_000
+const PROCESSING_KEEPALIVE_MS = 10_000
 
 type PendingMcpRequest = {
     resolve: (value: unknown) => void
@@ -402,11 +403,20 @@ export class Session {
         if (!text.trim()) return
 
         // 2. Hermes LLM turn
-        const reply = await withTiming(
-            `session:${this.sessionId}:llm`,
-            () => this.hermes.submitPrompt(text),
-            { textLength: text.length },
-        )
+        const processingKeepalive = setInterval(() => {
+            this.sendJson({ type: 'llm', emotion: 'doubtful' })
+        }, PROCESSING_KEEPALIVE_MS)
+        this.sendJson({ type: 'llm', emotion: 'doubtful' })
+        let reply: string
+        try {
+            reply = await withTiming(
+                `session:${this.sessionId}:llm`,
+                () => this.hermes.submitPrompt(text),
+                { textLength: text.length },
+            )
+        } finally {
+            clearInterval(processingKeepalive)
+        }
         console.log(`[session ${this.sessionId}] LLM: "${reply}"`)
         this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
         void this.displayFirstImageFromReply(reply)

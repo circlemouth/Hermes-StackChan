@@ -86,7 +86,9 @@ test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus 
 
     const messages = jsonMessages(ws)
     assert.equal(messages.find((msg) => msg['type'] === 'stt')?.['text'], 'こんにちは')
-    assert.equal(messages.find((msg) => msg['type'] === 'llm')?.['emotion'], 'neutral')
+    const llmMessages = messages.filter((msg) => msg['type'] === 'llm')
+    assert.equal(llmMessages[0]?.['emotion'], 'doubtful')
+    assert.equal(llmMessages.at(-1)?.['emotion'], 'neutral')
     assert.ok(messages.some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === 'やあ'))
     assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2])])
 
