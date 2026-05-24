@@ -280,27 +280,6 @@ lv_disp_t* StackChanAvatarDisplay::GetLvglDisplay()
     return display_;
 }
 
-void StackChanAvatarDisplay::ClearPanelBlackLocked()
-{
-    if (panel_ == nullptr) {
-        ESP_LOGW(TAG, "Cannot clear panel for Hermes handoff: panel is null");
-        return;
-    }
-    if (width_ <= 0 || height_ <= 0) {
-        ESP_LOGW(TAG, "Cannot clear panel for Hermes handoff: invalid size %dx%d", width_, height_);
-        return;
-    }
-
-    std::vector<uint16_t> line_buffer(width_, 0x0000);
-    for (int y = 0; y < height_; ++y) {
-        esp_err_t err = esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, line_buffer.data());
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to clear panel for Hermes handoff at y=%d: %s", y, esp_err_to_name(err));
-            return;
-        }
-    }
-}
-
 void StackChanAvatarDisplay::ResetForHermesHandoffLocked()
 {
     ESP_LOGI(TAG, "LVGL Hermes handoff reset start");
@@ -334,7 +313,12 @@ void StackChanAvatarDisplay::ResetForHermesHandoffLocked()
         lv_obj_invalidate(active_screen);
     }
 
-    ClearPanelBlackLocked();
+    // Do not bypass LVGL / esp_lvgl_port here. Once LVGL owns the
+    // panel IO, direct esp_lcd_panel_draw_bitmap() calls can race with
+    // queued LVGL flushes and may outlive their source buffer. That failure
+    // mode leaves a mostly black screen with a corrupted colored stripe at
+    // the bottom on CoreS3 / StackChan hardware. Let LVGL perform the actual
+    // flush from the cleaned active screen instead.
     lv_refr_now(display_);
     ESP_LOGI(TAG, "LVGL Hermes handoff reset complete: display=%p active=%p", display_, active_screen);
 }
