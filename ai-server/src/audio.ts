@@ -1,8 +1,9 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const OpusScript = require('opusscript') as typeof import('opusscript')
 
-const INPUT_SAMPLE_RATE = 16000
-const INPUT_FRAME_SAMPLES = (INPUT_SAMPLE_RATE * 60) / 1000  // 960
+export const INPUT_SAMPLE_RATE = 16000
+export const INPUT_FRAME_DURATION_MS = 60
+export const INPUT_FRAME_SAMPLES = (INPUT_SAMPLE_RATE * INPUT_FRAME_DURATION_MS) / 1000  // 960
 
 export const OUTPUT_SAMPLE_RATE = 24000
 export const OUTPUT_FRAME_DURATION_MS = 60
@@ -10,6 +11,20 @@ const OUTPUT_FRAME_SAMPLES = (OUTPUT_SAMPLE_RATE * OUTPUT_FRAME_DURATION_MS) / 1
 
 const inputDecoder = new OpusScript(INPUT_SAMPLE_RATE, 1)
 const outputEncoder = new OpusScript(OUTPUT_SAMPLE_RATE, 1, OpusScript.Application.AUDIO)
+
+export type InputOpusDecoder = {
+    decodeFrame(opus: Buffer): Buffer
+}
+
+export function createInputOpusDecoder(): InputOpusDecoder {
+    const decoder = new OpusScript(INPUT_SAMPLE_RATE, 1)
+    return {
+        decodeFrame(opus: Buffer): Buffer {
+            const pcm = decoder.decode(opus)
+            return Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+        },
+    }
+}
 
 // BinaryProtocol3: [type:1][reserved:1][payload_size:2 BE][payload...]
 // Xiaozhi v3 uses type 0 for Opus. Type 1 is accepted for compatibility with older local builds.

@@ -1,11 +1,12 @@
 import { randomUUID } from 'crypto'
 import type WebSocket from 'ws'
-import { decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS } from './audio.js'
+import { createInputOpusDecoder, decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, INPUT_SAMPLE_RATE, INPUT_FRAME_DURATION_MS, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS, type InputOpusDecoder } from './audio.js'
 import { HermesClient } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
 import { registerDeviceSession } from './device_control.js'
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
+import { LocalRmsVad, readLocalRmsVadConfig, type LocalRmsVadConfig } from './local_vad.js'
 
 type State = 'idle' | 'listening' | 'processing'
 export type StackChanEmotion = 'neutral' | 'happy' | 'laughing' | 'angry' | 'sad' | 'crying' | 'sleepy' | 'doubtful'
@@ -78,10 +79,13 @@ type SessionDeps = {
     hermes?: HermesSessionClient
     registerDeviceSession?: typeof registerDeviceSession
     decodeOpusFrames?: typeof decodeOpusFrames
+    createInputOpusDecoder?: typeof createInputOpusDecoder
+    decodeOpusFrame?: (opus: Buffer) => Buffer
     encodeWavToOpusFrames?: typeof encodeWavToOpusFrames
     transcribeWav?: typeof transcribeWithHermes
     synthesizeText?: typeof synthesizeWithHermes
     postTtsCooldownMs?: number
+    localVadConfig?: LocalRmsVadConfig
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,9 +100,13 @@ export class Session {
     private readonly hermes: HermesSessionClient
     private readonly unregisterDeviceSession: () => void
     private readonly decodeOpusFramesFn: typeof decodeOpusFrames
+    private readonly createInputOpusDecoderFn: typeof createInputOpusDecoder
+    private readonly decodeOpusFrameFn?: (opus: Buffer) => Buffer
     private readonly encodeWavToOpusFramesFn: typeof encodeWavToOpusFrames
     private readonly transcribeWavFn: typeof transcribeWithHermes
     private readonly synthesizeTextFn: typeof synthesizeWithHermes
+    private readonly localVadConfig: LocalRmsVadConfig
+    private readonly localVad: LocalRmsVad
     private readonly pendingMcp = new Map<number, PendingMcpRequest>()
     private nextMcpId = 1
     private silenceTimer?: ReturnType<typeof setTimeout>
@@ -106,14 +114,25 @@ export class Session {
     private delayedListenTimer?: ReturnType<typeof setTimeout>
     private cooldownUntil = 0
     private readonly postTtsCooldownMs: number
+    private pcmChunks: Buffer[] = []
+    private preRollPcmChunks: Buffer[] = []
+    private streamingDecoder: InputOpusDecoder
+    private streamingDecodeFailed = false
+    private processingSource: 'local-vad' | 'listen-stop' | 'max-duration' | 'arrival-gap' = 'arrival-gap'
+    private currentSpeechMs = 0
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
         this.hermes = deps.hermes ?? new HermesClient()
         this.decodeOpusFramesFn = deps.decodeOpusFrames ?? decodeOpusFrames
+        this.createInputOpusDecoderFn = deps.createInputOpusDecoder ?? createInputOpusDecoder
+        this.decodeOpusFrameFn = deps.decodeOpusFrame
         this.encodeWavToOpusFramesFn = deps.encodeWavToOpusFrames ?? encodeWavToOpusFrames
         this.transcribeWavFn = deps.transcribeWav ?? transcribeWithHermes
         this.synthesizeTextFn = deps.synthesizeText ?? synthesizeWithHermes
         this.postTtsCooldownMs = deps.postTtsCooldownMs ?? POST_TTS_COOLDOWN_MS
+        this.localVadConfig = deps.localVadConfig ?? readLocalRmsVadConfig()
+        this.localVad = new LocalRmsVad(this.localVadConfig)
+        this.streamingDecoder = this.createInputOpusDecoderFn()
         this.unregisterDeviceSession = (deps.registerDeviceSession ?? registerDeviceSession)(this)
     }
 
@@ -154,7 +173,68 @@ export class Session {
         const payload = extractOpusPayload(data, this.version)
         if (payload) {
             this.opusFrames.push(payload)
+            if (this.shouldUseLocalVad()) {
+                this.handleVadPayload(payload)
+            } else {
+                this.resetSilenceTimer()
+            }
+        }
+    }
+
+    private shouldUseLocalVad(): boolean {
+        return this.localVadConfig.enabled && !this.streamingDecodeFailed
+    }
+
+    private handleVadPayload(payload: Buffer): void {
+        let pcm: Buffer
+        try {
+            pcm = this.decodeOpusFrameFn ? this.decodeOpusFrameFn(payload) : this.streamingDecoder.decodeFrame(payload)
+        } catch (error) {
+            this.streamingDecodeFailed = true
+            console.warn(`[session ${this.sessionId}] local VAD streaming decode failed, using arrival-gap timeout: ${String(error)}`)
+            this.resetVadBuffers()
             this.resetSilenceTimer()
+            return
+        }
+        if (pcm.length === 0) return
+
+        const collectingBefore = this.pcmChunks.length > 0
+        if (collectingBefore) {
+            this.pcmChunks.push(pcm)
+        } else {
+            this.appendPreRollPcm(pcm)
+        }
+
+        const result = this.localVad.processPcm(pcm)
+        this.currentSpeechMs = result.speechMs
+
+        if (result.speechStarted && this.pcmChunks.length === 0) {
+            this.pcmChunks = this.preRollPcmChunks.splice(0)
+            console.log(`[session ${this.sessionId}] vad speech started rms=${result.rms.toFixed(4)}`)
+        }
+
+        if (result.ignoredShortSpeech) {
+            console.log(`[session ${this.sessionId}] vad ignored short speech speechMs=${result.speechMs} silenceMs=${result.silenceMs}`)
+            this.opusFrames = []
+            this.resetVadBuffers()
+            return
+        }
+
+        if (result.utteranceEnded) {
+            console.log(`[session ${this.sessionId}] vad silence ended speechMs=${result.speechMs} silenceMs=${result.silenceMs}`)
+            this.triggerProcess('local-vad')
+        }
+    }
+
+    private appendPreRollPcm(pcm: Buffer): void {
+        if (this.localVadConfig.preRollMs <= 0) {
+            this.preRollPcmChunks = []
+            return
+        }
+        this.preRollPcmChunks.push(pcm)
+        const maxChunks = Math.max(1, Math.ceil(this.localVadConfig.preRollMs / INPUT_FRAME_DURATION_MS))
+        while (this.preRollPcmChunks.length > maxChunks) {
+            this.preRollPcmChunks.shift()
         }
     }
 
@@ -162,7 +242,7 @@ export class Session {
         if (this.silenceTimer) clearTimeout(this.silenceTimer)
         this.silenceTimer = setTimeout(() => {
             console.log(`[session ${this.sessionId}] silence detected, triggering process`)
-            this.triggerProcess()
+            this.triggerProcess('arrival-gap')
         }, SILENCE_TIMEOUT_MS)
     }
 
@@ -172,15 +252,39 @@ export class Session {
         if (this.delayedListenTimer) { clearTimeout(this.delayedListenTimer); this.delayedListenTimer = undefined }
     }
 
-    private triggerProcess(): void {
+    private resetVadBuffers(): void {
+        this.localVad.reset()
+        this.pcmChunks = []
+        this.preRollPcmChunks = []
+        this.currentSpeechMs = 0
+    }
+
+    private resetCapture(): void {
+        this.opusFrames = []
+        this.resetVadBuffers()
+        this.streamingDecoder = this.createInputOpusDecoderFn()
+        this.streamingDecodeFailed = false
+    }
+
+    private triggerProcess(reason: 'local-vad' | 'listen-stop' | 'max-duration' | 'arrival-gap', force = false): void {
         if (this.state !== 'listening') return
         this.clearTimers()
-        if (this.opusFrames.length < MIN_FRAMES_FOR_STT) {
-            console.log(`[session ${this.sessionId}] too few frames (${this.opusFrames.length}), skipping`)
-            this.opusFrames = []
+        const hasVadPcm = this.pcmChunks.length > 0
+        const pcmBytes = this.pcmChunks.reduce((sum, chunk) => sum + chunk.length, 0)
+        const minPcmBytes = Math.ceil((this.localVadConfig.minSpeechMs / 1000) * INPUT_SAMPLE_RATE) * 2
+        if (!force && hasVadPcm && (this.currentSpeechMs < this.localVadConfig.minSpeechMs || pcmBytes < minPcmBytes)) {
+            console.log(`[session ${this.sessionId}] too little VAD speech speechMs=${this.currentSpeechMs} pcmBytes=${pcmBytes}, skipping`)
+            this.resetCapture()
             this.state = 'idle'
             return
         }
+        if (!force && !hasVadPcm && this.opusFrames.length < MIN_FRAMES_FOR_STT) {
+            console.log(`[session ${this.sessionId}] too few frames (${this.opusFrames.length}), skipping`)
+            this.resetCapture()
+            this.state = 'idle'
+            return
+        }
+        this.processingSource = reason
         this.state = 'processing'
         this.process().catch((err) => {
             console.error(`[session ${this.sessionId}] process error:`, err)
@@ -192,18 +296,21 @@ export class Session {
     private startListening(source: string): void {
         this.clearTimers()
         this.state = 'listening'
-        this.opusFrames = []
+        this.resetCapture()
+        if (!this.localVadConfig.enabled) {
+            console.log(`[session ${this.sessionId}] local vad disabled, using arrival-gap timeout`)
+        }
         // 最長録音タイマーをセット
         this.maxDurationTimer = setTimeout(() => {
             console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
-            this.triggerProcess()
+            this.triggerProcess('max-duration', true)
         }, MAX_RECORDING_MS)
         console.log(`[session ${this.sessionId}] listening started (${source})`)
     }
 
     private delayListeningUntilCooldownEnds(source: string): void {
         if (this.delayedListenTimer) clearTimeout(this.delayedListenTimer)
-        this.opusFrames = []
+        this.resetCapture()
         const delayMs = Math.max(0, this.cooldownUntil - Date.now())
         this.delayedListenTimer = setTimeout(() => {
             this.delayedListenTimer = undefined
@@ -245,14 +352,14 @@ export class Session {
                 }
                 this.startListening(source)
             } else if (listenState === 'stop') {
-                this.triggerProcess()
+                this.triggerProcess('listen-stop', true)
             }
         }
 
         if (type === 'abort') {
             this.clearTimers()
             this.state = 'idle'
-            this.opusFrames = []
+            this.resetCapture()
             void this.hermes.interrupt().catch((error) => {
                 console.error(`[session ${this.sessionId}] Hermes interrupt error:`, error)
             })
@@ -267,18 +374,23 @@ export class Session {
     private async process(): Promise<void> {
         const processStartMs = nowMs()
         const frames = this.opusFrames.splice(0)
-        console.log(`[session ${this.sessionId}] processing ${frames.length} frames`)
-        if (frames.length === 0) return
+        const vadPcm = this.pcmChunks.splice(0)
+        this.preRollPcmChunks = []
+        const source = this.processingSource
+        console.log(`[session ${this.sessionId}] processing source=${source} frames=${frames.length} pcmBytes=${vadPcm.reduce((sum, chunk) => sum + chunk.length, 0)}`)
+        if (frames.length === 0 && vadPcm.length === 0) return
 
         // 1. Opus -> PCM -> Hermes STT
-        const pcm = await withTiming(
-            `session:${this.sessionId}:audio.decode`,
-            async () => this.decodeOpusFramesFn(frames),
-            { frames: frames.length },
-        )
+        const pcm = vadPcm.length > 0
+            ? Buffer.concat(vadPcm)
+            : await withTiming(
+                `session:${this.sessionId}:audio.decode`,
+                async () => this.decodeOpusFramesFn(frames),
+                { frames: frames.length },
+            )
         if (pcm.length === 0) return
 
-        const wavForStt = pcmToWav(pcm, 16000)
+        const wavForStt = pcmToWav(pcm, INPUT_SAMPLE_RATE)
         const text = await withTiming(
             `session:${this.sessionId}:stt`,
             () => this.transcribeWavFn(wavForStt),

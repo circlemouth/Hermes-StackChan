@@ -56,8 +56,10 @@ function run(command: string, args: string[], options?: { cwd?: string; env?: No
 
 function hermesPythonEnv(): NodeJS.ProcessEnv {
     const root = hermesRoot()
+    const localOnly = process.env.STACKCHAN_LOCAL_ONLY
     return {
         ...process.env,
+        ...(localOnly ? { STACKCHAN_LOCAL_ONLY: localOnly, HERMES_LOCAL_ONLY: '1' } : {}),
         PYTHONPATH: [root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     }
 }

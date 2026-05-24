@@ -39,6 +39,7 @@ type HermesTransport = {
 const DEFAULT_RPC_TIMEOUT_MS = 30_000
 const DEFAULT_TURN_TIMEOUT_MS = 600_000
 const DEFAULT_DASHBOARD_URL = 'http://127.0.0.1:9119'
+const LOCAL_DASHBOARD_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'host.docker.internal'])
 
 function defaultHermesRoot(): string {
     if (process.env.HERMES_ROOT) return process.env.HERMES_ROOT
@@ -82,6 +83,28 @@ function dashboardWebSocketUrl(dashboardUrl: string, token: string): string {
     url.search = ''
     url.searchParams.set('token', token)
     return url.toString()
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+    return value !== undefined && /^(1|true|yes|on)$/i.test(value.trim())
+}
+
+export function isLocalDashboardUrl(dashboardUrl: string): boolean {
+    try {
+        const url = new URL(dashboardUrl)
+        const hostname = url.hostname.replace(/^\[|\]$/g, '')
+        return LOCAL_DASHBOARD_HOSTS.has(hostname)
+    } catch {
+        return false
+    }
+}
+
+export function assertLocalDashboardUrlAllowed(dashboardUrl: string): void {
+    if (!isTruthyEnv(process.env.STACKCHAN_LOCAL_ONLY)) return
+    if (isLocalDashboardUrl(dashboardUrl)) return
+    throw new Error(
+        `STACKCHAN_LOCAL_ONLY=true requires HERMES_DASHBOARD_URL to use localhost, 127.0.0.1, ::1, or host.docker.internal; got ${dashboardUrl}`,
+    )
 }
 
 export function extractDashboardSessionToken(html: string): string | null {
@@ -152,6 +175,7 @@ class DashboardWsTransport implements HermesTransport {
     async start(onLine: (line: string) => void, onClose: (error: Error) => void): Promise<void> {
         if (this.socket?.readyState === WebSocket.OPEN) return
 
+        assertLocalDashboardUrlAllowed(this.dashboardUrl)
         const token = this.explicitToken ?? await this.fetchSessionToken()
         const wsUrl = dashboardWebSocketUrl(this.dashboardUrl, token)
 
@@ -209,6 +233,7 @@ class DashboardWsTransport implements HermesTransport {
     }
 
     private async fetchSessionToken(): Promise<string> {
+        assertLocalDashboardUrlAllowed(this.dashboardUrl)
         let response: Response
         try {
             response = await fetch(this.dashboardUrl)

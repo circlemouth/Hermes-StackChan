@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { HermesClient, extractDashboardSessionToken } from '../src/hermes.ts'
+import { HermesClient, assertLocalDashboardUrlAllowed, extractDashboardSessionToken, isLocalDashboardUrl } from '../src/hermes.ts'
 
 type DashboardMock = {
     url: string
@@ -19,6 +19,7 @@ const originalEnv = {
     HERMES_CONNECT_MODE: process.env.HERMES_CONNECT_MODE,
     HERMES_DASHBOARD_URL: process.env.HERMES_DASHBOARD_URL,
     HERMES_DASHBOARD_TOKEN: process.env.HERMES_DASHBOARD_TOKEN,
+    STACKCHAN_LOCAL_ONLY: process.env.STACKCHAN_LOCAL_ONLY,
 }
 
 function restoreEnv(): void {
@@ -126,6 +127,20 @@ test('extractDashboardSessionToken reads Hermes Dashboard HTML token', () => {
         'def456',
     )
     assert.equal(extractDashboardSessionToken('<html></html>'), null)
+})
+
+test('local-only mode allows only local Hermes Dashboard URLs', () => {
+    process.env.STACKCHAN_LOCAL_ONLY = 'true'
+    assert.equal(isLocalDashboardUrl('http://127.0.0.1:9119'), true)
+    assert.equal(isLocalDashboardUrl('http://localhost:9119'), true)
+    assert.equal(isLocalDashboardUrl('http://[::1]:9119'), true)
+    assert.equal(isLocalDashboardUrl('http://host.docker.internal:9119'), true)
+    assert.equal(isLocalDashboardUrl('https://example.com'), false)
+    assert.doesNotThrow(() => assertLocalDashboardUrlAllowed('http://127.0.0.1:9119'))
+    assert.throws(
+        () => assertLocalDashboardUrlAllowed('https://example.com'),
+        /STACKCHAN_LOCAL_ONLY=true/,
+    )
 })
 
 test('HermesClient connects to Dashboard /api/ws, creates a separate session, submits prompts, and interrupts it', async () => {

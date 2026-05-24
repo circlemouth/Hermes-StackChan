@@ -147,20 +147,30 @@ Hermes は Dashboard `/api/ws` が有効な状態で起動しておきます。`
 PORT=8765
 STACKCHAN_CONTROL_PORT=8766
 STACKCHAN_CONTROL_HOST=127.0.0.1
+STACKCHAN_LOCAL_ONLY=true
 
 HERMES_CONNECT_MODE=dashboard_ws
 HERMES_DASHBOARD_URL=http://127.0.0.1:9119
 HERMES_ROOT=../hermes-agent
 HERMES_PYTHON=python3
+HERMES_LOCAL_STT_LANGUAGE=ja
 
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
 STACKCHAN_MIN_FRAMES_FOR_STT=10
 STACKCHAN_POST_TTS_COOLDOWN_MS=1500
+STACKCHAN_LOCAL_VAD_ENABLED=true
+STACKCHAN_VAD_RMS_THRESHOLD=0.012
+STACKCHAN_VAD_START_SPEECH_MS=120
+STACKCHAN_VAD_END_SILENCE_MS=900
+STACKCHAN_VAD_MIN_SPEECH_MS=240
+STACKCHAN_VAD_PREROLL_MS=300
 ```
 
 `HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。
-`STACKCHAN_*` の音声ターン制御値は、部屋の反響やスピーカー音の回り込みに合わせて調整できます。
+local VAD は default で有効です。`ai-server` が受信 Opus を 16 kHz mono PCM に decode し、軽量な RMS 判定で発話終了を検出します。そのため、端末が無音中も Opus frame を送り続ける場合でも、PCM 内容が無音なら turn を閉じられます。部屋がうるさい場合は `STACKCHAN_VAD_RMS_THRESHOLD` を上げます。発話末尾が切れる場合は `STACKCHAN_VAD_END_SILENCE_MS` を長くし、反応が遅い場合は短くします。`STACKCHAN_VAD_START_SPEECH_MS` と `STACKCHAN_VAD_PREROLL_MS` で開始判定の安定性と頭切れ防止量を調整できます。
+
+`STACKCHAN_LOCAL_ONLY=true` にすると StackChan 音声 loop を local-only にします。この場合、`HERMES_DASHBOARD_URL` は `localhost`、`127.0.0.1`、`::1`、`host.docker.internal` のいずれかに限定され、Hermes STT/TTS helper は cloud fallback を拒否します。STT は faster-whisper または `HERMES_LOCAL_STT_COMMAND`、TTS は Piper / KittenTTS / NeuTTS / command provider を使ってください。初回 model 取得や pip/npm install が事前 setup として必要な場合はありますが、実行時に cloud STT/TTS API へ逃がしません。
 
 build して起動します。
 
@@ -232,11 +242,12 @@ BLE Wi-Fi provisioning は残っていますが、アカウント紐づけでは
 音声の流れ:
 
 1. StackChan がマイク音声を Opus frame として `ai-server` に送ります。
-2. `ai-server` が音声を decode し、Hermes の STT helper module を Python subprocess で呼びます。
-3. `ai-server` が transcript を Hermes Dashboard `/api/ws` の StackChan 専用 session に送ります。
-4. Hermes がその session の最終応答 text を返します。
-5. `ai-server` が Hermes の TTS helper module を Python subprocess で呼びます。
-6. `ai-server` が合成音声を Opus stream として StackChan に返します。
+2. `ai-server` が受信 Opus を PCM に decode し、local RMS VAD で音声内容から発話終了を検出します。
+3. `ai-server` が収集済み PCM を WAV として Hermes の STT helper module に渡します。
+4. `ai-server` が transcript を Hermes Dashboard `/api/ws` の StackChan 専用 session に送ります。
+5. Hermes がその session の最終応答 text を返します。
+6. `ai-server` が Hermes の TTS helper module を Python subprocess で呼びます。
+7. `ai-server` が合成音声を Opus stream として StackChan に返します。
 
 interrupt の扱い:
 
@@ -319,6 +330,7 @@ Dashboard HTML から session token を取得できない場合、利用中の H
 - `HERMES_PYTHON` が Hermes tool module を import できる Python interpreter を指している。
 - `ffmpeg` が install 済みで `PATH` から実行できる。
 - `~/.hermes/config.yaml` の provider/audio tool 設定が有効。
+- `STACKCHAN_LOCAL_ONLY=true` の場合、STT は faster-whisper または `local_command`、TTS は Piper / KittenTTS / NeuTTS / command provider にしてください。Edge TTS、OpenAI、Groq、ElevenLabs、MiniMax、xAI、Mistral、Gemini などへ fallback しません。
 
 ## 開発時の確認
 

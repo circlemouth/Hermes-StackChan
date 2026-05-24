@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 import { inferStackChanEmotion, readEnvInt, readTurnControlConfig, Session } from '../src/session.ts'
+import type { LocalRmsVadConfig } from '../src/local_vad.ts'
 
 class MockWebSocket {
     sent: Array<string | Buffer> = []
@@ -23,6 +24,25 @@ async function waitFor(predicate: () => boolean): Promise<void> {
         await delay(10)
     }
     assert.fail('condition was not reached')
+}
+
+const testVadConfig: LocalRmsVadConfig = {
+    enabled: true,
+    rmsThreshold: 0.012,
+    startSpeechMs: 60,
+    endSilenceMs: 120,
+    minSpeechMs: 120,
+    preRollMs: 120,
+}
+
+function pcm60ms(amplitude: number): Buffer {
+    const frame = Buffer.alloc(960 * 2)
+    for (let i = 0; i < 960; i++) frame.writeInt16LE(amplitude, i * 2)
+    return frame
+}
+
+function dataBytesFromWav(wav: Buffer): number {
+    return wav.length - 44
 }
 
 test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus back', async () => {
@@ -256,5 +276,166 @@ test('Session displays Hermes image media and strips image tags before TTS', asy
     )
     assert.ok(messages.some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === 'こちらです'))
 
+    session.close()
+})
+
+test('Session local VAD processes a turn without listen stop', async () => {
+    const ws = new MockWebSocket()
+    let transcribedBytes = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: testVadConfig,
+        decodeOpusFrame: (frame) => frame[0] === 1 ? pcm60ms(1600) : pcm60ms(0),
+        transcribeWav: async (wav) => {
+            transcribedBytes = dataBytesFromWav(wav)
+            return '発話'
+        },
+        hermes: {
+            submitPrompt: async () => '返答',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([1]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([0]))
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'stt' && msg['text'] === '発話'))
+    assert.ok(transcribedBytes > 0)
+    assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+    session.close()
+})
+
+test('Session local VAD ends speech from silent PCM even while frames continue arriving', async () => {
+    const ws = new MockWebSocket()
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: testVadConfig,
+        decodeOpusFrame: (frame) => frame[0] === 1 ? pcm60ms(1600) : pcm60ms(0),
+        transcribeWav: async () => {
+            transcribeCount += 1
+            return '終わった'
+        },
+        hermes: {
+            submitPrompt: async () => 'はい',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([1]))
+    for (let i = 0; i < 8; i++) session.handleMessage(Buffer.from([0]))
+
+    await waitFor(() => transcribeCount === 1)
+    session.close()
+})
+
+test('Session local VAD keeps only pre-roll silence before speech', async () => {
+    const ws = new MockWebSocket()
+    let transcribedBytes = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: testVadConfig,
+        decodeOpusFrame: (frame) => frame[0] === 1 ? pcm60ms(1600) : pcm60ms(0),
+        transcribeWav: async (wav) => {
+            transcribedBytes = dataBytesFromWav(wav)
+            return 'プリロール'
+        },
+        hermes: {
+            submitPrompt: async () => 'ok',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([0]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([1]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([0]))
+
+    await waitFor(() => transcribedBytes > 0)
+    const oneFrameBytes = 960 * 2
+    assert.ok(transcribedBytes <= oneFrameBytes * 8)
+    assert.ok(transcribedBytes >= oneFrameBytes * 5)
+    session.close()
+})
+
+test('Session abort clears local VAD buffers before the next turn', async () => {
+    const ws = new MockWebSocket()
+    const transcribedBytes: number[] = []
+    let interrupted = false
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: testVadConfig,
+        decodeOpusFrame: (frame) => frame[0] === 1 ? pcm60ms(1600) : pcm60ms(0),
+        transcribeWav: async (wav) => {
+            transcribedBytes.push(dataBytesFromWav(wav))
+            return '次'
+        },
+        hermes: {
+            submitPrompt: async () => 'ok',
+            interrupt: async () => { interrupted = true },
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    session.handleMessage(Buffer.from([1]))
+    session.handleMessage(JSON.stringify({ type: 'abort' }))
+    await waitFor(() => interrupted)
+
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 2; i++) session.handleMessage(Buffer.from([1]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([0]))
+
+    await waitFor(() => transcribedBytes.length === 1)
+    assert.ok(transcribedBytes[0] <= 960 * 2 * 6)
+    session.close()
+})
+
+test('Session falls back to arrival-gap silence timer when local VAD is disabled', async () => {
+    const ws = new MockWebSocket()
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: { ...testVadConfig, enabled: false },
+        decodeOpusFrames: (frames) => {
+            assert.equal(frames.length, 10)
+            return Buffer.alloc(320)
+        },
+        transcribeWav: async () => {
+            transcribeCount += 1
+            return 'fallback'
+        },
+        hermes: {
+            submitPrompt: async () => 'ok',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+
+    await delay(1350)
+    await waitFor(() => transcribeCount === 1)
     session.close()
 })

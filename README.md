@@ -146,20 +146,30 @@ Create `ai-server/.env`:
 PORT=8765
 STACKCHAN_CONTROL_PORT=8766
 STACKCHAN_CONTROL_HOST=127.0.0.1
+STACKCHAN_LOCAL_ONLY=true
 
 HERMES_CONNECT_MODE=dashboard_ws
 HERMES_DASHBOARD_URL=http://127.0.0.1:9119
 HERMES_ROOT=../hermes-agent
 HERMES_PYTHON=python3
+HERMES_LOCAL_STT_LANGUAGE=ja
 
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
 STACKCHAN_MIN_FRAMES_FOR_STT=10
 STACKCHAN_POST_TTS_COOLDOWN_MS=1500
+STACKCHAN_LOCAL_VAD_ENABLED=true
+STACKCHAN_VAD_RMS_THRESHOLD=0.012
+STACKCHAN_VAD_START_SPEECH_MS=120
+STACKCHAN_VAD_END_SILENCE_MS=900
+STACKCHAN_VAD_MIN_SPEECH_MS=240
+STACKCHAN_VAD_PREROLL_MS=300
 ```
 
 `HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
-The `STACKCHAN_*` voice turn values can be tuned for room acoustics and speaker echo behavior.
+Local VAD is enabled by default. It is a lightweight RMS-based detector that runs inside `ai-server` after Opus is decoded to 16 kHz mono PCM, so it can end a turn even when the device keeps sending silent Opus frames. For noisy rooms, raise `STACKCHAN_VAD_RMS_THRESHOLD`. If the end of speech is clipped, raise `STACKCHAN_VAD_END_SILENCE_MS`; if replies feel slow, lower it. `STACKCHAN_VAD_START_SPEECH_MS` and `STACKCHAN_VAD_PREROLL_MS` tune start stability and head padding.
+
+Set `STACKCHAN_LOCAL_ONLY=true` to keep the StackChan voice loop local-only. In that mode `HERMES_DASHBOARD_URL` must point to `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`, and the Hermes STT/TTS helpers refuse cloud fallback. Use faster-whisper or `HERMES_LOCAL_STT_COMMAND` for STT, and use Piper, KittenTTS, NeuTTS, or a command TTS provider for speech. First-time model downloads and package installs may still be part of setup, but runtime does not escape to cloud STT/TTS APIs.
 
 Build and run:
 
@@ -231,11 +241,12 @@ BLE Wi-Fi provisioning remains available, but it is presented as network setup r
 Audio flow:
 
 1. StackChan streams microphone Opus frames to `ai-server`.
-2. `ai-server` decodes the audio and calls Hermes STT through Python helper modules.
-3. `ai-server` submits the transcript to Hermes Dashboard `/api/ws` using a dedicated StackChan session.
-4. Hermes returns the final assistant message from that session.
-5. `ai-server` calls Hermes TTS through Python helper modules.
-6. `ai-server` streams synthesized Opus audio back to StackChan.
+2. `ai-server` decodes incoming Opus to PCM and uses local RMS VAD to detect utterance end from audio content.
+3. `ai-server` sends the captured PCM as WAV to Hermes STT through Python helper modules.
+4. `ai-server` submits the transcript to Hermes Dashboard `/api/ws` using a dedicated StackChan session.
+5. Hermes returns the final assistant message from that session.
+6. `ai-server` calls Hermes TTS through Python helper modules.
+7. `ai-server` streams synthesized Opus audio back to StackChan.
 
 Interrupt behavior:
 
@@ -318,6 +329,7 @@ Check these points:
 - `HERMES_PYTHON` points to the Python interpreter that can import Hermes tool modules.
 - `ffmpeg` is installed and available on `PATH`.
 - Hermes provider and audio tool configuration are valid in `~/.hermes/config.yaml`.
+- With `STACKCHAN_LOCAL_ONLY=true`, STT must be faster-whisper or `local_command`, and TTS must be Piper, KittenTTS, NeuTTS, or a command provider. Edge TTS, OpenAI, Groq, ElevenLabs, MiniMax, xAI, Mistral, and Gemini are not used as fallback.
 
 ## Development Checks
 
