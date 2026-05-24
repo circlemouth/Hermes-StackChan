@@ -49,7 +49,8 @@ StartupWorker::PageStartup::PageStartup()
     _info->setText("Welcome!\nLet's get started.");
 }
 
-StartupWorker::StartupWorker()
+StartupWorker::StartupWorker(bool needServoSetup, bool needAppSetup)
+    : _need_servo_setup(needServoSetup), _need_app_setup(needAppSetup)
 {
     _page_startup = std::make_unique<PageStartup>();
 }
@@ -67,17 +68,32 @@ void StartupWorker::update()
             _is_done = true;
         } else if (_page_startup->isStartClicked()) {
             _page_startup.reset();
-            mclog::tagInfo(_tag, "start servo test");
-            _worker_servo_test = std::make_unique<ServoTestWorker>();
+            if (_need_servo_setup) {
+                mclog::tagInfo(_tag, "start servo test");
+                _worker_servo_test = std::make_unique<ServoTestWorker>();
+            } else if (_need_app_setup) {
+                mclog::tagInfo(_tag, "start wifi setup");
+                _worker_wifi = std::make_unique<WifiSetupWorker>();
+            } else {
+                _is_done = true;
+            }
         }
     }
     // Servo test
     else if (_worker_servo_test) {
         _worker_servo_test->update();
         if (_worker_servo_test->isDone()) {
+            const bool skipped = _worker_servo_test->wasSkipped();
             _worker_servo_test.reset();
-            mclog::tagInfo(_tag, "start wifi setup");
-            _worker_wifi = std::make_unique<WifiSetupWorker>();
+            GetHAL().setServoSetupDone(true);
+            GetHAL().setServoTestCompleted(!skipped);
+
+            if (_need_app_setup) {
+                mclog::tagInfo(_tag, "start wifi setup");
+                _worker_wifi = std::make_unique<WifiSetupWorker>();
+            } else {
+                _is_done = true;
+            }
         }
     }
     // App setup

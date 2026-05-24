@@ -433,9 +433,11 @@ void ServoTestWorker::update()
         auto* page = static_cast<PageServoTips*>(_page_tips.get());
         if (page->isSkipClicked()) {
             _page_tips.reset();
+            _was_skipped = true;
             _is_done = true;
         } else if (page->isStartClicked()) {
             _page_tips.reset();
+            _was_skipped = false;
             _page_test = std::make_unique<PageServoTest>();
         }
     } else if (_page_test) {
@@ -448,9 +450,11 @@ void ServoTestWorker::update()
         auto* page = static_cast<PageServoDone*>(_page_done.get());
         if (page->isRetestClicked()) {
             _page_done.reset();
+            _was_skipped = false;
             _page_test = std::make_unique<PageServoTest>();
         } else if (page->isNextClicked()) {
             _page_done.reset();
+            _was_skipped = false;
             _is_done = true;
         }
     }

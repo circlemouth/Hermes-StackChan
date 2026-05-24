@@ -38,9 +38,16 @@ void AppLauncher::onLauncherOpen()
         }
     }
 
-    if (!_startup_checked && !GetHAL().isAppConfiged()) {
-        mclog::tagInfo(getAppInfo().name, "app not configured, start startup worker");
-        _startup_worker = std::make_unique<setup_workers::StartupWorker>();
+    const bool need_app_setup   = !GetHAL().isAppConfiged();
+    const bool need_servo_setup = !GetHAL().isServoSetupDone();
+
+    if (!_startup_checked && (need_app_setup || need_servo_setup)) {
+        mclog::tagInfo(
+            getAppInfo().name,
+            "start startup worker, need app setup: {}, need servo setup: {}",
+            need_app_setup,
+            need_servo_setup);
+        _startup_worker = std::make_unique<setup_workers::StartupWorker>(need_servo_setup, need_app_setup);
     } else {
         create_launcher_view();
     }

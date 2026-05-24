@@ -175,6 +175,10 @@ public:
     void startAppConfigServer();
     bool isAppConfiged();
     void resetAppConfiged();
+    bool isServoSetupDone();
+    void setServoSetupDone(bool done);
+    bool isServoTestCompleted();
+    void setServoTestCompleted(bool completed);
 
     /* --------------------------------- HeadPet -------------------------------- */
     uitk::Signal<HeadPetGesture> onHeadPetGesture;

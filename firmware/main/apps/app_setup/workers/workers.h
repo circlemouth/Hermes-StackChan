@@ -58,11 +58,16 @@ class ServoTestWorker : public WorkerBase {
 public:
     ServoTestWorker();
     void update() override;
+    bool wasSkipped() const
+    {
+        return _was_skipped;
+    }
 
 private:
     std::unique_ptr<WorkerBase> _page_tips;
     std::unique_ptr<WorkerBase> _page_test;
     std::unique_ptr<WorkerBase> _page_done;
+    bool _was_skipped = false;
 };
 
 /**
@@ -222,11 +227,14 @@ public:
         bool _is_start_clicked = false;
     };
 
-    StartupWorker();
+    StartupWorker(bool needServoSetup = true, bool needAppSetup = true);
     ~StartupWorker();
     void update() override;
 
 private:
+    bool _need_servo_setup = true;
+    bool _need_app_setup   = true;
+
     std::unique_ptr<PageStartup> _page_startup;
     std::unique_ptr<ServoTestWorker> _worker_servo_test;
     std::unique_ptr<WifiSetupWorker> _worker_wifi;
