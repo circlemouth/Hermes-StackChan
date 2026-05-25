@@ -35,7 +35,7 @@ public:
 
         // 动作计时
         if (_enable_motion) {
-            _next_motion_tick = now + Random::getInstance().getInt(1000, 2000);
+            _next_motion_tick = now + Random::getInstance().getInt(3000, 5000);
         }
 
         _need_get_prev_angles = true;
@@ -64,8 +64,8 @@ public:
 
         // 身体微动动作
         if (_enable_motion && now >= _next_motion_tick) {
-            // 随机下一个动作的时间 (1.5s ~ 2.5s)
-            _next_motion_tick = now + Random::getInstance().getInt(1500, 2500);
+            // 随机下一个动作的时间 (5s ~ 9s)
+            _next_motion_tick = now + Random::getInstance().getInt(5000, 9000);
             perform_subtle_speaking_motion(stackchan);
         }
     }
@@ -84,8 +84,12 @@ private:
 
     void perform_subtle_speaking_motion(Modifiable& stackchan)
     {
+        if (!stackchan.hasAvatar()) {
+            return;
+        }
+
         auto& motion = stackchan.motion();
-        if (motion.isMoving()) {
+        if (motion.isMoving() || motion.isModifyLocked()) {
             return;
         }
 
@@ -97,11 +101,12 @@ private:
         } else {
             // If there is a large external movement
             // sync the baseline angles to preventsnapping back to old position
-            const int32_t threshold = 300;
-            int32_t diff_x          = std::abs(current_actual_angles.x - _prev_angles.x);
-            int32_t diff_y          = std::abs(current_actual_angles.y - _prev_angles.y);
+            const int32_t yaw_threshold   = 200;
+            const int32_t pitch_threshold = 120;
+            int32_t diff_x                = std::abs(current_actual_angles.x - _prev_angles.x);
+            int32_t diff_y                = std::abs(current_actual_angles.y - _prev_angles.y);
 
-            if (diff_x > threshold || diff_y > threshold) {
+            if (diff_x > yaw_threshold || diff_y > pitch_threshold) {
                 _prev_angles = current_actual_angles;
             }
         }
@@ -110,16 +115,21 @@ private:
         int32_t target_pitch = _prev_angles.y;
 
         int action = Random::getInstance().getInt(0, 10);
-        int speed  = Random::getInstance().getInt(100, 200);  // 说话时的动作都很慢
+        int speed  = Random::getInstance().getInt(80, 150);  // 说话时的动作都很慢
 
         if (action < 5) {
             // 动作 A：轻微点头 (Nod)
-            target_pitch += Random::getInstance().getInt(-20, 50);
+            target_pitch += Random::getInstance().getInt(-10, 20);
         } else {
             // 动作 B：轻微摆头 (Yaw drift)
-            target_yaw += Random::getInstance().getInt(-40, 40);
-            target_pitch += Random::getInstance().getInt(-20, 20);
+            target_yaw += Random::getInstance().getInt(-30, 30);
+            target_pitch += Random::getInstance().getInt(-10, 20);
         }
+
+        auto yaw_limit   = motion.yawServo().getAngleLimit();
+        auto pitch_limit = motion.pitchServo().getAngleLimit();
+        target_yaw       = uitk::clamp(target_yaw, yaw_limit.x, yaw_limit.y);
+        target_pitch     = uitk::clamp(target_pitch, pitch_limit.x, pitch_limit.y);
 
         motion.moveWithSpeed(target_yaw, target_pitch, speed);
     }
