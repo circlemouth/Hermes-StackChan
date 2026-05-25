@@ -107,8 +107,7 @@ void AppAiAgent::onOpen()
         websocket_url = load_websocket_url_from_sd();
         ESP_LOGI(TAG, "SD config import path completed; LCD handoff will continue");
     } else {
-        ESP_LOGI(TAG, "SD config refresh optional: websocket_url already configured and Wi-Fi config exists");
-        websocket_url = load_websocket_url_from_sd();
+        ESP_LOGI(TAG, "SD config import skipped: websocket_url already configured and Wi-Fi config exists");
     }
 
     const WifiStatus wifi_status = GetHAL().getWifiStatus();
