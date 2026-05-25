@@ -62,6 +62,7 @@ The v1 robot tools are:
 - `stackchan_stop_reminder`: stop a local reminder by ID.
 
 Hermes should call movement and LED tools only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, speaking-time motion, and local reminder notifications. Camera, screen capture, image preview, and reminder tools are local-only helpers for the StackChan session.
+On-device face detection based head tracking is available as an opt-in firmware feature. It is disabled by default and the MVP runs only while Hermes is in STANDBY.
 
 ## Repository Layout
 
@@ -213,12 +214,16 @@ An example is available at `firmware/sdcard/config.sample.json`.
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
   "websocket_version": 3,
+  "face_tracking_enabled": false,
+  "face_tracking_hz": 2,
+  "face_tracking_mode": "standby",
   "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
   "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 Use the server terminal's LAN IP address. `wifi_ssid` and `wifi_password` are optional; when present, `Load SD Config` imports them into NVS and marks network setup complete. Use an empty `wifi_password` for an open network.
+Set `face_tracking_enabled` to `true` to enable low-rate on-device face detection and head tracking during Hermes standby. `face_tracking_mode` currently accepts `off`, `standby`, `standby_speaking`, or `all`, but the MVP safely tracks only in standby.
 
 The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "...", "password": "..."}`.
 

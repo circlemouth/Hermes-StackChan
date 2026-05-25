@@ -11,6 +11,7 @@ file(GLOB_RECURSE STACK_CHAN_SOURCES
     "hal/*.c"
     "hal/*.cc"
     "hal/*.cpp"
+    "hal/vision/*.cpp"
     "stackchan/*.c"
     "stackchan/*.cc"
     "stackchan/*.cpp"

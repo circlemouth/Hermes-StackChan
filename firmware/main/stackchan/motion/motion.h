@@ -7,9 +7,19 @@
 #include "servo.h"
 #include <smooth_ui_toolkit.hpp>
 #include <uitk/short_namespace.hpp>
+#include <cstdint>
 #include <memory>
 
 namespace stackchan::motion {
+
+enum class MotionLockOwner : uint8_t {
+    None         = 0,
+    FaceTracking = 40,
+    HeadPet      = 50,
+    ImuEvent     = 80,
+    McpCommand   = 90,
+    Legacy       = 100,
+};
 
 /**
  * @brief
@@ -158,11 +168,15 @@ public:
 
     void setModifyLock(bool locked);
     bool isModifyLocked();
+    bool tryAcquireModifyLock(MotionLockOwner owner);
+    void releaseModifyLock(MotionLockOwner owner);
+    bool isModifyLockedBy(MotionLockOwner owner) const;
+    MotionLockOwner getModifyLockOwner() const;
 
 private:
     std::unique_ptr<Servo> _yaw_servo;
     std::unique_ptr<Servo> _pitch_servo;
-    bool _is_modify_locked = false;
+    MotionLockOwner _modify_lock_owner = MotionLockOwner::None;
 
     static constexpr float RAD_TO_DEG = 180.0f / M_PI;
 

@@ -63,6 +63,7 @@ v1 のロボット tool は以下です。
 - `stackchan_stop_reminder`: ID を指定して local reminder を停止する。
 
 Hermes は、首振りや LED 変更などの意図的な動作だけをこれらの tool で指示します。自然な瞬き、待機モーション、発話中モーション、ローカル reminder 通知は ファームウェア が継続して担当します。カメラ、画面キャプチャ、画像表示、reminder tool は StackChan セッション用のローカル補助機能です。
+オンデバイス顔検出による首追従は、明示的に有効化する firmware 機能です。標準では無効で、MVP では Hermes が STANDBY の間だけ動作します。
 
 ## リポジトリ構成
 
@@ -214,12 +215,16 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
   "websocket_version": 3,
+  "face_tracking_enabled": false,
+  "face_tracking_hz": 2,
+  "face_tracking_mode": "standby",
   "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
   "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 `<server-ip>` には、サーバー端末の LAN IP を入れます。`wifi_ssid` と `wifi_password` は任意です。指定した場合、`Load SD Config` 実行時に NVS に取り込み、ネットワーク設定済みとして扱います。空パスワードのネットワークでは `wifi_password` を空文字にできます。
+`face_tracking_enabled` を `true` にすると、Hermes standby 中に低頻度のオンデバイス顔検出と首追従が有効になります。`face_tracking_mode` は `off`、`standby`、`standby_speaking`、`all` を受け付けますが、MVP の実動作は安全側で standby のみです。
 
 Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式でも指定できます。
 

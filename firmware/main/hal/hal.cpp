@@ -138,6 +138,9 @@ void Hal::updateHeapStatusLog()
 #include <apps/common/common.h>
 #include <assets/assets.h>
 #include <esp_log.h>
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "vision/face_tracker_service.h"
+#endif
 
 void Hal::hermes_board_init()
 {
@@ -212,6 +215,10 @@ void Hal::startHermes()
     // Start stackchan update task
     xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
 
+#if CONFIG_IDF_TARGET_ESP32S3
+    hal::vision::FaceTrackerService::GetInstance().Start();
+#endif
+
     ESP_LOGI(_tag.data(), "Calling hal_bridge::start_hermes_app; this is expected not to return");
     hal_bridge::start_hermes_app();
 
@@ -225,6 +232,9 @@ HermesBridgeConfig_t Hal::getHermesBridgeConfig()
         .idleShutdownTimeSeconds   = bridge_config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = bridge_config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = bridge_config.idleRandomMovementLevel,
+        .faceTrackingEnabled       = bridge_config.faceTrackingEnabled,
+        .faceTrackingHz            = bridge_config.faceTrackingHz,
+        .faceTrackingMode          = bridge_config.faceTrackingMode,
     };
 }
 
@@ -234,6 +244,9 @@ void Hal::setHermesBridgeConfig(HermesBridgeConfig_t config)
         .idleShutdownTimeSeconds   = config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = config.idleRandomMovementLevel,
+        .faceTrackingEnabled       = config.faceTrackingEnabled,
+        .faceTrackingHz            = config.faceTrackingHz,
+        .faceTrackingMode          = config.faceTrackingMode,
     });
 }
 

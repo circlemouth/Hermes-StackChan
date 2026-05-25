@@ -55,8 +55,8 @@ public:
 
             //  Lock motion modify and move home
             auto& motion = stackchan.motion();
-            if (!motion.isModifyLocked()) {
-                motion.setModifyLock(true);
+            if (!motion.isModifyLockedBy(motion::MotionLockOwner::ImuEvent) &&
+                motion.tryAcquireModifyLock(motion::MotionLockOwner::ImuEvent)) {
                 motion.goHome(300);
             }
 
@@ -114,7 +114,7 @@ private:
         _shy_decorator_id   = -1;
 
         auto& motion = stackchan.motion();
-        motion.setModifyLock(false);
+        motion.releaseModifyLock(motion::MotionLockOwner::ImuEvent);
 
         _is_reacting = false;
     }

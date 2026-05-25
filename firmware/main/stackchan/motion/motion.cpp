@@ -140,10 +140,44 @@ void Motion::setAutoAngleSyncEnabled(bool enabled)
 
 void Motion::setModifyLock(bool locked)
 {
-    _is_modify_locked = locked;
+    if (locked) {
+        _modify_lock_owner = MotionLockOwner::Legacy;
+    } else {
+        _modify_lock_owner = MotionLockOwner::None;
+    }
 }
 
 bool Motion::isModifyLocked()
 {
-    return _is_modify_locked;
+    return _modify_lock_owner != MotionLockOwner::None;
+}
+
+bool Motion::tryAcquireModifyLock(MotionLockOwner owner)
+{
+    if (owner == MotionLockOwner::None) {
+        return false;
+    }
+    if (_modify_lock_owner == MotionLockOwner::None || _modify_lock_owner == owner ||
+        static_cast<uint8_t>(owner) > static_cast<uint8_t>(_modify_lock_owner)) {
+        _modify_lock_owner = owner;
+        return true;
+    }
+    return false;
+}
+
+void Motion::releaseModifyLock(MotionLockOwner owner)
+{
+    if (_modify_lock_owner == owner) {
+        _modify_lock_owner = MotionLockOwner::None;
+    }
+}
+
+bool Motion::isModifyLockedBy(MotionLockOwner owner) const
+{
+    return _modify_lock_owner == owner;
+}
+
+MotionLockOwner Motion::getModifyLockOwner() const
+{
+    return _modify_lock_owner;
 }

@@ -102,6 +102,7 @@ private:
 
         stackchan.avatar().setEmotion(_prev_emotion);
         stackchan.motion().moveWithSpeed(_prev_yaw, _prev_pitch, 200);
+        stackchan.motion().releaseModifyLock(motion::MotionLockOwner::HeadPet);
 
         _in_happy_state = false;
     }
@@ -109,7 +110,11 @@ private:
     void perform_pet_motion(Modifiable& stackchan)
     {
         auto& motion = stackchan.motion();
-        if (motion.isModifyLocked() || motion.isMoving()) {
+        if (!motion.tryAcquireModifyLock(motion::MotionLockOwner::HeadPet)) {
+            return;
+        }
+        if (motion.isMoving()) {
+            motion.releaseModifyLock(motion::MotionLockOwner::HeadPet);
             return;
         }
 

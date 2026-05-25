@@ -233,11 +233,25 @@ void Hal::robot_mcp_init()
                            LvglLockGuard lock;
 
                            auto& motion = GetStackChan().motion();
+                           if (!motion.tryAcquireModifyLock(motion::MotionLockOwner::McpCommand)) {
+                               throw std::runtime_error("Head motion is temporarily locked by a higher priority action");
+                           }
                            if (pitch != -9999) {
                                motion.pitchServo().moveWithSpeed(pitch * 10, speed);
                            }
                            if (yaw != -9999) {
                                motion.yawServo().moveWithSpeed(yaw * 10, speed);
+                           }
+                           BaseType_t release_task_ok = xTaskCreate(
+                               [](void*) {
+                                   vTaskDelay(pdMS_TO_TICKS(1000));
+                                   LvglLockGuard lock;
+                                   GetStackChan().motion().releaseModifyLock(motion::MotionLockOwner::McpCommand);
+                                   vTaskDelete(nullptr);
+                               },
+                               "mcp_motion_unlock", 2048, nullptr, 2, nullptr);
+                           if (release_task_ok != pdPASS) {
+                               motion.releaseModifyLock(motion::MotionLockOwner::McpCommand);
                            }
 
                            return true;

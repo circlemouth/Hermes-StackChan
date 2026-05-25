@@ -5,6 +5,7 @@
 #include <lvgl.h>
 #include <thread>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
@@ -19,6 +20,14 @@ struct JpegChunk {
     size_t len;
 };
 
+struct VisionFrameInfo {
+    uint16_t width        = 0;
+    uint16_t height       = 0;
+    v4l2_pix_fmt_t format = 0;
+    size_t bytes_used     = 0;
+    int64_t timestamp_us  = 0;
+};
+
 class StackChanCamera : public Camera {
 private:
     struct FrameBuffer {
@@ -29,10 +38,8 @@ private:
         v4l2_pix_fmt_t format = 0;
     } frame_;
     v4l2_pix_fmt_t sensor_format_ = 0;
-#ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
-    uint16_t sensor_width_  = 0;
-    uint16_t sensor_height_ = 0;
-#endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
+    uint16_t sensor_width_         = 0;
+    uint16_t sensor_height_        = 0;
     int video_fd_      = -1;
     bool streaming_on_ = false;
     struct MmapBuffer {
@@ -43,6 +50,7 @@ private:
     std::string explain_url_;
     std::string explain_token_;
     std::thread encoder_thread_;
+    std::mutex camera_mutex_;
 
 public:
     StackChanCamera(const esp_video_init_config_t& config);
@@ -52,6 +60,7 @@ public:
     virtual bool Capture() override;
     bool EncodeFrameToJpeg(std::string& jpeg, int quality = 80);
     bool StreamCaptures();
+    bool CaptureFrameForVision(uint8_t* dst, size_t dst_len, VisionFrameInfo& out);
 
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;
