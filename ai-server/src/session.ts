@@ -52,6 +52,12 @@ export function inferStackChanEmotion(text: string): StackChanEmotion {
     return 'neutral'
 }
 
+export function limitStackChanSpeechText(text: string, maxChars = MAX_SPEECH_TEXT_CHARS): string {
+    const stripped = stripMediaForSpeech(text).replace(/\s+/g, ' ').trim()
+    if (stripped.length <= maxChars) return stripped
+    return `${stripped.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`
+}
+
 // auto モード: フレームが途切れてから処理開始するまでの無音判定時間 (ms)
 const TURN_CONTROL_CONFIG = readTurnControlConfig()
 const SILENCE_TIMEOUT_MS = TURN_CONTROL_CONFIG.silenceTimeoutMs
@@ -61,8 +67,10 @@ const MAX_RECORDING_MS = TURN_CONTROL_CONFIG.maxRecordingMs
 const MIN_FRAMES_FOR_STT = TURN_CONTROL_CONFIG.minFramesForStt
 // TTS 再生後、次の listen start を受け付けるまでのクールダウン (ms) — エコー誤検知防止
 const POST_TTS_COOLDOWN_MS = TURN_CONTROL_CONFIG.postTtsCooldownMs
+const MAX_SPEECH_TEXT_CHARS = readEnvInt('STACKCHAN_MAX_SPEECH_CHARS', 160, 40, 1000)
 const MCP_REQUEST_TIMEOUT_MS = 10_000
 const PROCESSING_KEEPALIVE_MS = 10_000
+const PROCESS_ERROR_SPEECH = '返答の処理に時間がかかっています。もう一度短く話してください。'
 
 type PendingMcpRequest = {
     resolve: (value: unknown) => void
@@ -287,8 +295,13 @@ export class Session {
         }
         this.processingSource = reason
         this.state = 'processing'
-        this.process().catch((err) => {
+        this.process().catch(async (err) => {
             console.error(`[session ${this.sessionId}] process error:`, err)
+            if (this.state === 'processing') {
+                await this.speakText(PROCESS_ERROR_SPEECH, 'tts.error').catch((error) => {
+                    console.error(`[session ${this.sessionId}] error speech failed:`, error)
+                })
+            }
         }).finally(() => {
             if (this.state === 'processing') this.state = 'idle'
         })
@@ -422,14 +435,19 @@ export class Session {
         void this.displayFirstImageFromReply(reply)
 
         // 3. Hermes TTS -> Opus -> device
-        const speechText = stripMediaForSpeech(reply) || '画像を表示しました。'
+        const speechText = limitStackChanSpeechText(reply) || '画像を表示しました。'
+        await this.speakText(speechText, 'tts')
+        console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
+    }
+
+    private async speakText(speechText: string, label: string): Promise<void> {
         const wav = await withTiming(
-            `session:${this.sessionId}:tts.synthesize`,
+            `session:${this.sessionId}:${label}.synthesize`,
             () => this.synthesizeTextFn(speechText),
             { textLength: speechText.length },
         )
         const opusFrames = await withTiming(
-            `session:${this.sessionId}:tts.encode`,
+            `session:${this.sessionId}:${label}.encode`,
             async () => this.encodeWavToOpusFramesFn(wav),
             { wavBytes: wav.length },
         )
@@ -442,13 +460,12 @@ export class Session {
             this.sendBinary(wrapOpusPayload(frame, this.version))
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
-        console.log(`[timing] done session:${this.sessionId}:tts.stream elapsed=${elapsedMs(streamStartMs)} frames=${opusFrames.length}`)
+        console.log(`[timing] done session:${this.sessionId}:${label}.stream elapsed=${elapsedMs(streamStartMs)} frames=${opusFrames.length}`)
         this.sendJson({ type: 'tts', state: 'sentence_end', text: speechText })
         this.sendJson({ type: 'tts', state: 'stop' })
 
         // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
         this.cooldownUntil = Date.now() + this.postTtsCooldownMs
-        console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
     }
 
     private async displayFirstImageFromReply(reply: string): Promise<void> {
