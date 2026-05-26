@@ -545,6 +545,13 @@ export class Session {
         }
         // 最長録音タイマーをセット
         this.maxDurationTimer = setTimeout(() => {
+            if (this.shouldUseLocalVad() && this.pcmChunks.length === 0 && this.currentSpeechMs === 0) {
+                console.log(`[session ${this.sessionId}] max duration reached without VAD speech, skipping`)
+                this.resetCapture()
+                this.state = 'idle'
+                this.setAutoLedState('idle')
+                return
+            }
             console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
             this.triggerProcess('max-duration', true)
         }, MAX_RECORDING_MS)
