@@ -69,7 +69,7 @@ Start idle motion
 
 HERMES アプリ起動時に毎回 SD card の `config.json` を import しない。
 
-既に WebSocket URL と Wi-Fi 設定が存在する場合、`AppAiAgent::onOpen()` では SD config import を skip する。これにより、Hermes runtime / avatar screen への handoff 直前に共有 SPI / GPIO35 を SD 用へ切り替えない。
+現在の実装では、`AppAiAgent::onOpen()` では SD config import を常に skip する。これにより、Hermes runtime / avatar screen への handoff 直前に共有 SPI / GPIO35 を SD 用へ切り替えない。
 
 SD card からの初期設定 import は、Setup アプリや明示的な設定導入フローなど、LCD handoff と競合しない場面に限定する。HERMES 起動直前の便利な再読込として扱わない。
 

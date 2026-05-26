@@ -55,22 +55,6 @@ static std::string get_websocket_url()
     return websocket_url;
 }
 
-static std::string load_websocket_url_from_sd()
-{
-    ESP_LOGI(TAG, "trying SD config import");
-    {
-        LvglLockGuard lock;
-        auto result = GetHAL().loadConfigFromSdCard(nullptr);
-        if (!result.success) {
-            ESP_LOGW(TAG, "SD config import failed: %s", result.error.c_str());
-        } else {
-            ESP_LOGI(TAG, "SD config imported %u key(s)", static_cast<unsigned>(result.imported_keys.size()));
-        }
-    }
-
-    return get_websocket_url();
-}
-
 AppAiAgent::AppAiAgent()
 {
     // Configure App name
@@ -100,15 +84,10 @@ void AppAiAgent::onOpen()
     std::string websocket_url = get_websocket_url();
     bool has_wifi_config      = GetHAL().isAppConfiged();
 
-    const bool need_sd_config_import = websocket_url.empty() || !has_wifi_config;
-    if (need_sd_config_import) {
-        ESP_LOGI(TAG, "SD config import required: websocket_url_configured=%d, wifi_configured=%d",
-                 !websocket_url.empty(), has_wifi_config);
-        websocket_url = load_websocket_url_from_sd();
-        ESP_LOGI(TAG, "SD config import path completed; LCD handoff will continue");
-    } else {
-        ESP_LOGI(TAG, "SD config import skipped: websocket_url already configured and Wi-Fi config exists");
-    }
+    // HERMES handoff is display-sensitive on CoreS3/StackChan: SD and LCD share
+    // SPI/GPIO35. Keep SD access out of this path so LVGL can flush reliably.
+    ESP_LOGI(TAG, "SD config import skipped on HERMES open: websocket_url_configured=%d, wifi_configured=%d",
+             !websocket_url.empty(), has_wifi_config);
 
     const WifiStatus wifi_status = GetHAL().getWifiStatus();
     has_wifi_config             = GetHAL().isAppConfiged();

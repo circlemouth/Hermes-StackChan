@@ -234,15 +234,17 @@ An example is available at `firmware/sdcard/config.sample.json`.
 
 Use the server terminal's LAN IP address. `wifi_ssid` and `wifi_password` are optional; when present, `Load SD Config` imports them into NVS and marks network setup complete. Use an empty `wifi_password` for an open network.
 
+The firmware does not auto-import SD config at boot or when opening HERMES. On CoreS3 / StackChan, the SD card and LCD share SPI/GPIO35, so SD import is limited to the explicit `SETUP` > `Hermes` > `Load SD Config` flow to keep the LCD stable.
+
 The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "...", "password": "..."}`.
 
 ### 5. Boot StackChan
 
-On first boot without configuration, the firmware shows `HERMES SETUP`. After the device has Wi-Fi and bridge settings, booting stays on Launcher by default; HERMES does not auto-open unless `CONFIG_HERMES_AUTOSTART=y` is explicitly enabled. Select the `HERMES` app from Launcher to start the Hermes runtime manually.
+On first boot without configuration, the firmware shows `HERMES SETUP`. If you use SD configuration, skip to Launcher and run `SETUP` > `Hermes` > `Load SD Config` once before opening HERMES. After the device has Wi-Fi and bridge settings, booting stays on Launcher by default; HERMES does not auto-open unless `CONFIG_HERMES_AUTOSTART=y` is explicitly enabled. Select the `HERMES` app from Launcher to start the Hermes runtime manually.
 
 Expected setup states:
 
-- `Bridge URL missing`: `websocket_url` was not imported from SD/NVS.
+- `Bridge URL missing`: `websocket_url` is not in NVS; use `Load SD Config` or another setup path.
 - `Wi-Fi not connected`: Wi-Fi provisioning is still needed.
 - `Starting Hermes...` / `Connecting to Hermes bridge`: firmware is starting the local WebSocket runtime.
 - `Hermes bridge ready`: StackChan is connected through `ai-server`.

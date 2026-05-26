@@ -235,15 +235,17 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 
 `<server-ip>` には、サーバー端末の LAN IP を入れます。`wifi_ssid` と `wifi_password` は任意です。指定した場合、`Load SD Config` 実行時に NVS に取り込み、ネットワーク設定済みとして扱います。空パスワードのネットワークでは `wifi_password` を空文字にできます。
 
+firmware は起動時や HERMES を開いた時には SD config を自動 import しません。CoreS3 / StackChan では SD card と LCD が SPI/GPIO35 を共有しているため、LCD を安定させる目的で、SD import は明示的な `SETUP` > `Hermes` > `Load SD Config` フローに限定しています。
+
 Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式でも指定できます。
 
 ### 5. StackChan を起動する
 
-未設定の初回起動時は `HERMES SETUP` が表示されます。Wi-Fi と bridge 設定が揃った後の起動では、標準設定では Launcher に留まり、HERMES は自動で開きません。`CONFIG_HERMES_AUTOSTART=y` を明示的に有効化した場合だけ自動で開きます。Hermes runtime を開始するには Launcher から `HERMES` app を選択してください。
+未設定の初回起動時は `HERMES SETUP` が表示されます。SD config を使う場合は、いったん Launcher に進み、`SETUP` > `Hermes` > `Load SD Config` を一度実行してから HERMES を開いてください。Wi-Fi と bridge 設定が揃った後の起動では、標準設定では Launcher に留まり、HERMES は自動で開きません。`CONFIG_HERMES_AUTOSTART=y` を明示的に有効化した場合だけ自動で開きます。Hermes runtime を開始するには Launcher から `HERMES` app を選択してください。
 
 主な状態表示:
 
-- `Bridge URL missing`: SD/NVS から `websocket_url` が読めていません。
+- `Bridge URL missing`: NVS に `websocket_url` がありません。`Load SD Config` または別の設定導線で設定してください。
 - `Wi-Fi not connected`: Wi-Fi provisioning が必要です。
 - `Starting Hermes...` / `Connecting to Hermes bridge`: firmware が WebSocket runtime を起動中です。
 - `Hermes bridge ready`: `ai-server` 経由で接続できています。

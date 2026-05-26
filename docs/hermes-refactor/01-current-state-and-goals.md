@@ -81,8 +81,6 @@ HERMES は自動では開かない
 ```text
 ユーザーが Launcher で HERMES を選ぶ
   ↓
-SD card config を必要に応じて再 import
-  ↓
 WebSocket URL と Wi-Fi readiness を確認
   ├─ 不足あり → HERMES status / setup guide を表示
   └─ OK → Hermes runtime start request

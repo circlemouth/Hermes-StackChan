@@ -57,35 +57,6 @@ static std::string get_websocket_url()
     return url;
 }
 
-struct SdConfigEnsureResult {
-    bool bridge_configured = false;
-    bool wifi_configured   = false;
-    std::string error;
-};
-
-static SdConfigEnsureResult ensure_sd_config_loaded()
-{
-    SdConfigEnsureResult ensure_result;
-    ensure_result.bridge_configured = !get_websocket_url().empty();
-
-    if (!get_websocket_url().empty()) {
-        return ensure_result;
-    }
-
-    mclog::tagInfo(_tag, "websocket URL missing, trying SD config import");
-    auto result = GetHAL().loadConfigFromSdCard(nullptr);
-    if (!result.success) {
-        mclog::tagWarn(_tag, "SD config import failed: {}", result.error);
-        ensure_result.error = result.error;
-        return ensure_result;
-    }
-
-    mclog::tagInfo(_tag, "SD config imported {} key(s)", result.imported_keys.size());
-    ensure_result.bridge_configured = !get_websocket_url().empty();
-    ensure_result.wifi_configured   = result.imported_wifi_credentials;
-    return ensure_result;
-}
-
 void WifiSetupWorker::update_state()
 {
     switch (_state) {
@@ -108,8 +79,10 @@ void WifiSetupWorker::update_state()
                 data.title->align(LV_ALIGN_TOP_MID, 0, 10);
                 data.title->setText("HERMES SETUP");
 
-                const auto sd_config_result = ensure_sd_config_loaded();
-                const bool is_bridge_configured = sd_config_result.bridge_configured;
+                // Do not implicitly read SD config while constructing this screen.
+                // CoreS3/StackChan shares LCD and SD on SPI/GPIO35; SD reads belong
+                // to the explicit Load SD Config worker which pauses LVGL flushes.
+                const bool is_bridge_configured = !get_websocket_url().empty();
 
                 data.logo_img = assets::get_image("icon_hermes.bin");
                 data.logo     = std::make_unique<Image>(lv_screen_active());
@@ -131,13 +104,7 @@ void WifiSetupWorker::update_state()
                 data.info->align(LV_ALIGN_TOP_MID, 0, 130);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
                 if (!is_bridge_configured) {
-                    if (!sd_config_result.error.empty()) {
-                        data.info->setText(fmt::format("SD config error\n{}", sd_config_result.error));
-                    } else {
-                        data.info->setText("Bridge URL missing\nSet websocket_url on SD card.");
-                    }
-                } else if (sd_config_result.wifi_configured) {
-                    data.info->setText("SD config loaded\nRebooting to use Wi-Fi.");
+                    data.info->setText("Bridge URL missing\nUse Load SD Config.");
                 } else {
                     data.info->setText("Connect Wi-Fi, then use\nHermes bridge.");
                 }
@@ -167,9 +134,6 @@ void WifiSetupWorker::update_state()
                 data.btn_quit->label().setTextColor(lv_color_hex(0x525064));
                 data.btn_quit->onClick().connect([this]() { _state_hermes_setup_data.quit_clicked = true; });
 
-                if (is_bridge_configured && sd_config_result.wifi_configured) {
-                    switch_state(State::Done);
-                }
             }
 
             if (_state_hermes_setup_data.quit_clicked) {
