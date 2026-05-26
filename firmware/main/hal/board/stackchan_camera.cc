@@ -5,7 +5,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <esp_heap_caps.h>
-#include <esp_timer.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -101,24 +100,6 @@ static void log_available_video_devices()
 #else
 #define CAM_PRINT_FOURCC(pixelformat) (void)0;
 #endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
-
-static size_t vision_expected_frame_size(uint16_t width, uint16_t height, v4l2_pix_fmt_t format)
-{
-    const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-    switch (format) {
-        case V4L2_PIX_FMT_YUYV:
-        case V4L2_PIX_FMT_YUV422P:
-        case V4L2_PIX_FMT_RGB565:
-        case V4L2_PIX_FMT_RGB565X:
-            return pixels * 2;
-        case V4L2_PIX_FMT_RGB24:
-            return pixels * 3;
-        case V4L2_PIX_FMT_GREY:
-            return pixels;
-        default:
-            return 0;
-    }
-}
 
 StackChanCamera::StackChanCamera(const esp_video_init_config_t& config)
 {
@@ -1016,109 +997,6 @@ bool StackChanCamera::StreamCaptures()
     }
 
     return true;
-}
-
-bool StackChanCamera::CaptureFrameForVision(uint8_t* dst, size_t dst_len, VisionFrameInfo& out)
-{
-    out = VisionFrameInfo{};
-
-    if (dst == nullptr || dst_len == 0) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(camera_mutex_);
-
-    if (!streaming_on_ || video_fd_ < 0) {
-        return false;
-    }
-
-    const uint16_t width  = sensor_width_ ? sensor_width_ : frame_.width;
-    const uint16_t height = sensor_height_ ? sensor_height_ : frame_.height;
-    size_t expected       = vision_expected_frame_size(width, height, sensor_format_);
-    if (expected == 0) {
-        ESP_LOGW(TAG, "unsupported vision frame format: 0x%08lx", sensor_format_);
-        return false;
-    }
-    if (dst_len < expected) {
-        ESP_LOGW(TAG, "vision buffer too small: need=%u have=%u", static_cast<unsigned>(expected),
-                 static_cast<unsigned>(dst_len));
-        return false;
-    }
-
-    struct v4l2_buffer buf = {};
-    buf.type               = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory             = V4L2_MEMORY_MMAP;
-    if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_DQBUF failed for vision capture, errno=%d(%s)", errno, strerror(errno));
-        return false;
-    }
-
-    bool ok = false;
-    do {
-        if (buf.index >= mmap_buffers_.size() || mmap_buffers_[buf.index].start == nullptr) {
-            ESP_LOGE(TAG, "invalid vision buffer index: %lu", static_cast<unsigned long>(buf.index));
-            break;
-        }
-
-        const size_t bytes_used = MIN(static_cast<size_t>(buf.bytesused), mmap_buffers_[buf.index].length);
-        if (bytes_used == 0 || bytes_used > dst_len) {
-            ESP_LOGW(TAG, "invalid vision frame size: used=%u dst=%u", static_cast<unsigned>(bytes_used),
-                     static_cast<unsigned>(dst_len));
-            break;
-        }
-
-        out.width        = width;
-        out.height       = height;
-        out.format       = sensor_format_ == V4L2_PIX_FMT_YUV422P ? V4L2_PIX_FMT_YUYV : sensor_format_;
-        out.bytes_used   = bytes_used;
-        out.timestamp_us = esp_timer_get_time();
-
-        switch (sensor_format_) {
-            case V4L2_PIX_FMT_YUYV:
-            case V4L2_PIX_FMT_YUV422P:
-            case V4L2_PIX_FMT_RGB565:
-            case V4L2_PIX_FMT_RGB24:
-            case V4L2_PIX_FMT_GREY:
-#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
-            {
-                auto src16   = static_cast<const uint16_t*>(mmap_buffers_[buf.index].start);
-                auto dst16   = reinterpret_cast<uint16_t*>(dst);
-                size_t count = bytes_used / 2;
-                for (size_t i = 0; i < count; i++) {
-                    dst16[i] = __builtin_bswap16(src16[i]);
-                }
-                if ((bytes_used & 1) != 0) {
-                    dst[bytes_used - 1] = static_cast<const uint8_t*>(mmap_buffers_[buf.index].start)[bytes_used - 1];
-                }
-            }
-#else
-                memcpy(dst, mmap_buffers_[buf.index].start, bytes_used);
-#endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
-                ok = true;
-                break;
-            case V4L2_PIX_FMT_RGB565X: {
-                auto src16         = static_cast<const uint16_t*>(mmap_buffers_[buf.index].start);
-                auto dst16         = reinterpret_cast<uint16_t*>(dst);
-                size_t pixel_count = MIN(static_cast<size_t>(width) * static_cast<size_t>(height), bytes_used / 2);
-                for (size_t i = 0; i < pixel_count; i++) {
-                    dst16[i] = __builtin_bswap16(src16[i]);
-                }
-                out.format     = V4L2_PIX_FMT_RGB565;
-                out.bytes_used = pixel_count * 2;
-                ok             = true;
-                break;
-            }
-            default:
-                ESP_LOGW(TAG, "unsupported vision frame format: 0x%08lx", sensor_format_);
-                break;
-        }
-    } while (false);
-
-    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_QBUF failed after vision capture, errno=%d(%s)", errno, strerror(errno));
-    }
-
-    return ok;
 }
 
 bool StackChanCamera::SetHMirror(bool enabled)

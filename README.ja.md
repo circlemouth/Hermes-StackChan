@@ -63,7 +63,6 @@ v1 のロボット tool は以下です。
 - `stackchan_stop_reminder`: ID を指定して local reminder を停止する。
 
 Hermes は、首振りや LED 変更などの意図的な動作だけをこれらの tool で指示します。自然な瞬き、待機モーション、発話中モーション、ローカル reminder 通知は ファームウェア が継続して担当します。カメラ、画面キャプチャ、画像表示、reminder tool は StackChan セッション用のローカル補助機能です。
-オンデバイス顔検出による首追従は、明示的に有効化する firmware 機能です。標準では無効で、MVP では Hermes が STANDBY の間だけ動作します。
 
 ## リポジトリ構成
 
@@ -166,10 +165,24 @@ STACKCHAN_VAD_START_SPEECH_MS=120
 STACKCHAN_VAD_END_SILENCE_MS=900
 STACKCHAN_VAD_MIN_SPEECH_MS=240
 STACKCHAN_VAD_PREROLL_MS=300
+STACKCHAN_BARGE_IN_ENABLED=true
+STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.03
+STACKCHAN_BARGE_IN_START_SPEECH_MS=180
+STACKCHAN_BARGE_IN_MIN_SPEECH_MS=180
+STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=300
+STACKCHAN_MAX_SPEECH_CHARS=800
+STACKCHAN_TTS_SEGMENT_MAX_CHARS=160
+STACKCHAN_TTS_MAX_SEGMENTS=8
+STACKCHAN_AUTO_LED_ENABLED=true
+STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
 `HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。
 local VAD は default で有効です。`ai-server` が受信 Opus を 16 kHz mono PCM に decode し、軽量な RMS 判定で発話終了を検出します。そのため、端末が無音中も Opus frame を送り続ける場合でも、PCM 内容が無音なら turn を閉じられます。部屋がうるさい場合は `STACKCHAN_VAD_RMS_THRESHOLD` を上げます。発話末尾が切れる場合は `STACKCHAN_VAD_END_SILENCE_MS` を長くし、反応が遅い場合は短くします。`STACKCHAN_VAD_START_SPEECH_MS` と `STACKCHAN_VAD_PREROLL_MS` で開始判定の安定性と頭切れ防止量を調整できます。
+
+barge-in は default で有効です。`ai-server` が TTS を stream している間だけ、通常より厳しめの RMS VAD でマイク Opus frame を見ます。ユーザーの発話が継続したら現在の TTS stream を止め、`tts stop` を一度だけ送り、StackChan 専用 Hermes session だけを interrupt して、すぐ listening に戻します。この機能は、TTS 再生中も firmware から mic Opus frame が届く場合に働きます。現在の xiaozhi speaking state は realtime listening / AEC mode でない場合に mic upload を止める可能性があるため、選択中の firmware mode で実機確認してください。TTS は文単位に分けて合成するため、長い返答でも全文合成を待たずに先頭文から再生を始められます。
+
+自動 LED 状態表示も default で有効です。listening は控えめな緑、thinking は amber、speaking は控えめな青、idle は消灯です。Hermes が明示的に `stackchan_set_led_color` を呼んだ場合、その手動色を短時間優先してから自動状態表示に戻します。背景と移植範囲の詳細は [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md) を参照してください。
 
 `STACKCHAN_LOCAL_ONLY=true` にすると StackChan 音声 loop を local-only にします。この場合、`HERMES_DASHBOARD_URL` は `localhost`、`127.0.0.1`、`::1`、`host.docker.internal` のいずれかに限定され、Hermes STT/TTS helper は cloud fallback を拒否します。STT は faster-whisper または `HERMES_LOCAL_STT_COMMAND`、TTS は Piper / KittenTTS / NeuTTS / command provider を使ってください。初回 model 取得や pip/npm install が事前 setup として必要な場合はありますが、実行時に cloud STT/TTS API へ逃がしません。
 
@@ -215,16 +228,12 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
   "websocket_version": 3,
-  "face_tracking_enabled": false,
-  "face_tracking_hz": 2,
-  "face_tracking_mode": "standby",
   "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
   "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 `<server-ip>` には、サーバー端末の LAN IP を入れます。`wifi_ssid` と `wifi_password` は任意です。指定した場合、`Load SD Config` 実行時に NVS に取り込み、ネットワーク設定済みとして扱います。空パスワードのネットワークでは `wifi_password` を空文字にできます。
-`face_tracking_enabled` を `true` にすると、Hermes standby 中に低頻度のオンデバイス顔検出と首追従が有効になります。`face_tracking_mode` は `off`、`standby`、`standby_speaking`、`all` を受け付けますが、MVP の実動作は安全側で standby のみです。
 
 Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式でも指定できます。
 
@@ -251,12 +260,14 @@ BLE Wi-Fi provisioning は残っていますが、アカウント紐づけでは
 3. `ai-server` が収集済み PCM を WAV として Hermes の STT helper module に渡します。
 4. `ai-server` が transcript を Hermes Dashboard `/api/ws` の StackChan 専用 session に送ります。
 5. Hermes がその session の最終応答 text を返します。
-6. `ai-server` が Hermes の TTS helper module を Python subprocess で呼びます。
-7. `ai-server` が合成音声を Opus stream として StackChan に返します。
+6. `ai-server` が発話 text を文単位の TTS segment に分け、segment ごとに Hermes の TTS helper module を Python subprocess で呼びます。
+7. `ai-server` が各 segment の合成音声を Opus stream として順番に StackChan に返します。
 
 interrupt の扱い:
 
 - StackChan からの `abort` は、再生中の Opus stream を止めます。
+- TTS streaming 中に届く mic Opus frame は barge-in 専用 VAD で decode され、ユーザー発話が続いた場合は現在の TTS stream を止め、StackChan 専用 Hermes session だけを interrupt します。
+- barge-in は TTS 再生中も firmware が mic frame を送り続ける場合に有効です。firmware が再生中の mic input を止める場合、server 側だけでは検出できません。現在の xiaozhi speaking-state code は、選択中の listening / AEC mode で実機確認してください。
 - `ai-server` は StackChan 用 Hermes session にだけ `session.interrupt` を送ります。
 - Dashboard/TUI 側で別用途に使っている session は interrupt しません。
 
@@ -265,6 +276,7 @@ interrupt の扱い:
 - Hermes は MCP tool で意図的に首を動かしたり LED 色を変えたりできます。
 - firmware は自律瞬き、待機モーション、発話中モーションを継続します。
 - `ai-server` は Hermes の返答文から簡単な StackChan emotion を推定し、常に `neutral` にならないようにします。
+- `ai-server` は listening / thinking / speaking / idle の控えめな LED 色を自動設定します。Hermes が明示的に LED tool を呼んだ場合は、その色を短時間優先します。
 - この混合制御により、Hermes が細かい動作 frame を毎回制御しなくても自然なロボット動作を保てます。
 
 ## Firmware の設定

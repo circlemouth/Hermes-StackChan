@@ -62,7 +62,6 @@ The v1 robot tools are:
 - `stackchan_stop_reminder`: stop a local reminder by ID.
 
 Hermes should call movement and LED tools only for deliberate actions. Firmware still owns natural movement such as blinking, idle animation, speaking-time motion, and local reminder notifications. Camera, screen capture, image preview, and reminder tools are local-only helpers for the StackChan session.
-On-device face detection based head tracking is available as an opt-in firmware feature. It is disabled by default and the MVP runs only while Hermes is in STANDBY.
 
 ## Repository Layout
 
@@ -165,10 +164,24 @@ STACKCHAN_VAD_START_SPEECH_MS=120
 STACKCHAN_VAD_END_SILENCE_MS=900
 STACKCHAN_VAD_MIN_SPEECH_MS=240
 STACKCHAN_VAD_PREROLL_MS=300
+STACKCHAN_BARGE_IN_ENABLED=true
+STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.03
+STACKCHAN_BARGE_IN_START_SPEECH_MS=180
+STACKCHAN_BARGE_IN_MIN_SPEECH_MS=180
+STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=300
+STACKCHAN_MAX_SPEECH_CHARS=800
+STACKCHAN_TTS_SEGMENT_MAX_CHARS=160
+STACKCHAN_TTS_MAX_SEGMENTS=8
+STACKCHAN_AUTO_LED_ENABLED=true
+STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
 `HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
 Local VAD is enabled by default. It is a lightweight RMS-based detector that runs inside `ai-server` after Opus is decoded to 16 kHz mono PCM, so it can end a turn even when the device keeps sending silent Opus frames. For noisy rooms, raise `STACKCHAN_VAD_RMS_THRESHOLD`. If the end of speech is clipped, raise `STACKCHAN_VAD_END_SILENCE_MS`; if replies feel slow, lower it. `STACKCHAN_VAD_START_SPEECH_MS` and `STACKCHAN_VAD_PREROLL_MS` tune start stability and head padding.
+
+Barge-in is enabled by default and uses a stricter RMS threshold only while `ai-server` is streaming TTS. It interrupts the dedicated StackChan Hermes session, sends one `tts stop`, and immediately returns to listening. It requires firmware that continues sending microphone Opus frames during TTS playback; the current xiaozhi speaking state may suppress mic upload unless realtime listening/AEC mode is active, so firmware behavior should be confirmed on hardware. TTS is synthesized sentence by sentence so longer replies can begin playing from the first sentence instead of waiting for the whole reply to be synthesized.
+
+Automatic LED state display is also enabled by default: soft green while listening, amber while thinking, soft blue while speaking, and off when idle. If Hermes explicitly calls `stackchan_set_led_color`, that manual color is held briefly before automatic state updates resume. More background and migration notes are in [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md).
 
 Set `STACKCHAN_LOCAL_ONLY=true` to keep the StackChan voice loop local-only. In that mode `HERMES_DASHBOARD_URL` must point to `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`, and the Hermes STT/TTS helpers refuse cloud fallback. Use faster-whisper or `HERMES_LOCAL_STT_COMMAND` for STT, and use Piper, KittenTTS, NeuTTS, or a command TTS provider for speech. First-time model downloads and package installs may still be part of setup, but runtime does not escape to cloud STT/TTS APIs.
 
@@ -214,16 +227,12 @@ An example is available at `firmware/sdcard/config.sample.json`.
 {
   "websocket_url": "ws://<server-ip>:8765/ws",
   "websocket_version": 3,
-  "face_tracking_enabled": false,
-  "face_tracking_hz": 2,
-  "face_tracking_mode": "standby",
   "wifi_ssid": "YOUR_2_4GHZ_WIFI_SSID",
   "wifi_password": "YOUR_WIFI_PASSWORD"
 }
 ```
 
 Use the server terminal's LAN IP address. `wifi_ssid` and `wifi_password` are optional; when present, `Load SD Config` imports them into NVS and marks network setup complete. Use an empty `wifi_password` for an open network.
-Set `face_tracking_enabled` to `true` to enable low-rate on-device face detection and head tracking during Hermes standby. `face_tracking_mode` currently accepts `off`, `standby`, `standby_speaking`, or `all`, but the MVP safely tracks only in standby.
 
 The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "...", "password": "..."}`.
 
@@ -250,12 +259,14 @@ Audio flow:
 3. `ai-server` sends the captured PCM as WAV to Hermes STT through Python helper modules.
 4. `ai-server` submits the transcript to Hermes Dashboard `/api/ws` using a dedicated StackChan session.
 5. Hermes returns the final assistant message from that session.
-6. `ai-server` calls Hermes TTS through Python helper modules.
-7. `ai-server` streams synthesized Opus audio back to StackChan.
+6. `ai-server` splits the speech text into sentence-sized TTS segments and calls Hermes TTS through Python helper modules for each segment.
+7. `ai-server` streams each synthesized Opus segment back to StackChan in order.
 
 Interrupt behavior:
 
 - StackChan `abort` stops local playback streaming.
+- During TTS streaming, incoming microphone Opus frames are decoded with a stricter barge-in VAD; sustained user speech stops the current TTS stream and interrupts only the StackChan Hermes session.
+- Barge-in depends on firmware delivering mic frames during TTS playback. If the firmware suppresses mic input while speaking, no server-side barge-in event can be detected; current xiaozhi speaking-state code should be verified on hardware for the selected listening/AEC mode.
 - `ai-server` sends `session.interrupt` only for the StackChan Hermes session.
 - Existing Dashboard/TUI sessions for other work are not interrupted.
 
@@ -264,6 +275,7 @@ Movement behavior:
 - Hermes can intentionally move the head or set LEDs through MCP tools.
 - Firmware continues autonomous blinking, idle motion, and speaking motion.
 - `ai-server` infers simple StackChan emotions from Hermes replies instead of always sending `neutral`.
+- `ai-server` sets subtle automatic LED colors for listening, thinking, speaking, and idle; explicit Hermes LED tool calls temporarily take priority.
 - This mixed-control model keeps robot behavior natural without requiring Hermes to micromanage every frame.
 
 ## Firmware Setup

@@ -20,14 +20,6 @@ struct JpegChunk {
     size_t len;
 };
 
-struct VisionFrameInfo {
-    uint16_t width        = 0;
-    uint16_t height       = 0;
-    v4l2_pix_fmt_t format = 0;
-    size_t bytes_used     = 0;
-    int64_t timestamp_us  = 0;
-};
-
 class StackChanCamera : public Camera {
 private:
     struct FrameBuffer {
@@ -60,7 +52,6 @@ public:
     virtual bool Capture() override;
     bool EncodeFrameToJpeg(std::string& jpeg, int quality = 80);
     bool StreamCaptures();
-    bool CaptureFrameForVision(uint8_t* dst, size_t dst_len, VisionFrameInfo& out);
 
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;

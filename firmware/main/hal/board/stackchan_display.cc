@@ -409,7 +409,6 @@ void StackChanAvatarDisplay::SetupUI()
     blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
     stackchan.addModifier(std::make_unique<ImuEventModifier>());
-    stackchan.addModifier(std::make_unique<FaceTrackingModifier>());
 
     preview_image_ = lv_image_create(screen);
     lv_obj_set_size(preview_image_, 320, 240);

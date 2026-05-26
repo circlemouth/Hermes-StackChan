@@ -9,7 +9,6 @@
 #include <ssid_manager.h>
 #include <mooncake_log.h>
 #include <cstdio>
-#include <cstdlib>
 #include <dirent.h>
 #include <cstring>
 #include <cctype>
@@ -187,103 +186,6 @@ static std::string get_wifi_string(cJSON* root, const char* flat_key, const char
     return "";
 }
 
-static bool get_json_bool(cJSON* root, const char* key, bool& out)
-{
-    cJSON* item = cJSON_GetObjectItem(root, key);
-    if (!item) {
-        return false;
-    }
-    if (cJSON_IsBool(item)) {
-        out = cJSON_IsTrue(item);
-        return true;
-    }
-    if (cJSON_IsNumber(item)) {
-        out = item->valueint != 0;
-        return true;
-    }
-    if (cJSON_IsString(item) && item->valuestring) {
-        std::string value;
-        for (const char* p = item->valuestring; *p; ++p) {
-            value.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*p))));
-        }
-        if (value == "true" || value == "yes" || value == "on" || value == "1") {
-            out = true;
-            return true;
-        }
-        if (value == "false" || value == "no" || value == "off" || value == "0") {
-            out = false;
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool get_json_int(cJSON* root, const char* key, int min_value, int max_value, int& out)
-{
-    cJSON* item = cJSON_GetObjectItem(root, key);
-    if (!item) {
-        return false;
-    }
-
-    int value = 0;
-    if (cJSON_IsNumber(item)) {
-        value = item->valueint;
-    } else if (cJSON_IsString(item) && item->valuestring) {
-        char* end = nullptr;
-        long parsed = std::strtol(item->valuestring, &end, 10);
-        if (end == item->valuestring || *end != '\0') {
-            return false;
-        }
-        value = static_cast<int>(parsed);
-    } else {
-        return false;
-    }
-
-    if (value < min_value || value > max_value) {
-        return false;
-    }
-    out = value;
-    return true;
-}
-
-static bool get_face_tracking_mode(cJSON* root, int& out)
-{
-    cJSON* item = cJSON_GetObjectItem(root, "face_tracking_mode");
-    if (!item) {
-        return false;
-    }
-    if (cJSON_IsNumber(item)) {
-        int value = item->valueint;
-        if (value < 0 || value > 3) {
-            return false;
-        }
-        out = value;
-        return true;
-    }
-    if (!cJSON_IsString(item) || item->valuestring == nullptr) {
-        return false;
-    }
-
-    std::string value;
-    for (const char* p = item->valuestring; *p; ++p) {
-        const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
-        value.push_back(c == '-' ? '_' : c);
-    }
-
-    if (value == "off" || value == "disabled" || value == "0") {
-        out = 0;
-    } else if (value == "standby" || value == "standby_only" || value == "1") {
-        out = 1;
-    } else if (value == "standby_speaking" || value == "standby+speaking" || value == "2") {
-        out = 2;
-    } else if (value == "standby_listening_speaking" || value == "all" || value == "3") {
-        out = 3;
-    } else {
-        return false;
-    }
-    return true;
-}
-
 namespace sd_config {
 
 LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
@@ -438,37 +340,6 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
         Settings ws_settings("websocket", true);
         ws_settings.SetInt("version", 3);
         mclog::tagInfo(TAG, "defaulted: websocket_version = 3");
-    }
-
-    {
-        Settings hermes_settings("hermes", true);
-
-        bool face_enabled = false;
-        if (get_json_bool(json.root, "face_tracking_enabled", face_enabled)) {
-            hermes_settings.SetBool("face_en", face_enabled);
-            result.imported_keys.push_back("face_tracking_enabled");
-            mclog::tagInfo(TAG, "imported: face_tracking_enabled = {}", face_enabled);
-        } else if (cJSON_GetObjectItem(json.root, "face_tracking_enabled")) {
-            mclog::tagWarn(TAG, "skip face_tracking_enabled: expected boolean");
-        }
-
-        int face_hz = 0;
-        if (get_json_int(json.root, "face_tracking_hz", 1, 10, face_hz)) {
-            hermes_settings.SetInt("face_hz", face_hz);
-            result.imported_keys.push_back("face_tracking_hz");
-            mclog::tagInfo(TAG, "imported: face_tracking_hz = {}", face_hz);
-        } else if (cJSON_GetObjectItem(json.root, "face_tracking_hz")) {
-            mclog::tagWarn(TAG, "skip face_tracking_hz: expected integer 1..10");
-        }
-
-        int face_mode = 0;
-        if (get_face_tracking_mode(json.root, face_mode)) {
-            hermes_settings.SetInt("face_mode", face_mode);
-            result.imported_keys.push_back("face_tracking_mode");
-            mclog::tagInfo(TAG, "imported: face_tracking_mode = {}", face_mode);
-        } else if (cJSON_GetObjectItem(json.root, "face_tracking_mode")) {
-            mclog::tagWarn(TAG, "skip face_tracking_mode: expected off/standby/standby_speaking/all");
-        }
     }
 
     const std::string wifi_ssid     = get_wifi_string(json.root, "wifi_ssid", "ssid");

@@ -24,20 +24,6 @@ static constexpr std::string_view _hermes_config_nvs_ns                         
 static constexpr std::string_view _hermes_config_idle_shutdown_time_key           = "idle_sec";
 static constexpr std::string_view _hermes_config_allow_shutdown_when_charging_key = "ext_pwr";
 static constexpr std::string_view _hermes_config_idle_random_movement_key         = "idle_lv";
-static constexpr std::string_view _hermes_config_face_tracking_enabled_key        = "face_en";
-static constexpr std::string_view _hermes_config_face_tracking_hz_key             = "face_hz";
-static constexpr std::string_view _hermes_config_face_tracking_mode_key           = "face_mode";
-
-static uint8_t clamp_u8(int value, int min_value, int max_value)
-{
-    if (value < min_value) {
-        return static_cast<uint8_t>(min_value);
-    }
-    if (value > max_value) {
-        return static_cast<uint8_t>(max_value);
-    }
-    return static_cast<uint8_t>(value);
-}
 
 namespace hal_bridge {
 
@@ -166,12 +152,6 @@ HermesRuntimeConfig_t get_hermes_config()
         settings.GetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
     config.idleRandomMovementLevel =
         settings.GetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
-    config.faceTrackingEnabled =
-        settings.GetBool(_hermes_config_face_tracking_enabled_key.data(), config.faceTrackingEnabled);
-    config.faceTrackingHz =
-        clamp_u8(settings.GetInt(_hermes_config_face_tracking_hz_key.data(), config.faceTrackingHz), 1, 10);
-    config.faceTrackingMode =
-        clamp_u8(settings.GetInt(_hermes_config_face_tracking_mode_key.data(), config.faceTrackingMode), 0, 3);
 
     return config;
 }
@@ -182,9 +162,6 @@ void set_hermes_config(const HermesRuntimeConfig_t& config)
     settings.SetInt(_hermes_config_idle_shutdown_time_key.data(), config.idleShutdownTimeSeconds);
     settings.SetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
     settings.SetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
-    settings.SetBool(_hermes_config_face_tracking_enabled_key.data(), config.faceTrackingEnabled);
-    settings.SetInt(_hermes_config_face_tracking_hz_key.data(), config.faceTrackingHz);
-    settings.SetInt(_hermes_config_face_tracking_mode_key.data(), config.faceTrackingMode);
 }
 
 void app_play_sound(const std::string_view& sound)

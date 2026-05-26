@@ -13,12 +13,11 @@
 namespace stackchan::motion {
 
 enum class MotionLockOwner : uint8_t {
-    None         = 0,
-    FaceTracking = 40,
-    HeadPet      = 50,
-    ImuEvent     = 80,
-    McpCommand   = 90,
-    Legacy       = 100,
+    None       = 0,
+    HeadPet    = 50,
+    ImuEvent   = 80,
+    McpCommand = 90,
+    Legacy     = 100,
 };
 
 /**
@@ -122,8 +121,7 @@ public:
      * @brief Moves the head using normalized coordinates ranging from -1.0 to 1.0.
      *
      * This method maps a proportional input to the full physical range of the servos.
-     * It is ideal for visual tracking (e.g., centering a face in a camera frame)
-     * or joystick-based control.
+     * It is ideal for joystick-based control.
      *
      * Mapping Logic:
      * - X-axis (Yaw): -1.0 (Max Left) <---> 1.0 (Max Right). 0.0 is center.

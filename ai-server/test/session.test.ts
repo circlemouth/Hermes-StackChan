@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
-import { inferStackChanEmotion, readEnvInt, readTurnControlConfig, Session } from '../src/session.ts'
+import { inferStackChanEmotion, readBargeInConfig, readEnvInt, readSpeechSegmentationConfig, readTurnControlConfig, Session, splitStackChanSpeechText } from '../src/session.ts'
 import type { LocalRmsVadConfig } from '../src/local_vad.ts'
 
 class MockWebSocket {
@@ -16,6 +16,22 @@ function jsonMessages(ws: MockWebSocket): Array<Record<string, unknown>> {
     return ws.sent
         .filter((item): item is string => typeof item === 'string')
         .map((item) => JSON.parse(item) as Record<string, unknown>)
+}
+
+function mcpMessages(ws: MockWebSocket): Array<Record<string, unknown>> {
+    return jsonMessages(ws).filter((msg) => msg['type'] === 'mcp')
+}
+
+function mcpParams(msg: Record<string, unknown>): Record<string, unknown> {
+    return ((msg['payload'] as Record<string, unknown>)['params'] as Record<string, unknown>)
+}
+
+function mcpId(msg: Record<string, unknown>): unknown {
+    return (msg['payload'] as Record<string, unknown>)['id']
+}
+
+function ledMcpMessages(ws: MockWebSocket): Array<Record<string, unknown>> {
+    return mcpMessages(ws).filter((msg) => mcpParams(msg)['name'] === 'self.robot.set_led_color')
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -122,6 +138,31 @@ test('readTurnControlConfig reads StackChan voice turn environment values', () =
         maxRecordingMs: 60000,
         minFramesForStt: 1,
         postTtsCooldownMs: 1750,
+    })
+})
+
+test('readBargeInConfig and readSpeechSegmentationConfig clamp environment values', () => {
+    assert.deepEqual(readBargeInConfig({
+        STACKCHAN_BARGE_IN_ENABLED: 'false',
+        STACKCHAN_BARGE_IN_RMS_THRESHOLD: '9',
+        STACKCHAN_BARGE_IN_START_SPEECH_MS: '1',
+        STACKCHAN_BARGE_IN_MIN_SPEECH_MS: '99999',
+        STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS: '-10',
+    }), {
+        enabled: false,
+        rmsThreshold: 0.3,
+        startSpeechMs: 60,
+        minSpeechMs: 3000,
+        ignoreTtsStartMs: 0,
+    })
+    assert.deepEqual(readSpeechSegmentationConfig({
+        STACKCHAN_MAX_SPEECH_CHARS: '20',
+        STACKCHAN_TTS_SEGMENT_MAX_CHARS: '9999',
+        STACKCHAN_TTS_MAX_SEGMENTS: '0',
+    }), {
+        maxSpeechChars: 40,
+        segmentMaxChars: 800,
+        maxSegments: 1,
     })
 })
 
@@ -250,13 +291,13 @@ test('Session displays Hermes image media and strips image tags before TTS', asy
     }
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
 
-    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'mcp'))
-    const firstMcpMessage = jsonMessages(ws).find((msg) => msg['type'] === 'mcp')
+    await waitFor(() => mcpMessages(ws).some((msg) => mcpParams(msg)['name'] === 'self.screen.preview_image_url'))
+    const firstMcpMessage = mcpMessages(ws).find((msg) => mcpParams(msg)['name'] === 'self.screen.preview_image_url')
     assert.ok(firstMcpMessage)
     session.handleMessage(JSON.stringify({
         type: 'mcp',
         payload: {
-            id: (firstMcpMessage['payload'] as Record<string, unknown>)['id'],
+            id: mcpId(firstMcpMessage),
             result: true,
         },
     }))
@@ -264,10 +305,10 @@ test('Session displays Hermes image media and strips image tags before TTS', asy
     await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
 
     const messages = jsonMessages(ws)
-    const mcpMessage = messages.find((msg) => msg['type'] === 'mcp')
+    const mcpMessage = mcpMessages(ws).find((msg) => mcpParams(msg)['name'] === 'self.screen.preview_image_url')
     assert.ok(mcpMessage)
     assert.deepEqual(
-        ((mcpMessage['payload'] as Record<string, unknown>)['params'] as Record<string, unknown>),
+        mcpParams(mcpMessage),
         {
             name: 'self.screen.preview_image_url',
             arguments: {
@@ -277,6 +318,228 @@ test('Session displays Hermes image media and strips image tags before TTS', asy
         },
     )
     assert.ok(messages.some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === 'こちらです'))
+
+    session.close()
+})
+
+test('splitStackChanSpeechText segments Japanese, strips media, bounds long text, and falls back for image-only replies', () => {
+    assert.deepEqual(splitStackChanSpeechText('一つ目です。二つ目です！'), ['一つ目です。', '二つ目です！'])
+    assert.deepEqual(splitStackChanSpeechText('MEDIA:https://example.com/a.png\nこちらです。'), ['こちらです。'])
+    assert.deepEqual(splitStackChanSpeechText('MEDIA:https://example.com/a.png'), ['画像を表示しました。'])
+
+    const long = 'あ'.repeat(45)
+    assert.deepEqual(splitStackChanSpeechText(long, {
+        maxSpeechChars: 100,
+        segmentMaxChars: 20,
+        maxSegments: 8,
+    }), ['あ'.repeat(20), 'あ'.repeat(20), 'あ'.repeat(5)])
+})
+
+test('Session synthesizes and streams TTS one sentence segment at a time', async () => {
+    const ws = new MockWebSocket()
+    const synthesized: string[] = []
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => '説明して',
+        hermes: {
+            submitPrompt: async () => '一つ目です。二つ目です！',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            synthesized.push(text)
+            return Buffer.from(text)
+        },
+        encodeWavToOpusFrames: (wav) => [Buffer.from([wav.toString('utf8').startsWith('一') ? 1 : 2])],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => jsonMessages(ws).filter((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_end').length === 2)
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    assert.deepEqual(synthesized, ['一つ目です。', '二つ目です！'])
+    const ttsMessages = jsonMessages(ws).filter((msg) => msg['type'] === 'tts')
+    assert.equal(ttsMessages.filter((msg) => msg['state'] === 'start').length, 1)
+    assert.equal(ttsMessages.filter((msg) => msg['state'] === 'stop').length, 1)
+    assert.deepEqual(
+        ttsMessages.filter((msg) => msg['state'] === 'sentence_start').map((msg) => msg['text']),
+        ['一つ目です。', '二つ目です！'],
+    )
+    assert.deepEqual(
+        ttsMessages.filter((msg) => msg['state'] === 'sentence_end').map((msg) => msg['text']),
+        ['一つ目です。', '二つ目です！'],
+    )
+    assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2])])
+
+    session.close()
+})
+
+test('Session barge-in interrupts TTS, sends one stop, and accepts the next turn', async () => {
+    const ws = new MockWebSocket()
+    let interruptCount = 0
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: { ...testVadConfig, enabled: false },
+        bargeInConfig: {
+            enabled: true,
+            rmsThreshold: 0.03,
+            startSpeechMs: 180,
+            minSpeechMs: 180,
+            ignoreTtsStartMs: 0,
+        },
+        decodeOpusFrame: (frame) => frame[0] === 9 ? pcm60ms(3000) : pcm60ms(0),
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => `turn ${++transcribeCount}`,
+        hermes: {
+            submitPrompt: async (prompt) => prompt === 'turn 1' ? '長い返答です。続きがあります。' : '次の返答です。',
+            interrupt: async () => { interruptCount += 1 },
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => Buffer.from(text),
+        encodeWavToOpusFrames: (wav) => wav.toString('utf8').startsWith('長い')
+            ? [Buffer.from([1]), Buffer.from([2]), Buffer.from([3]), Buffer.from([4]), Buffer.from([5])]
+            : [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => ws.sent.filter(Buffer.isBuffer).length >= 1)
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([9]))
+
+    await waitFor(() => interruptCount === 1)
+    const streamedBeforeSecondTurn = ws.sent.filter(Buffer.isBuffer).length
+    assert.ok(streamedBeforeSecondTurn < 5)
+    assert.equal(jsonMessages(ws).filter((msg) => msg['type'] === 'tts' && msg['state'] === 'stop').length, 1)
+
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => transcribeCount === 2)
+    assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'stt' && msg['text'] === 'turn 2'))
+
+    session.close()
+})
+
+test('Session does not barge in when disabled or inside the TTS ignore window', async () => {
+    async function runCase(bargeInEnabled: boolean, ignoreTtsStartMs: number): Promise<{ ws: MockWebSocket; interrupts: number }> {
+        const ws = new MockWebSocket()
+        let interrupts = 0
+        const session = new Session(ws as never, {
+            registerDeviceSession: () => () => undefined,
+            localVadConfig: { ...testVadConfig, enabled: false },
+            bargeInConfig: {
+                enabled: bargeInEnabled,
+                rmsThreshold: 0.03,
+                startSpeechMs: 180,
+                minSpeechMs: 180,
+                ignoreTtsStartMs,
+            },
+            decodeOpusFrame: (frame) => frame[0] === 9 ? pcm60ms(3000) : pcm60ms(0),
+            decodeOpusFrames: () => Buffer.alloc(320),
+            transcribeWav: async () => 'turn',
+            hermes: {
+                submitPrompt: async () => '長い返答です。',
+                interrupt: async () => { interrupts += 1 },
+                dispose: async () => undefined,
+            },
+            synthesizeText: async () => Buffer.from('wav'),
+            encodeWavToOpusFrames: () => [Buffer.from([1]), Buffer.from([2]), Buffer.from([3])],
+        })
+
+        session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+        session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+        for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+        session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+        await waitFor(() => ws.sent.filter(Buffer.isBuffer).length >= 1)
+        for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([9]))
+        await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+        session.close()
+        return { ws, interrupts }
+    }
+
+    const disabled = await runCase(false, 0)
+    assert.equal(disabled.interrupts, 0)
+    assert.deepEqual(disabled.ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2]), Buffer.from([3])])
+
+    const ignored = await runCase(true, 10_000)
+    assert.equal(ignored.interrupts, 0)
+    assert.deepEqual(ignored.ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2]), Buffer.from([3])])
+})
+
+test('Session auto LED follows listen and speaking states', async () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => 'こんにちは',
+        hermes: {
+            submitPrompt: async () => '返答',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    assert.deepEqual(mcpParams(ledMcpMessages(ws)[0])['arguments'], { red: 0, green: 32, blue: 0 })
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await waitFor(() => ledMcpMessages(ws).some((msg) => {
+        const args = mcpParams(msg)['arguments'] as Record<string, unknown>
+        return args['blue'] === 40
+    }))
+
+    session.close()
+})
+
+test('Session manual LED tool hold suppresses automatic LED updates', async () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        autoLedConfig: { enabled: true, manualHoldMs: 8000 },
+        hermes: {
+            submitPrompt: async () => 'unused',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+    })
+
+    const ledPromise = session.callRobotTool('self.robot.set_led_color', { red: 10, green: 0, blue: 0 })
+    const manualLedMessage = ledMcpMessages(ws)[0]
+    assert.ok(manualLedMessage)
+    session.handleMessage(JSON.stringify({ type: 'mcp', payload: { id: mcpId(manualLedMessage), result: true } }))
+    await ledPromise
+
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    assert.equal(ledMcpMessages(ws).length, 1)
+
+    session.close()
+})
+
+test('Session does not send automatic LED payloads when disabled', () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        autoLedEnabled: false,
+        hermes: {
+            submitPrompt: async () => 'unused',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    assert.equal(ledMcpMessages(ws).length, 0)
 
     session.close()
 })
