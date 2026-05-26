@@ -31,7 +31,7 @@ void AppLauncher::onLauncherOpen()
 
     if (!_startup_checked && !GetHAL().isAppConfiged()) {
         mclog::tagInfo(getAppInfo().name,
-                       "app config missing; skipping implicit SD config import to keep LCD SPI stable");
+                       "App config missing; SD config auto-import is disabled. Use Setup > Load SD Config.");
     }
 
     const bool need_app_setup   = !GetHAL().isAppConfiged();

@@ -10,6 +10,7 @@
 #include "settings.h"
 
 #include <esp_log.h>
+#include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <wifi_station.h>
 #include <esp_lcd_panel_io.h>
@@ -23,6 +24,25 @@
 #define TAG "M5Stack-StackChan-Board"
 
 #define XPOWERS_AXP2101_ICC_CHG_SET (0x62)
+
+static constexpr gpio_num_t LCD_CS_PIN = GPIO_NUM_3;
+static constexpr gpio_num_t SD_CS_PIN  = GPIO_NUM_4;
+
+static void PrepareSharedSpiIdlePins()
+{
+    ESP_LOGI(TAG, "Prepare shared SPI idle pins for LCD/SD");
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << LCD_CS_PIN) | (1ULL << SD_CS_PIN);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(gpio_set_level(LCD_CS_PIN, 1));
+    ESP_ERROR_CHECK(gpio_set_level(SD_CS_PIN, 1));
+}
 
 class Pmic : public Axp2101 {
 public:
@@ -396,6 +416,8 @@ private:
 
     void InitializeSpi()
     {
+        PrepareSharedSpiIdlePins();
+
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num      = GPIO_NUM_37;
         buscfg.miso_io_num      = GPIO_NUM_NC;

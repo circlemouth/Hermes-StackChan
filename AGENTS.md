@@ -72,6 +72,40 @@ idf.py monitor
 - `firmware/main/hal/hal_mcp.cpp` は firmware-side MCP tools を登録します。JSON は手書き文字列連結ではなく `cJSON` など安全な方法で作ってください。
 - LVGL screen / layer / object の clean / delete は race を起こしやすいため、必ず lock と ownership を確認してください。
 - `StackChanAvatarDisplay::SetupUI()` は複数回呼ばれても壊れない、または duplicate call を安全に skip できる状態を保ってください。
+- CoreS3 / StackChan の LCD と SD card は共有 SPI / GPIO35 を使うため、SD access と LCD update は強く干渉します。SD card access は Setup の明示操作に限定し、成功後は restart required としてください。
+- LVGL 管理下の LCD を application code から `esp_lcd_panel_draw_bitmap()` で直接描画しないでください。
+
+## CoreS3 / StackChan LCD・SD 共有 SPI の安全規約
+
+M5Stack CoreS3 / StackChan では LCD と SD card が SPI3 を共有し、GPIO35 が LCD DC と SD MISO を兼ねる。このため、表示中・起動直後・HERMES handoff 直前に SD card を触る実装は LCD 黒画面や描画崩れの原因になります。
+
+### 禁止事項
+
+- Launcher 起動時に SD config を自動 import しない。
+- HERMES app open / Hermes runtime handoff 直前に SD card を読まない。
+- LVGL / esp_lvgl_port 管理下の LCD に対して、application code から `esp_lcd_panel_draw_bitmap()` を直接呼ばない。
+- boot clear / handoff clear のために一時 `std::vector<uint16_t>` を LCD DMA 転送元にしない。
+- SD config import 成功後に、そのまま HERMES runtime を起動しない。
+- `restore_shared_spi_for_display()` があるから安全、という前提で SD access を追加しない。
+
+### 必須事項
+
+- SPI3 初期化前に SD_CS(GPIO4) と LCD_CS(GPIO3) を inactive high に固定する。
+- SD config import は明示的な Setup UI 操作に限定する。
+- SD config import 成功後は restart required とする。
+- 設定値は NVS に保存し、通常起動時・HERMES 起動時は NVS から読む。
+- 表示系の成功判定はログだけでなく、実機 LCD 目視または screenshot/capture で確認する。
+
+### デバッグ指針
+
+以下のログが出ていても、物理 LCD 表示が成功したとは限りません。
+
+- `Hermes avatar SetupUI complete`
+- `Application::Run start`
+- `SetStatus: Standby`
+- `Start idle motion`
+
+これらは runtime と LVGL object 構築の進行を示すだけで、LCD panel IO / SPI / GPIO35 が正常であることは保証しません。
 
 ## README / docs 更新規約
 

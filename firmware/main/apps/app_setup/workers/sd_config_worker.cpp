@@ -6,6 +6,7 @@
 #include "workers.h"
 #include <hal/hal.h>
 #include <mooncake_log.h>
+#include <esp_system.h>
 
 using namespace uitk::lvgl_cpp;
 using namespace setup_workers;
@@ -60,6 +61,7 @@ SdConfigWorker::SdConfigWorker()
 
     // 4. 結果に応じた UI を構築
     if (load_result.success) {
+        _restart_required = true;
         std::string detail;
         for (const auto& key : load_result.imported_keys) {
             detail += "  " + key + "\n";
@@ -67,6 +69,11 @@ SdConfigWorker::SdConfigWorker()
         if (!detail.empty()) {
             detail.pop_back();
         }
+        if (!detail.empty()) {
+            detail += "\n\n";
+        }
+        detail += "Restart is required before using HERMES.";
+        mclog::tagInfo("SD Config", "SD Config Loaded; Restart required before using HERMES");
         setup_result_ui(true,
                         fmt::format("Loaded {} key(s)", load_result.imported_keys.size()),
                         detail);
@@ -115,12 +122,12 @@ void SdConfigWorker::setup_result_ui(bool success, std::string_view status_msg,
     _label_detail->align(LV_ALIGN_TOP_MID, 0, 88);
     _label_detail->setText(detail_msg);
 
-    // OK ボタン
+    // OK / Restart ボタン
     _btn_ok = std::make_unique<Button>(_panel->get());
     apply_button_common_style(*_btn_ok);
     _btn_ok->align(LV_ALIGN_BOTTOM_MID, 0, -18);
     _btn_ok->setSize(150, 48);
-    _btn_ok->label().setText("OK");
+    _btn_ok->label().setText(_restart_required ? "Restart" : "OK");
     _btn_ok->onClick().connect([this]() { _ok_clicked = true; });
 }
 
@@ -130,6 +137,11 @@ void SdConfigWorker::setup_result_ui(bool success, std::string_view status_msg,
 void SdConfigWorker::update()
 {
     if (_ok_clicked) {
+        if (_restart_required) {
+            mclog::tagInfo("SD Config", "restarting after SD config import");
+            GetHAL().delay(100);
+            esp_restart();
+        }
         _is_done = true;
     }
 }

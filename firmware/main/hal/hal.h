@@ -217,6 +217,10 @@ public:
     void startSntp();
 
     /* ------------------------------ SD Config --------------------------------- */
+    // WARNING: CoreS3 / StackChan shares SPI3 and GPIO35 between LCD and SD.
+    // Do not call this during Launcher startup, HERMES app open, or display handoff.
+    // Use only from explicit Setup > Load SD Config UI, keep LVGL/display flush stopped,
+    // and require restart after success. New callers must follow AGENTS.md shared SPI rules.
     sd_config::LoadResult loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
 
     /* ---------------------------------- Audio --------------------------------- */

@@ -409,6 +409,7 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _loading_panel;
     std::unique_ptr<uitk::lvgl_cpp::Label> _loading_label;
     bool _ok_clicked = false;
+    bool _restart_required = false;
 
     void setup_result_ui(bool success, std::string_view status_msg, std::string_view detail_msg);
 };

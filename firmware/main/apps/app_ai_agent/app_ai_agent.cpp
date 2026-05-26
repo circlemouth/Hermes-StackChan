@@ -86,6 +86,7 @@ void AppAiAgent::onOpen()
 
     // HERMES handoff is display-sensitive on CoreS3/StackChan: SD and LCD share
     // SPI/GPIO35. Keep SD access out of this path so LVGL can flush reliably.
+    ESP_LOGI(TAG, "SD config import is disabled on HERMES open to protect shared LCD/SD SPI bus");
     ESP_LOGI(TAG, "SD config import skipped on HERMES open: websocket_url_configured=%d, wifi_configured=%d",
              !websocket_url.empty(), has_wifi_config);
 
@@ -115,7 +116,7 @@ void AppAiAgent::onOpen()
 
     const char* status_text = "Connecting to Hermes bridge";
     if (websocket_url.empty()) {
-        status_text = "Bridge URL missing";
+        status_text = "Bridge URL missing\nUse Setup > Load SD Config";
     } else if (!wifi_ready_for_runtime) {
         status_text = "Wi-Fi not connected";
     }

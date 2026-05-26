@@ -47,6 +47,11 @@ static void prepare_shared_spi_for_sd()
 
 static void restore_shared_spi_for_display()
 {
+    // Best-effort restore only. This cannot guarantee the LCD panel IO, SPI bus,
+    // and GPIO35/DC state are fully healthy after SD access. Do not use this as
+    // justification for SD reads during Launcher startup, HERMES open, or display
+    // handoff. Successful SD config import must still require a restart before
+    // continuing into HERMES.
     ESP_LOGI(TAG, "restoring shared SPI pins for LCD");
 
     gpio_set_level(SD_CS_PIN, 1);
@@ -111,6 +116,11 @@ static void unmount_sd_card()
 
 sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_view)> onLog)
 {
+    // WARNING: CoreS3 / StackChan shares SPI3 and GPIO35 between LCD and SD.
+    // Do not call this during Launcher startup, HERMES app open, or display handoff.
+    // Prefer explicit Setup > Load SD Config only, and require restart after success.
+    // Calling this while LCD/LVGL is active can leave the physical LCD bus in a bad state
+    // even if LVGL objects are created successfully.
     mclog::tagInfo(TAG, "mounting SD card");
 
     esp_err_t err = mount_sd_card();

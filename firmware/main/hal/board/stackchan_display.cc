@@ -8,7 +8,6 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
-#include <vector>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
@@ -137,12 +136,6 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     Settings settings("display", false);
     std::string theme_name = settings.GetString("theme", "light");
     current_theme_         = LvglThemeManager::GetInstance().GetTheme(theme_name);
-
-    // Draw white screen
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
-    for (int y = 0; y < height_; y++) {
-        esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
-    }
 
     // Set the display to on
     ESP_LOGI(TAG, "Turning display on");
@@ -313,12 +306,12 @@ void StackChanAvatarDisplay::ResetForHermesHandoffLocked()
         lv_obj_invalidate(active_screen);
     }
 
-    // Do not bypass LVGL / esp_lvgl_port here. Once LVGL owns the
-    // panel IO, direct esp_lcd_panel_draw_bitmap() calls can race with
-    // queued LVGL flushes and may outlive their source buffer. That failure
-    // mode leaves a mostly black screen with a corrupted colored stripe at
-    // the bottom on CoreS3 / StackChan hardware. Let LVGL perform the actual
-    // flush from the cleaned active screen instead.
+    // Do not bypass LVGL / esp_lvgl_port here. Once LVGL owns the panel IO,
+    // direct LCD bitmap flush calls can race with queued LVGL flushes and may
+    // outlive their source buffer. That failure mode leaves a mostly black
+    // screen with a corrupted colored stripe at the bottom on CoreS3 /
+    // StackChan hardware. Let LVGL perform the actual flush from the cleaned
+    // active screen instead.
     lv_refr_now(display_);
     ESP_LOGI(TAG, "LVGL Hermes handoff reset complete: display=%p active=%p", display_, active_screen);
 }

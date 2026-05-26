@@ -104,6 +104,7 @@ void WifiSetupWorker::update_state()
                 data.info->align(LV_ALIGN_TOP_MID, 0, 130);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
                 if (!is_bridge_configured) {
+                    mclog::tagWarn(_tag, "websocket URL missing; SD auto-import disabled. Use Load SD Config from setup.");
                     data.info->setText("Bridge URL missing\nUse Load SD Config.");
                 } else {
                     data.info->setText("Connect Wi-Fi, then use\nHermes bridge.");
