@@ -19,6 +19,7 @@
 | `04-natural-dialogue.md` | 自然対話化の改善項目、優先度、実装案 |
 | `05-test-plan.md` | firmware / ai-server / 実機確認のテスト計画 |
 | `06-implementation-prompt.md` | 実装エージェントにそのまま渡す完遂プロンプト |
+| `08-lcd-sd-spi-incident.md` | HERMES 起動時の LCD 顔表示失敗と SD / SPI / GPIO35 競合の調査記録 |
 
 ## 作業対象の主要ファイル
 

@@ -28,7 +28,7 @@ struct HermesRuntimeConfig_t {
     uint32_t idleShutdownTimeSeconds = 600;
     bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
-    bool faceTrackingEnabled         = false;
+    bool faceTrackingEnabled         = true;
     uint8_t faceTrackingHz           = 2;
     uint8_t faceTrackingMode         = 1;
 };
