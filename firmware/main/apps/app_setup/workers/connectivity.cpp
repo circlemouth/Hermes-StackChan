@@ -112,8 +112,8 @@ void WifiSetupWorker::update_state()
 
                 data.btn_next = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_next);
-                data.btn_next->align(LV_ALIGN_CENTER, 72, 91);
-                data.btn_next->setSize(112, 42);
+                data.btn_next->align(LV_ALIGN_CENTER, 108, 91);
+                data.btn_next->setSize(92, 42);
                 data.btn_next->label().setText("Next");
                 if (!is_bridge_configured) {
                     data.btn_next->addState(LV_STATE_DISABLED);
@@ -126,12 +126,22 @@ void WifiSetupWorker::update_state()
                     }
                 });
 
+                data.btn_load_sd = std::make_unique<Button>(lv_screen_active());
+                apply_button_common_style(*data.btn_load_sd);
+                data.btn_load_sd->align(LV_ALIGN_CENTER, 0, 91);
+                data.btn_load_sd->setSize(108, 42);
+                data.btn_load_sd->setBgColor(lv_color_hex(0xBAE4BA));
+                data.btn_load_sd->label().setText("Load SD");
+                data.btn_load_sd->label().setTextFont(&lv_font_montserrat_20);
+                data.btn_load_sd->onClick().connect([this]() { _state_hermes_setup_data.load_sd_clicked = true; });
+
                 data.btn_quit = std::make_unique<Button>(lv_screen_active());
                 apply_button_common_style(*data.btn_quit);
-                data.btn_quit->align(LV_ALIGN_CENTER, -72, 91);
-                data.btn_quit->setSize(112, 42);
+                data.btn_quit->align(LV_ALIGN_CENTER, -108, 91);
+                data.btn_quit->setSize(92, 42);
                 data.btn_quit->setBgColor(lv_color_hex(0xD4D9E0));
                 data.btn_quit->label().setText("Back");
+                data.btn_quit->label().setTextFont(&lv_font_montserrat_20);
                 data.btn_quit->label().setTextColor(lv_color_hex(0x525064));
                 data.btn_quit->onClick().connect([this]() { _state_hermes_setup_data.quit_clicked = true; });
 
@@ -139,6 +149,11 @@ void WifiSetupWorker::update_state()
 
             if (_state_hermes_setup_data.quit_clicked) {
                 _is_done = true;
+            }
+
+            if (_state_hermes_setup_data.load_sd_clicked) {
+                switch_state(State::LoadSdConfig);
+                break;
             }
 
             if (_state_hermes_setup_data.next_clicked && !get_websocket_url().empty()) {
@@ -153,6 +168,20 @@ void WifiSetupWorker::update_state()
                 _last_app_config_event = AppConfigEvent::None;
             }
 
+            break;
+        }
+        case State::LoadSdConfig: {
+            if (_is_first_in) {
+                _is_first_in = false;
+                _state_load_sd_config_data.worker = std::make_unique<SdConfigWorker>();
+            }
+
+            if (_state_load_sd_config_data.worker) {
+                _state_load_sd_config_data.worker->update();
+                if (_state_load_sd_config_data.worker->isDone()) {
+                    switch_state(State::HermesSetup);
+                }
+            }
             break;
         }
         case State::WaitBleProvisioning: {
@@ -295,6 +324,10 @@ void WifiSetupWorker::cleanup_ui()
     switch (_last_state) {
         case State::HermesSetup: {
             _state_hermes_setup_data.reset();
+            break;
+        }
+        case State::LoadSdConfig: {
+            _state_load_sd_config_data.reset();
             break;
         }
         case State::WaitBleProvisioning: {

@@ -87,12 +87,15 @@ M5Stack CoreS3 / StackChan では LCD と SD card が SPI3 を共有し、GPIO35
 - boot clear / handoff clear のために一時 `std::vector<uint16_t>` を LCD DMA 転送元にしない。
 - SD config import 成功後に、そのまま HERMES runtime を起動しない。
 - `restore_shared_spi_for_display()` があるから安全、という前提で SD access を追加しない。
+- SD card 未挿入確認のために、表示中の画面から SD SPI probe / mount を直接実行しない。短い CMD0 probe だけでも GPIO35 を LCD DC から SD MISO に切り替えるため、処理は戻っても物理 LCD だけが更新不能になることがあります。
+- SD access 後に同じ LVGL 画面へ戻って error UI / Retry / Back を描画しようとしない。ログ上は task が生きていても LCD flush だけ死ぬ既知故障につながります。
 
 ### 必須事項
 
 - SPI3 初期化前に SD_CS(GPIO4) と LCD_CS(GPIO3) を inactive high に固定する。
 - SD config import は明示的な Setup UI 操作に限定する。
-- SD config import 成功後は restart required とする。
+- SD config import は、SD card 挿入確認画面を表示してから実行する。確認画面では SD に一切触らない。
+- SD config import 実行後は、成功・失敗に関係なく restart する。SD 未挿入、mount 失敗、parse 失敗でも LCD 復帰のため再起動する。
 - 設定値は NVS に保存し、通常起動時・HERMES 起動時は NVS から読む。
 - 表示系の成功判定はログだけでなく、実機 LCD 目視または screenshot/capture で確認する。
 
@@ -106,6 +109,8 @@ M5Stack CoreS3 / StackChan では LCD と SD card が SPI3 を共有し、GPIO35
 - `Start idle motion`
 
 これらは runtime と LVGL object 構築の進行を示すだけで、LCD panel IO / SPI / GPIO35 が正常であることは保証しません。
+
+SD config import でも同じです。`SD probe result: ESP_ERR_NOT_FOUND`、`SD mount failed`、`HAL SD config loader returned` が出ていても、物理 LCD が復帰したとは限りません。SD に触った後に画面だけ `Reading SD card...` のまま固まり、serial log と task は動き続ける場合があります。この場合、原因は SD 処理のハングではなく LCD/SPI/GPIO35 の復帰失敗として扱い、SD access 後の再描画ではなく restart 前提の flow にしてください。
 
 ## README / docs 更新規約
 

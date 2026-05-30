@@ -84,6 +84,7 @@ private:
     enum class State {
         None,
         HermesSetup,
+        LoadSdConfig,
         WaitBleProvisioning,
         AppConnected,
         Done,
@@ -104,10 +105,12 @@ private:
         std::unique_ptr<uitk::lvgl_cpp::Label> title;
         std::unique_ptr<uitk::lvgl_cpp::Label> device_id;
         std::unique_ptr<uitk::lvgl_cpp::Button> btn_next;
+        std::unique_ptr<uitk::lvgl_cpp::Button> btn_load_sd;
         std::unique_ptr<uitk::lvgl_cpp::Button> btn_quit;
         std::unique_ptr<uitk::lvgl_cpp::Label> info;
         lv_image_dsc_t logo_img;
         bool next_clicked = false;
+        bool load_sd_clicked = false;
         bool quit_clicked = false;
 
         void reset()
@@ -117,13 +120,25 @@ private:
             title.reset();
             device_id.reset();
             btn_next.reset();
+            btn_load_sd.reset();
             btn_quit.reset();
             info.reset();
             next_clicked = false;
+            load_sd_clicked = false;
             quit_clicked = false;
         }
     };
     StateHermesSetupData _state_hermes_setup_data;
+
+    struct StateLoadSdConfigData {
+        std::unique_ptr<WorkerBase> worker;
+
+        void reset()
+        {
+            worker.reset();
+        }
+    };
+    StateLoadSdConfigData _state_load_sd_config_data;
 
     struct StateWaitBleProvisioningData {
         std::unique_ptr<uitk::lvgl_cpp::Container> panel;
@@ -406,11 +421,18 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Label> _label_status;
     std::unique_ptr<uitk::lvgl_cpp::Label> _label_detail;
     std::unique_ptr<uitk::lvgl_cpp::Button> _btn_ok;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _btn_retry;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _btn_back;
     std::unique_ptr<uitk::lvgl_cpp::Container> _loading_panel;
     std::unique_ptr<uitk::lvgl_cpp::Label> _loading_label;
     bool _ok_clicked = false;
+    bool _retry_clicked = false;
+    bool _back_clicked = false;
     bool _restart_required = false;
 
+    void setup_start_ui();
+    void load_config();
+    void reset_result_ui();
     void setup_result_ui(bool success, std::string_view status_msg, std::string_view detail_msg);
 };
 
