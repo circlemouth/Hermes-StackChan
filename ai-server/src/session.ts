@@ -284,6 +284,9 @@ export class Session {
     private lastAutoLedState?: AutoLedState
     private processingSource: 'local-vad' | 'listen-stop' | 'max-duration' | 'arrival-gap' = 'arrival-gap'
     private currentSpeechMs = 0
+    private followupQueue: string[] = []
+    private followupRunning = false
+    private closed = false
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
         this.hermes = deps.hermes ?? new HermesClient()
@@ -315,6 +318,8 @@ export class Session {
     }
 
     close(): void {
+        this.closed = true
+        this.followupQueue = []
         this.clearTimers()
         this.unregisterDeviceSession()
         for (const [id, pending] of this.pendingMcp) {
@@ -508,12 +513,14 @@ export class Session {
             console.log(`[session ${this.sessionId}] too little VAD speech speechMs=${this.currentSpeechMs} pcmBytes=${pcmBytes}, skipping`)
             this.resetCapture()
             this.state = 'idle'
+            this.drainFollowupQueue()
             return
         }
         if (!force && !hasVadPcm && this.opusFrames.length < MIN_FRAMES_FOR_STT) {
             console.log(`[session ${this.sessionId}] too few frames (${this.opusFrames.length}), skipping`)
             this.resetCapture()
             this.state = 'idle'
+            this.drainFollowupQueue()
             return
         }
         this.processingSource = reason
@@ -532,6 +539,7 @@ export class Session {
                 this.state = 'idle'
                 this.setAutoLedState('idle')
             }
+            this.drainFollowupQueue()
         })
     }
 
@@ -550,6 +558,7 @@ export class Session {
                 this.resetCapture()
                 this.state = 'idle'
                 this.setAutoLedState('idle')
+                this.drainFollowupQueue()
                 return
             }
             console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
@@ -615,6 +624,7 @@ export class Session {
             this.state = 'idle'
             this.resetCapture()
             this.resetBargeInDetector()
+            this.followupQueue = []
             this.setAutoLedState('idle')
             void this.hermes.interrupt().catch((error) => {
                 console.error(`[session ${this.sessionId}] Hermes interrupt error:`, error)
@@ -657,7 +667,53 @@ export class Session {
 
         if (!text.trim()) return
 
-        // 2. Hermes LLM turn
+        // 2. Hermes LLM turn -> 3. Hermes TTS -> Opus -> device
+        await this.speakHermesReply(text, 'llm', 'tts')
+        if (this.state === 'processing') this.setAutoLedState('idle')
+        console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
+    }
+
+    async enqueueFollowup(prompt: string): Promise<void> {
+        const cleanPrompt = prompt.trim()
+        if (!cleanPrompt || this.closed) return
+        this.followupQueue.push(cleanPrompt)
+        this.drainFollowupQueue()
+    }
+
+    private drainFollowupQueue(): void {
+        if (this.closed || this.followupRunning || this.state !== 'idle') return
+        const prompt = this.followupQueue.shift()
+        if (!prompt) return
+
+        this.followupRunning = true
+        this.state = 'processing'
+        this.setAutoLedState('thinking')
+        this.processFollowup(prompt).catch(async (err) => {
+            console.error(`[session ${this.sessionId}] follow-up error:`, err)
+            this.setAutoLedState('error')
+            if (this.state === 'processing') {
+                await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.followup.error').catch((error) => {
+                    console.error(`[session ${this.sessionId}] follow-up error speech failed:`, error)
+                })
+            }
+        }).finally(() => {
+            this.followupRunning = false
+            if (this.state === 'processing') {
+                this.state = 'idle'
+                this.setAutoLedState('idle')
+            }
+            this.drainFollowupQueue()
+        })
+    }
+
+    private async processFollowup(prompt: string): Promise<void> {
+        const followupStartMs = nowMs()
+        console.log(`[session ${this.sessionId}] follow-up prompt queued length=${prompt.length}`)
+        await this.speakHermesReply(prompt, 'followup.llm', 'tts.followup')
+        console.log(`[timing] done session:${this.sessionId}:followup elapsed=${elapsedMs(followupStartMs)}`)
+    }
+
+    private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
         const processingKeepalive = setInterval(() => {
             this.sendJson({ type: 'llm', emotion: 'doubtful' })
         }, PROCESSING_KEEPALIVE_MS)
@@ -665,22 +721,20 @@ export class Session {
         let reply: string
         try {
             reply = await withTiming(
-                `session:${this.sessionId}:llm`,
-                () => this.hermes.submitPrompt(text),
-                { textLength: text.length },
+                `session:${this.sessionId}:${llmLabel}`,
+                () => this.hermes.submitPrompt(prompt),
+                { textLength: prompt.length },
             )
         } finally {
             clearInterval(processingKeepalive)
         }
-        console.log(`[session ${this.sessionId}] LLM: "${reply}"`)
+        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): "${reply}"`)
         this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
         void this.displayFirstImageFromReply(reply)
 
-        // 3. Hermes TTS -> Opus -> device
         const speechSegments = splitStackChanSpeechText(reply, this.speechSegmentationConfig)
-        await this.speakSegments(speechSegments, 'tts')
-        if (this.state === 'processing') this.setAutoLedState('idle')
-        console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
+        await this.speakSegments(speechSegments, ttsLabel)
+        return reply
     }
 
     private async synthesizeSegmentToOpus(speechText: string, label: string): Promise<Buffer[]> {

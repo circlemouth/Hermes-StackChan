@@ -57,6 +57,7 @@ The v1 robot tools are:
 - `stackchan_take_photo`: capture a still photo from the camera.
 - `stackchan_display_image`: preview an image on the screen.
 - `stackchan_capture_screen`: capture the current display.
+- `stackchan_ask_hermes_subagent`: delegate slow research, code review, long reasoning, or tool-heavy work to a background Hermes sub-agent so the foreground agent can answer briefly first.
 - `stackchan_create_reminder`: create a local relative-duration reminder.
 - `stackchan_get_reminders`: list active local reminders.
 - `stackchan_stop_reminder`: stop a local reminder by ID.
@@ -214,9 +215,15 @@ mcp_servers:
       - /absolute/path/to/StackChan/ai-server/dist/stackchan_mcp_server.js
     env:
       STACKCHAN_CONTROL_URL: http://127.0.0.1:8766
+      HERMES_CONNECT_MODE: dashboard_ws
+      HERMES_DASHBOARD_URL: http://127.0.0.1:9119
+      HERMES_ROOT: /absolute/path/to/hermes-agent
+      HERMES_PYTHON: python3
 ```
 
 Restart Hermes after changing the config. The MCP server talks only to the local `ai-server` control HTTP endpoint. If StackChan is not connected, the tool result reports a clear device-not-connected error instead of crashing the Hermes conversation.
+
+`stackchan_ask_hermes_subagent` is an optional fast-response tool. When the foreground Hermes agent calls it, the tool returns immediately, letting the foreground agent say a short acknowledgement such as “I’ll check that.” When the background Hermes sub-agent finishes, it posts the result to `ai-server` through `/internal/followup`; the active StackChan session then speaks the follow-up when it is idle. Prefer `HERMES_CONNECT_MODE: dashboard_ws` so sub-agent work connects to the existing Hermes Dashboard instead of spawning extra gateway processes.
 
 ### 4. Configure the StackChan SD Card
 

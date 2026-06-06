@@ -111,6 +111,41 @@ test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus 
     session.close()
 })
 
+
+test('Session speaks queued follow-up prompts when idle', async () => {
+    const ws = new MockWebSocket()
+    let promptSeen = ''
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        hermes: {
+            submitPrompt: async (prompt) => {
+                promptSeen = prompt
+                return '続報です。'
+            },
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            assert.equal(text, '続報です。')
+            return Buffer.from('follow-up wav')
+        },
+        encodeWavToOpusFrames: (wav) => {
+            assert.equal(wav.toString('utf8'), 'follow-up wav')
+            return [Buffer.from([9])]
+        },
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    await session.enqueueFollowup('サブエージェントの結果を伝えて')
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    assert.equal(promptSeen, 'サブエージェントの結果を伝えて')
+    assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === '続報です。'))
+    assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([9])])
+
+    session.close()
+})
+
 test('inferStackChanEmotion maps reply text to StackChan expressions', () => {
     assert.equal(inferStackChanEmotion('ありがとう、うまくできたよ'), 'happy')
     assert.equal(inferStackChanEmotion('ごめん、少し失敗しました'), 'sad')

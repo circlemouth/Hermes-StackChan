@@ -1,4 +1,6 @@
+import { randomUUID } from 'crypto'
 import { createInterface } from 'readline'
+import { HermesClient } from './hermes.js'
 
 type JsonRpcRequest = {
     jsonrpc?: string
@@ -12,6 +14,8 @@ type ToolDefinition = {
     description: string
     inputSchema: Record<string, unknown>
 }
+
+const HERMES_SUBAGENT_TOOL_NAME = 'stackchan_ask_hermes_subagent'
 
 export const tools: ToolDefinition[] = [
     {
@@ -133,6 +137,34 @@ export const tools: ToolDefinition[] = [
         },
     },
     {
+        name: HERMES_SUBAGENT_TOOL_NAME,
+        description: [
+            'Delegate a slow or multi-step user request to a background Hermes sub-agent.',
+            'Use this when StackChan should acknowledge quickly instead of making the user wait for research, code work, long reasoning, or tool-heavy work.',
+            'After calling this tool, immediately tell the user in one short phrase that you are working on it.',
+            'The sub-agent result will be reported back to the active StackChan session later.',
+            'Do not use this for simple greetings or questions you can answer immediately.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 12000,
+                    description: 'The user request or task to delegate to the background Hermes sub-agent.',
+                },
+                guidance: {
+                    type: 'string',
+                    maxLength: 2000,
+                    description: 'Optional guidance about output format, language, or constraints for the sub-agent.',
+                },
+            },
+            required: ['query'],
+            additionalProperties: false,
+        },
+    },
+    {
         name: 'stackchan_create_reminder',
         description: [
             'Create a local reminder on the physical StackChan.',
@@ -222,6 +254,81 @@ async function callBridge(name: string, args: Record<string, unknown>): Promise<
     return body['result']
 }
 
+function readStringArg(args: Record<string, unknown>, name: string, maxChars: number): string {
+    const value = args[name]
+    return typeof value === 'string' ? value.trim().slice(0, maxChars) : ''
+}
+
+function buildSubagentPrompt(query: string, guidance: string): string {
+    const prefix = process.env.HERMES_SUBAGENT_PROMPT_PREFIX ?? [
+        'You are a background Hermes sub-agent for StackChan.',
+        'Solve the delegated request carefully and independently.',
+        'Return a concise answer in the user’s language unless guidance says otherwise.',
+        'Do not mention internal tool mechanics unless it is useful to the user.',
+        `Do not call ${HERMES_SUBAGENT_TOOL_NAME}; you are already the background sub-agent.`,
+    ].join(' ')
+    return `${prefix}\n\nUser request:\n${query}${guidance ? `\n\nGuidance:\n${guidance}` : ''}`
+}
+
+export function buildSubagentFollowupPrompt(query: string, answer: string): string {
+    return [
+        '$Hermesサブエージェントから応答が届きました。',
+        '先ほどのユーザー依頼への続報として、ユーザーに自然な会話で短く伝えてください。',
+        '内部のtool名や実装詳細は話さず、必要な結論と次にできることだけを伝えてください。',
+        `このフォローアップでは ${HERMES_SUBAGENT_TOOL_NAME} を使わず、下の回答を要約して伝えてください。`,
+        '',
+        `ユーザー依頼:\n${query}`,
+        '',
+        `サブエージェント回答:\n${answer}`,
+    ].join('\n')
+}
+
+
+async function postFollowup(prompt: string): Promise<void> {
+    const res = await fetch(`${controlUrl()}/internal/followup`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+    })
+    const body = await res.json().catch(() => undefined) as unknown
+    if (!res.ok || !isRecord(body) || body['success'] !== true) {
+        const error = isRecord(body) && typeof body['error'] === 'string' ? body['error'] : `HTTP ${res.status}`
+        throw new Error(error)
+    }
+}
+
+async function runHermesSubagentTask(taskId: string, query: string, guidance: string): Promise<void> {
+    const client = new HermesClient()
+    try {
+        const answer = await client.submitPrompt(buildSubagentPrompt(query, guidance))
+        await postFollowup(buildSubagentFollowupPrompt(query, answer))
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await postFollowup(buildSubagentFollowupPrompt(
+            query,
+            `サブエージェント処理でエラーが発生しました。task_id=${taskId}: ${message}`,
+        )).catch((followupError) => {
+            console.error(`[stackchan_mcp] subagent follow-up failed task=${taskId}:`, followupError)
+        })
+    } finally {
+        await client.dispose().catch(() => undefined)
+    }
+}
+
+export function startHermesSubagentTask(args: Record<string, unknown>): { taskId: string; message: string } {
+    const query = readStringArg(args, 'query', 12000)
+    if (!query) throw new Error(`${HERMES_SUBAGENT_TOOL_NAME} requires query`)
+    const guidance = readStringArg(args, 'guidance', 2000)
+    const taskId = randomUUID()
+    void runHermesSubagentTask(taskId, query, guidance).catch((error) => {
+        console.error(`[stackchan_mcp] subagent task failed task=${taskId}:`, error)
+    })
+    return {
+        taskId,
+        message: `Hermes sub-agent task ${taskId} accepted. Give the user a short acknowledgement now; the result will be reported later.`,
+    }
+}
+
 function parseFirmwareImage(value: unknown): Record<string, unknown> | null {
     const image = typeof value === 'string' ? JSON.parse(value) as unknown : value
     if (!isRecord(image)) return null
@@ -288,6 +395,15 @@ export async function handleRequest(req: JsonRpcRequest): Promise<void> {
         const name = req.params['name']
         const args = isRecord(req.params['arguments']) ? req.params['arguments'] : {}
         try {
+            if (name === HERMES_SUBAGENT_TOOL_NAME) {
+                const result = startHermesSubagentTask(args)
+                respond(req.id, {
+                    content: [{ type: 'text', text: result.message }],
+                    isError: false,
+                })
+                return
+            }
+
             const result = await callBridge(name, args)
             respond(req.id, {
                 content: normalizeBridgeResultToMcpContent(result),

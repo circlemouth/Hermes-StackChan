@@ -58,6 +58,7 @@ v1 のロボット tool は以下です。
 - `stackchan_take_photo`: カメラで静止画を撮る。
 - `stackchan_display_image`: 画像を画面に preview 表示する。
 - `stackchan_capture_screen`: 現在の画面を capture する。
+- `stackchan_ask_hermes_subagent`: 時間のかかる調査、コード確認、長い推論などをバックグラウンドの Hermes sub-agent に委譲し、先に短い acknowledgement を返す。
 - `stackchan_create_reminder`: 相対時間の local reminder を作る。
 - `stackchan_get_reminders`: active な local reminder を一覧する。
 - `stackchan_stop_reminder`: ID を指定して local reminder を停止する。
@@ -215,9 +216,15 @@ mcp_servers:
       - /absolute/path/to/StackChan/ai-server/dist/stackchan_mcp_server.js
     env:
       STACKCHAN_CONTROL_URL: http://127.0.0.1:8766
+      HERMES_CONNECT_MODE: dashboard_ws
+      HERMES_DASHBOARD_URL: http://127.0.0.1:9119
+      HERMES_ROOT: /absolute/path/to/hermes-agent
+      HERMES_PYTHON: python3
 ```
 
 設定を変更したら Hermes を再起動します。この MCP server は同じ端末上の `ai-server` control HTTP にだけ接続します。StackChan 実機が未接続の場合、Hermes の会話を落とさず、tool result として device-not-connected が返ります。
+
+`stackchan_ask_hermes_subagent` は高速応答用の任意 tool です。前面の Hermes がこの tool を呼ぶと、tool result はすぐ返り、前面の Hermes は「確認するね」のような短い返答を先に発話できます。バックグラウンドの Hermes sub-agent が完了すると、`ai-server` の `/internal/followup` に結果を戻し、現在の StackChan セッションが空いたタイミングで続報として読み上げます。sub-agent の起動を軽くするため、可能なら `HERMES_CONNECT_MODE: dashboard_ws` を使って既存の Hermes Dashboard に接続してください。
 
 ### 4. StackChan の SD card を設定する
 

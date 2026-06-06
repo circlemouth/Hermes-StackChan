@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeBridgeResultToMcpContent, tools } from '../src/stackchan_mcp_server.ts'
+import { buildSubagentFollowupPrompt, normalizeBridgeResultToMcpContent, tools } from '../src/stackchan_mcp_server.ts'
 
 test('tools list includes public StackChan reminder and power tools', () => {
     const toolNames = tools.map(tool => tool.name)
@@ -14,6 +14,7 @@ test('tools list includes public StackChan reminder and power tools', () => {
         'stackchan_take_photo',
         'stackchan_display_image',
         'stackchan_capture_screen',
+        'stackchan_ask_hermes_subagent',
         'stackchan_create_reminder',
         'stackchan_get_reminders',
         'stackchan_stop_reminder',
@@ -57,4 +58,25 @@ test('normalizeBridgeResultToMcpContent converts firmware image blocks to standa
             data: 'abc123',
         },
     ])
+})
+
+
+test('sub-agent tool schema requires a delegated query', () => {
+    const subagent = tools.find(tool => tool.name === 'stackchan_ask_hermes_subagent')
+
+    assert.ok(subagent)
+    assert.deepEqual(subagent.inputSchema['required'], ['query'])
+    assert.deepEqual(
+        Object.keys((subagent.inputSchema['properties'] as Record<string, unknown>)),
+        ['query', 'guidance'],
+    )
+})
+
+test('sub-agent follow-up prompt carries the original request and answer', () => {
+    const prompt = buildSubagentFollowupPrompt('LEDの制御方法を調べて', 'set_led_colorを使います。')
+
+    assert.match(prompt, /サブエージェント/)
+    assert.match(prompt, /LEDの制御方法/)
+    assert.match(prompt, /set_led_color/)
+    assert.match(prompt, /stackchan_ask_hermes_subagent を使わず/)
 })

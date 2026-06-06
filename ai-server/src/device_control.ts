@@ -16,6 +16,7 @@ export type StackChanToolName =
 
 export type StackChanDeviceSession = {
     callRobotTool(name: string, args: Record<string, unknown>): Promise<unknown>
+    enqueueFollowup(prompt: string): Promise<void>
 }
 
 const TOOL_MAP: Record<StackChanToolName, string> = {
@@ -111,6 +112,22 @@ function readReminderId(value: unknown): number {
     return id
 }
 
+
+function readFollowupPrompt(body: Record<string, unknown>): string {
+    const prompt = body['prompt']
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+        throw new Error('prompt is required')
+    }
+    return prompt.trim().slice(0, 12000)
+}
+
+async function enqueueFollowupPrompt(prompt: string): Promise<void> {
+    if (!activeSession) {
+        throw new Error('No StackChan device is connected')
+    }
+    await activeSession.enqueueFollowup(prompt)
+}
+
 async function callStackChanTool(name: StackChanToolName, args: Record<string, unknown>): Promise<unknown> {
     if (!activeSession) {
         throw new Error('No StackChan device is connected')
@@ -158,19 +175,31 @@ export function startDeviceControlServer(port: number, host = '127.0.0.1'): void
     serverStarted = true
 
     const server = http.createServer(async (req, res) => {
-        if (req.method !== 'POST' || req.url !== '/tools/call') {
+        const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+        if (req.method !== 'POST' || (pathname !== '/tools/call' && pathname !== '/internal/followup')) {
             sendJson(res, 404, { success: false, error: 'not found' })
             return
         }
 
         try {
             const body = await readBody(req)
-            if (!isRecord(body) || !isToolName(body['name'])) {
-                sendJson(res, 400, { success: false, error: 'unknown StackChan tool' })
+            if (!isRecord(body)) {
+                sendJson(res, 400, { success: false, error: 'request body must be an object' })
                 return
             }
             if (!activeSession) {
                 sendJson(res, 503, { success: false, error: 'No StackChan device is connected' })
+                return
+            }
+
+            if (pathname === '/internal/followup') {
+                await enqueueFollowupPrompt(readFollowupPrompt(body))
+                sendJson(res, 202, { success: true, result: { queued: true } })
+                return
+            }
+
+            if (!isToolName(body['name'])) {
+                sendJson(res, 400, { success: false, error: 'unknown StackChan tool' })
                 return
             }
 
