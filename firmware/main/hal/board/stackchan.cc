@@ -459,8 +459,8 @@ private:
         panel_config.bits_per_pixel             = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(panel_io, &panel_config, &panel));
 
-        aw9523_->ResetIli9342();
         esp_lcd_panel_reset(panel);
+        aw9523_->ResetIli9342();
 
         esp_lcd_panel_init(panel);
         esp_lcd_panel_invert_color(panel, true);

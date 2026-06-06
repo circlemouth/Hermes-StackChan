@@ -7,6 +7,7 @@
 - HERMES launcher icon, text, or avatar fragments repeat in a narrow vertical band.
 - Launcher geometry looks correct but colors are wrong, such as a blue/purple tint or incorrect text color.
 - Touch or swipe transitions intermittently black out the panel while servo/runtime tasks continue.
+- Servo or runtime motion continues, while the physical LCD stays completely black after boot.
 - Logs may still show `Hermes avatar SetupUI complete`, `Application::Run start`, `SetStatus: Standby`, and `Start idle motion`.
 
 These logs prove that LVGL objects and runtime tasks advanced. They do not prove that the physical LCD panel IO, SPI3 bus, or GPIO35/DC state is healthy.
@@ -25,6 +26,10 @@ Specific hazards:
 - Raising LCD SPI clock or transfer queue depth after SD interaction.
 - Disabling RGB565 byte swapping to avoid black screens. That can make frame geometry appear stable, but the LCD colors are wrong.
 - Doing RGB565 byte swapping in a way that mutates LVGL's active draw buffer before the asynchronous LCD transfer has safely consumed it.
+- Reordering the ILI9342 reset sequence. On the tested CoreS3 / StackChan unit,
+  changing the sequence from `esp_lcd_panel_reset(panel)` followed by
+  `aw9523_->ResetIli9342()` to the reverse order caused a black physical LCD
+  while the firmware still reached Launcher and the servos moved.
 
 ## Fix
 
@@ -37,6 +42,9 @@ Specific hazards:
 - Keep LCD SPI transfer settings conservative on CoreS3 / StackChan. The verified setting is 20 MHz pixel clock with transfer queue depth 2.
 - Keep LVGL display `.swap_bytes = 1` for the CoreS3 LCD color order.
 - Apply the `esp-lvgl-port-rgb565-swap-buffer.patch` patch so RGB565 byte swapping copies into a dedicated transfer buffer instead of mutating the active LVGL draw buffer in place.
+- Keep the LCD reset order in `firmware/main/hal/board/stackchan.cc` as
+  `esp_lcd_panel_reset(panel)` first, then `aw9523_->ResetIli9342()`, then
+  `esp_lcd_panel_init(panel)`.
 
 ## Do not regress these settings
 
@@ -45,12 +53,35 @@ Specific hazards:
 - Do not remove the `esp_lvgl_port` RGB565 swap-buffer patch while keeping `.swap_bytes = 1`; that combination can reintroduce black screens or repeated corrupted fragments.
 - Do not add SD probe, mount, or config import to Launcher startup, HERMES app open, HERMES handoff, or any retry/error UI.
 - Do not call servo motion from inside the display lock; keep LVGL/display object updates and servo I/O separated.
+- Do not reverse the LCD reset order to "hardware reset first, software reset
+  second" without a physical LCD regression pass. That exact change reproduced
+  a no-display boot where logs reached `Launcher started` and servos moved.
+
+## 2026-06-07 LCD reset-order regression
+
+An attempted hardening changed the ILI9342 initialization order to call
+`aw9523_->ResetIli9342()` before `esp_lcd_panel_reset(panel)`. After flashing,
+the firmware booted, `Launcher started` appeared in the serial log, and servos
+continued to move, but the physical LCD displayed nothing.
+
+Reverting the order restored the display:
+
+```cpp
+esp_lcd_panel_reset(panel);
+aw9523_->ResetIli9342();
+esp_lcd_panel_init(panel);
+```
+
+Treat this as an LCD panel IO/reset sequencing failure, not as a Mooncake,
+Launcher, or servo/runtime failure. If logs advance while the display is black,
+compare the reset sequence before investigating higher-level UI code.
 
 ## Verification
 
 - Cold boot without SD card.
 - Cold boot with SD card.
 - Warm reboot via reset button.
+- USB reset / flash reset after changing LCD initialization code.
 - Setup > Load SD Config with redacted config values such as `<redacted>`.
 - Confirm the device reboots before SD access, imports config before LCD init, reboots again, and then shows Launcher.
 - Start HERMES manually.

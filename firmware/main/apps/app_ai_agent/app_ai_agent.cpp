@@ -160,6 +160,8 @@ void AppAiAgent::onOpen()
         _device_id->align(LV_ALIGN_TOP_MID, 0, 156);
         _device_id->setText(fmt::format("Device ID: {}", GetHAL().getFactoryMacString()).c_str());
         _device_id->setTextAlign(LV_TEXT_ALIGN_CENTER);
+
+        view::create_home_indicator([&]() { close(); }, 0xB8D3FD, 0x26206A);
     }
 
     if (!is_hermes_start_ready) {
@@ -172,6 +174,8 @@ void AppAiAgent::onOpen()
 // Called repeatedly while the App is running
 void AppAiAgent::onRunning()
 {
+    LvglLockGuard lock;
+    view::update_home_indicator();
 }
 
 // Called when the App is closed
@@ -180,6 +184,7 @@ void AppAiAgent::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
     LvglLockGuard lock;
+    view::destroy_home_indicator();
     _device_id.reset();
     _status.reset();
     _title.reset();

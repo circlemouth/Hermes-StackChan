@@ -241,6 +241,8 @@ An example is available at `firmware/sdcard/config.sample.json`.
 
 Use the server terminal's LAN IP address. `wifi_ssid` and `wifi_password` are optional; when present, `Load SD Config` imports them into NVS and marks network setup complete. Use an empty `wifi_password` for an open network.
 
+Changing `config.json` on the SD card by itself does not update the active firmware settings. To change the `ai-server` destination, edit `websocket_url`, then run `SETUP` > `Hermes` > `Load SD Config` again and wait for the two automatic restarts. A valid `ws://` or `wss://` `websocket_url` overwrites the stored NVS WebSocket URL; an empty, missing, invalid, or too-long value is skipped and the previous stored URL remains active.
+
 The firmware does not auto-import SD config at normal boot or when opening HERMES. On CoreS3 / StackChan, the SD card and LCD share SPI/GPIO35, so SD import is limited to the explicit `SETUP` > `Hermes` > `Load SD Config` flow. That flow reboots first, imports the SD config before LCD initialization, then reboots again into normal startup.
 
 The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "...", "password": "..."}`.
@@ -248,6 +250,8 @@ The Wi-Fi fields can also be written as a nested object: `"wifi": {"ssid": "..."
 ### 5. Boot StackChan
 
 On first boot without configuration, the firmware shows `HERMES SETUP`. If you use SD configuration, skip to Launcher and run `SETUP` > `Hermes` > `Load SD Config` once before opening HERMES; wait for both automatic restarts to finish. After the device has Wi-Fi and bridge settings, booting stays on Launcher by default; HERMES does not auto-open unless `CONFIG_HERMES_AUTOSTART=y` is explicitly enabled. Select the `HERMES` app from Launcher to start the Hermes runtime manually.
+
+In Mooncake apps, including a HERMES not-ready screen, swipe up from the bottom edge to show the Home button, then tap it to return to Launcher. After the Hermes runtime has started, the same bottom-edge swipe shows the Home button; tapping it reboots the device back to Launcher because Mooncake has already been torn down.
 
 Expected setup states:
 

@@ -242,6 +242,8 @@ StackChan の SD card に `/sdcard/config.json` を作成します。
 
 `<server-ip>` には、サーバー端末の LAN IP を入れます。`wifi_ssid` と `wifi_password` は任意です。指定した場合、`Load SD Config` 実行時に NVS に取り込み、ネットワーク設定済みとして扱います。空パスワードのネットワークでは `wifi_password` を空文字にできます。
 
+SD card 上の `config.json` を書き換えただけでは、firmware が使用中の設定は更新されません。`ai-server` の接続先を変える場合は、`websocket_url` を編集した後、`SETUP` > `Hermes` > `Load SD Config` を再実行し、2 回の自動再起動が終わるまで待ってください。有効な `ws://` または `wss://` の `websocket_url` は NVS に保存済みの WebSocket URL を上書きします。空、未指定、不正な scheme、長すぎる値は skip され、以前保存された URL が引き続き使われます。
+
 firmware は通常起動時や HERMES を開いた時には SD config を自動 import しません。CoreS3 / StackChan では SD card と LCD が SPI/GPIO35 を共有しているため、SD import は明示的な `SETUP` > `Hermes` > `Load SD Config` フローに限定しています。このフローでは、先に再起動し、LCD 初期化前に SD config を import してから、もう一度通常起動へ再起動します。
 
 Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式でも指定できます。
@@ -249,6 +251,8 @@ Wi-Fi項目は `"wifi": {"ssid": "...", "password": "..."}` のネスト形式�
 ### 5. StackChan を起動する
 
 未設定の初回起動時は `HERMES SETUP` が表示されます。SD config を使う場合は、いったん Launcher に進み、`SETUP` > `Hermes` > `Load SD Config` を一度実行し、2 回の自動再起動が終わってから HERMES を開いてください。Wi-Fi と bridge 設定が揃った後の起動では、標準設定では Launcher に留まり、HERMES は自動で開きません。`CONFIG_HERMES_AUTOSTART=y` を明示的に有効化した場合だけ自動で開きます。Hermes runtime を開始するには Launcher から `HERMES` app を選択してください。
+
+Mooncake app と HERMES 未準備画面では、画面下端から上へスワイプすると Home ボタンが表示され、押すと Launcher に戻ります。Hermes runtime 起動後も同じ下端スワイプで Home ボタンを表示しますが、Mooncake はすでに破棄済みのため、ボタンを押すと本体を再起動して Launcher に戻ります。
 
 主な状態表示:
 

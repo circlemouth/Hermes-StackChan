@@ -174,6 +174,7 @@ void Hal::hermes_board_init()
 static void _stackchan_update_task(void* param)
 {
     bool is_setup_done = false;
+    bool launcher_reboot_requested = false;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -198,11 +199,19 @@ static void _stackchan_update_task(void* param)
             if (!is_setup_done) {
                 // Setup when the vendored audio runtime is ready
                 GetHAL().startSntp();
+                view::create_home_indicator([&launcher_reboot_requested]() { launcher_reboot_requested = true; },
+                                            0x81DBBD, 0x134233);
                 view::create_status_bar(0x81DBBD, 0x134233);
                 is_setup_done = true;
             }
 
+            view::update_home_indicator();
             view::update_status_bar();
+        }
+
+        if (launcher_reboot_requested) {
+            ESP_LOGI("HAL", "HERMES home indicator requested Launcher reboot");
+            GetHAL().reboot();
         }
     }
 }
