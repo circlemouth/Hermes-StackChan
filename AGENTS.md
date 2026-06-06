@@ -32,6 +32,7 @@ Hermes 自動起動停止、画面崩れ修正、未公開 tool 公開、自然�
 - `docs/hermes-refactor/04-natural-dialogue.md`
 - `docs/hermes-refactor/05-test-plan.md`
 - `docs/hermes-refactor/06-implementation-prompt.md`
+- `docs/hermes-refactor/09-cores3-shared-spi-safety.md`
 
 ## ai-server 作業規約
 
@@ -74,6 +75,7 @@ idf.py monitor
 - `StackChanAvatarDisplay::SetupUI()` は複数回呼ばれても壊れない、または duplicate call を安全に skip できる状態を保ってください。
 - CoreS3 / StackChan の LCD と SD card は共有 SPI / GPIO35 を使うため、SD access と LCD update は強く干渉します。SD card access は Setup の明示操作に限定し、成功後は restart required としてください。
 - LVGL 管理下の LCD を application code から `esp_lcd_panel_draw_bitmap()` で直接描画しないでください。
+- LCD の色、暗転、斜め崩れ、古い HERMES アイコン断片の再発防止は `docs/hermes-refactor/09-cores3-shared-spi-safety.md` を優先してください。`swap_bytes`、LCD SPI clock / queue depth、SD boot import flow を個別に戻すと実機だけで再発します。
 
 ## CoreS3 / StackChan LCD・SD 共有 SPI の安全規約
 
@@ -89,6 +91,7 @@ M5Stack CoreS3 / StackChan では LCD と SD card が SPI3 を共有し、GPIO35
 - `restore_shared_spi_for_display()` があるから安全、という前提で SD access を追加しない。
 - SD card 未挿入確認のために、表示中の画面から SD SPI probe / mount を直接実行しない。短い CMD0 probe だけでも GPIO35 を LCD DC から SD MISO に切り替えるため、処理は戻っても物理 LCD だけが更新不能になることがあります。
 - SD access 後に同じ LVGL 画面へ戻って error UI / Retry / Back を描画しようとしない。ログ上は task が生きていても LCD flush だけ死ぬ既知故障につながります。
+- LCD の色がおかしいからといって `swap_bytes` を単純に無効化しない。CoreS3 LCD は RGB565 byte order 補正が必要で、補正を外すと表示形状は安定しても色が崩れます。
 
 ### 必須事項
 
@@ -98,6 +101,7 @@ M5Stack CoreS3 / StackChan では LCD と SD card が SPI3 を共有し、GPIO35
 - SD config import 実行後は、成功・失敗に関係なく restart する。SD 未挿入、mount 失敗、parse 失敗でも LCD 復帰のため再起動する。
 - 設定値は NVS に保存し、通常起動時・HERMES 起動時は NVS から読む。
 - 表示系の成功判定はログだけでなく、実機 LCD 目視または screenshot/capture で確認する。
+- LCD transfer は保守的な clock / queue depth を維持する。高速化は SD config import、Launcher swipe、HERMES 手動起動、待機画面遷移を実機で確認してから行う。
 
 ### デバッグ指針
 

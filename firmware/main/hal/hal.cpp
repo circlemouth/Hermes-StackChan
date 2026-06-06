@@ -7,9 +7,30 @@
 #include <memory>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <driver/gpio.h>
+#include "sdkconfig.h"
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
+
+static void prepareSharedSpiPinsBeforeBoardInit()
+{
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN || CONFIG_BOARD_TYPE_M5STACK_CORE_S3
+    constexpr gpio_num_t lcd_cs = GPIO_NUM_3;
+    constexpr gpio_num_t sd_cs  = GPIO_NUM_4;
+
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << lcd_cs) | (1ULL << sd_cs);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(gpio_set_level(lcd_cs, 1));
+    ESP_ERROR_CHECK(gpio_set_level(sd_cs, 1));
+#endif
+}
 
 Hal& GetHAL()
 {
@@ -24,6 +45,8 @@ void Hal::init()
 {
     mclog::tagInfo(_tag, "init");
 
+    prepareSharedSpiPinsBeforeBoardInit();
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -31,6 +54,8 @@ void Hal::init()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    handlePendingSdConfigBootImport();
 
     hermes_board_init();
     robot_mcp_init();

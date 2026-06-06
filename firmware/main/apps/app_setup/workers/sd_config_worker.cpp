@@ -6,7 +6,6 @@
 #include "workers.h"
 #include <hal/hal.h>
 #include <mooncake_log.h>
-#include <esp_lvgl_port.h>
 #include <esp_system.h>
 
 using namespace uitk::lvgl_cpp;
@@ -20,29 +19,6 @@ public:
     ~LvglUnlockGuard() { GetHAL().lvglLock(); }
     LvglUnlockGuard(const LvglUnlockGuard&) = delete;
     LvglUnlockGuard& operator=(const LvglUnlockGuard&) = delete;
-};
-
-class SdAccessDisplayGuard {
-public:
-    SdAccessDisplayGuard()
-    {
-        // AppSetup::onRunning() holds the LVGL mutex when workers are updated.
-        // Stop LVGL ticks and release the mutex before touching the shared SPI3 SD device,
-        // otherwise LCD panel IO can keep the bus busy while SD init waits indefinitely.
-        lvgl_port_stop();
-        GetHAL().delay(20);
-        GetHAL().lvglUnlock();
-    }
-
-    ~SdAccessDisplayGuard()
-    {
-        GetHAL().lvglLock();
-        lvgl_port_resume();
-        GetHAL().delay(20);
-    }
-
-    SdAccessDisplayGuard(const SdAccessDisplayGuard&) = delete;
-    SdAccessDisplayGuard& operator=(const SdAccessDisplayGuard&) = delete;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -102,7 +78,7 @@ void SdConfigWorker::setup_start_ui()
     _label_detail->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _label_detail->setWidth(280);
     _label_detail->align(LV_ALIGN_TOP_MID, 0, 100);
-    _label_detail->setText("Reading SD uses shared LCD pins.\nDevice restarts after reading.");
+    _label_detail->setText("SD shares LCD pins.\nDevice restarts before reading.");
 
     _btn_back = std::make_unique<Button>(_panel->get());
     apply_button_common_style(*_btn_back);
@@ -143,37 +119,20 @@ void SdConfigWorker::load_config()
     _loading_label->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _loading_label->align(LV_ALIGN_CENTER, 0, 0);
     _loading_label->setWidth(280);
-    _loading_label->setText("Reading SD card...\nDevice will restart.");
+    _loading_label->setText("Restarting...\nSD will be read before LCD starts.");
 
-    // 2. LVGL を一瞬アンロックしてローディング画面をレンダリングさせる
-    //    SD アクセス中は LVGL をロックしたままにして SPI3 (GPIO35) の競合を防ぐ
+    // 2. LVGL を一瞬アンロックしてローディング画面をレンダリングさせる。
+    //    この画面から SD へは触らず、boot-time import を予約して再起動する。
     {
         LvglUnlockGuard brief_unlock;
         GetHAL().delay(80);
     }
 
-    // 3. LVGL tick を止めてから SD カード読み込みを実行
-    //    LCD と SD は SPI3/GPIO35 を共有するため、LVGL を動かしたまま mount しない。
-    sd_config::LoadResult load_result;
-    {
-        SdAccessDisplayGuard display_guard;
-        mclog::tagInfo("SD Config", "calling HAL SD config loader");
-        load_result = GetHAL().loadConfigFromSdCard(nullptr);
-        mclog::tagInfo("SD Config", "HAL SD config loader returned: success={} error={}",
-                       load_result.success, load_result.error);
-    }
-    if (load_result.success) {
-        mclog::tagInfo("SD Config", "SD Config Loaded; restarting before using HERMES");
-    } else {
-        mclog::tagWarn("SD Config", "SD Config load failed; restarting to recover LCD: {}",
-                       load_result.error);
-    }
-
-    // CoreS3 / StackChan shares LCD DC and SD MISO on GPIO35. Once SD access
-    // has happened, do not rely on post-access LVGL redraw. Reboot is the
-    // reliable recovery path for both success and failure.
-    GetHAL().delay(250);
-    esp_restart();
+    // CoreS3 / StackChan shares LCD DC and SD MISO on GPIO35. Hot-inserting SD
+    // while the LCD is active can already disturb the panel, so do not mount SD
+    // from this UI. Reboot first, import config before LCD init, then reboot
+    // again into the normal Launcher/HERMES flow.
+    GetHAL().requestSdConfigBootImport();
 }
 
 // ─────────────────────────────────────────────────────────────

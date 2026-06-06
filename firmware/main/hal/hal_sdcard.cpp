@@ -13,6 +13,7 @@
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_rom_gpio.h>
 #include <soc/spi_periph.h>
 
@@ -24,10 +25,15 @@ static constexpr const char* TAG = "HAL-SdConfig";
 static constexpr gpio_num_t SD_CS_PIN   = GPIO_NUM_4;
 static constexpr gpio_num_t LCD_CS_PIN  = GPIO_NUM_3;
 static constexpr gpio_num_t SD_MISO_PIN = GPIO_NUM_35;
+static constexpr gpio_num_t SD_MOSI_PIN = GPIO_NUM_37;
+static constexpr gpio_num_t SD_SCLK_PIN = GPIO_NUM_36;
 static constexpr int SD_COMMAND_TIMEOUT_MS = 100;
 static constexpr int SD_WAIT_FOR_MISO_MS   = -1;
+static constexpr const char* SD_BOOT_IMPORT_NS = "sd_config";
+static constexpr const char* SD_BOOT_IMPORT_PENDING_KEY = "boot_import";
 
 static sdmmc_card_t* s_sd_card = nullptr;
+static bool s_boot_sd_bus_initialized = false;
 
 static void prepare_shared_spi_for_sd()
 {
@@ -79,6 +85,52 @@ static void restore_shared_spi_for_display()
     gpio_set_level(LCD_CS_PIN, 1);
 
     ESP_LOGI(TAG, "shared SPI pins restored for LCD");
+}
+
+static esp_err_t init_shared_spi_for_boot_sd()
+{
+    if (s_boot_sd_bus_initialized) {
+        return ESP_OK;
+    }
+
+    gpio_set_direction(LCD_CS_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(LCD_CS_PIN, 1);
+    gpio_set_direction(SD_CS_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(SD_CS_PIN, 1);
+
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = SD_MOSI_PIN;
+    buscfg.miso_io_num = SD_MISO_PIN;
+    buscfg.sclk_io_num = SD_SCLK_PIN;
+    buscfg.quadwp_io_num = GPIO_NUM_NC;
+    buscfg.quadhd_io_num = GPIO_NUM_NC;
+    buscfg.max_transfer_sz = 4096;
+
+    esp_err_t err = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SPI3 already initialized before boot SD import");
+        return err;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to initialize SPI3 for boot SD import: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    s_boot_sd_bus_initialized = true;
+    return ESP_OK;
+}
+
+static void deinit_boot_sd_bus()
+{
+    if (!s_boot_sd_bus_initialized) {
+        return;
+    }
+
+    esp_err_t err = spi_bus_free(SPI3_HOST);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to free boot SD SPI bus: %s", esp_err_to_name(err));
+    }
+    s_boot_sd_bus_initialized = false;
 }
 
 static esp_err_t probe_sd_card_present(uint8_t* response_out)
@@ -212,8 +264,9 @@ static void unmount_sd_card()
 sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_view)> onLog)
 {
     // WARNING: CoreS3 / StackChan shares SPI3 and GPIO35 between LCD and SD.
-    // Do not call this during Launcher startup, HERMES app open, or display handoff.
-    // Prefer explicit Setup > Load SD Config only, and require restart after success.
+    // Do not call this during Launcher startup, HERMES app open, display handoff,
+    // or any active LCD UI flow. Setup > Load SD Config schedules boot-time
+    // import so this runs before LCD initialization.
     // Calling this while LCD/LVGL is active can leave the physical LCD bus in a bad state
     // even if LVGL objects are created successfully.
     mclog::tagInfo(TAG, "mounting SD card");
@@ -236,4 +289,48 @@ sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_v
 
     unmount_sd_card();
     return result;
+}
+
+void Hal::requestSdConfigBootImport()
+{
+    mclog::tagInfo(TAG, "requesting boot-time SD config import");
+    Settings settings(SD_BOOT_IMPORT_NS, true);
+    settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 1);
+    delay(100);
+    esp_restart();
+}
+
+void Hal::handlePendingSdConfigBootImport()
+{
+    Settings settings(SD_BOOT_IMPORT_NS, false);
+    if (settings.GetInt(SD_BOOT_IMPORT_PENDING_KEY, 0) != 1) {
+        return;
+    }
+
+    {
+        Settings write_settings(SD_BOOT_IMPORT_NS, true);
+        write_settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
+    }
+
+    mclog::tagInfo(TAG, "boot-time SD config import start before LCD init");
+
+    sd_config::LoadResult result;
+    esp_err_t err = init_shared_spi_for_boot_sd();
+    if (err == ESP_OK) {
+        result = loadConfigFromSdCard(nullptr);
+        deinit_boot_sd_bus();
+    } else {
+        result.error = std::string("SPI init failed: ") + esp_err_to_name(err);
+    }
+
+    if (result.success) {
+        mclog::tagInfo(TAG, "boot-time SD config import succeeded; imported_keys={}", result.imported_keys.size());
+    } else {
+        mclog::tagWarn(TAG, "boot-time SD config import failed; error={}", result.error);
+    }
+
+    // The display has not been initialized yet, but SD used the same physical
+    // pins. Reboot once more so normal startup owns SPI3 from a clean state.
+    delay(250);
+    esp_restart();
 }

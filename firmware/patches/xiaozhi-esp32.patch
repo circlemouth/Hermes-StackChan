@@ -1,12 +1,56 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3b6f07e 100644
+index d69d43d..9ecaa2c 100644
 --- a/main/application.cc
 +++ b/main/application.cc
+@@ -101,7 +101,7 @@ void Application::Initialize() {
+     // Set network event callback for UI updates and network state handling
+     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+         auto display = Board::GetInstance().GetDisplay();
+-
++
+         switch (event) {
+             case NetworkEvent::Scanning:
+                 display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
+@@ -166,7 +166,7 @@ void Application::Run() {
+     // Set the priority of the main task to 10
+     vTaskPrioritySet(nullptr, 10);
+
+-    const EventBits_t ALL_EVENTS =
++    const EventBits_t ALL_EVENTS =
+         MAIN_EVENT_SCHEDULE |
+         MAIN_EVENT_SEND_AUDIO |
+         MAIN_EVENT_WAKE_WORD_DETECTED |
+@@ -249,7 +249,7 @@ void Application::Run() {
+             clock_ticks_++;
+             auto display = Board::GetInstance().GetDisplay();
+             display->UpdateStatusBar();
+-
++
+             // Print debug info every 10 seconds
+             if (clock_ticks_ % 10 == 0) {
+                 SystemInfo::PrintHeapStats();
+@@ -352,7 +352,7 @@ void Application::CheckAssetsVersion() {
+         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
+         return;
+     }
+-
++
+     Settings settings("assets", true);
+     // Check if there is a new assets need to be downloaded
+     std::string download_url = settings.GetString("download_url");
+@@ -363,7 +363,7 @@ void Application::CheckAssetsVersion() {
+         char message[256];
+         snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
+         Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down", Lang::Sounds::OGG_UPGRADE);
+-
++
+         // Wait for the audio service to be idle for 3 seconds
+         vTaskDelay(pdMS_TO_TICKS(3000));
+         SetDeviceState(kDeviceStateUpgrading);
 @@ -400,6 +400,18 @@ void Application::CheckNewVersion() {
      int retry_count = 0;
      int retry_delay = 10; // Initial retry delay in seconds
--
-+
+
 +    Settings wifi_settings("wifi", false);
 +    Settings websocket_settings("websocket", false);
 +    std::string explicit_ota_url = wifi_settings.GetString("ota_url");
@@ -22,11 +66,11 @@ index d69d43d..3b6f07e 100644
      auto& board = Board::GetInstance();
      while (true) {
          auto display = board.GetDisplay();
-@@ -478,6 +490,15 @@ void Application::InitializeProtocol() {
+@@ -477,7 +489,16 @@ void Application::InitializeProtocol() {
+
      display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
--
+
 -    if (ota_->HasMqttConfig()) {
-+
 +    Settings websocket_settings("websocket", false);
 +    std::string local_websocket_url = websocket_settings.GetString("url");
 +    if (local_websocket_url.empty()) {
@@ -40,9 +84,49 @@ index d69d43d..3b6f07e 100644
          protocol_ = std::make_unique<MqttProtocol>();
      } else if (ota_->HasWebsocketConfig()) {
          protocol_ = std::make_unique<WebsocketProtocol>();
-@@ -610,33 +631,36 @@ void Application::InitializeProtocol() {
+@@ -494,13 +515,13 @@ void Application::InitializeProtocol() {
+         last_error_message_ = message;
+         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
+     });
+-
++
+     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+         if (GetDeviceState() == kDeviceStateSpeaking) {
+             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+         }
+     });
+-
++
+     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
+@@ -508,7 +529,7 @@ void Application::InitializeProtocol() {
+                 protocol_->server_sample_rate(), codec->output_sample_rate());
+         }
+     });
+-
++
+     protocol_->OnAudioChannelClosed([this, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+         Schedule([this]() {
+@@ -517,7 +538,7 @@ void Application::InitializeProtocol() {
+             SetDeviceState(kDeviceStateIdle);
+         });
+     });
+-
++
+     protocol_->OnIncomingJson([this, display](const cJSON* root) {
+         // Parse JSON data
+         auto type = cJSON_GetObjectItem(root, "type");
+@@ -605,38 +626,41 @@ void Application::InitializeProtocol() {
+             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+         }
+     });
+-
++
+     protocol_->Start();
  }
- 
+
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
 -    struct digit_sound {
 -        char digit;
@@ -50,7 +134,7 @@ index d69d43d..3b6f07e 100644
 -    };
 -    static const std::array<digit_sound, 10> digit_sounds{{
 -        digit_sound{'0', Lang::Sounds::OGG_0},
--        digit_sound{'1', Lang::Sounds::OGG_1}, 
+-        digit_sound{'1', Lang::Sounds::OGG_1},
 -        digit_sound{'2', Lang::Sounds::OGG_2},
 -        digit_sound{'3', Lang::Sounds::OGG_3},
 -        digit_sound{'4', Lang::Sounds::OGG_4},
@@ -102,10 +186,91 @@ index d69d43d..3b6f07e 100644
 +    auto display = Board::GetInstance().GetDisplay();
 +    display->SetChatMessage("system", "Please bind and set up in the mobile app.");
  }
- 
+
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
+@@ -673,7 +697,7 @@ void Application::StopListening() {
+
+ void Application::HandleToggleChatEvent() {
+     auto state = GetDeviceState();
+-
++
+     if (state == kDeviceStateActivating) {
+         SetDeviceState(kDeviceStateIdle);
+         return;
+@@ -727,7 +751,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+
+ void Application::HandleStartListeningEvent() {
+     auto state = GetDeviceState();
+-
++
+     if (state == kDeviceStateActivating) {
+         SetDeviceState(kDeviceStateIdle);
+         return;
+@@ -741,7 +765,7 @@ void Application::HandleStartListeningEvent() {
+         ESP_LOGE(TAG, "Protocol not initialized");
+         return;
+     }
+-
++
+     if (state == kDeviceStateIdle) {
+         if (!protocol_->IsAudioChannelOpened()) {
+             SetDeviceState(kDeviceStateConnecting);
+@@ -760,7 +784,7 @@ void Application::HandleStartListeningEvent() {
+
+ void Application::HandleStopListeningEvent() {
+     auto state = GetDeviceState();
+-
++
+     if (state == kDeviceStateAudioTesting) {
+         audio_service_.EnableAudioTesting(false);
+         SetDeviceState(kDeviceStateWifiConfiguring);
+@@ -860,7 +884,7 @@ void Application::HandleStateChangedEvent() {
+     auto display = board.GetDisplay();
+     auto led = board.GetLed();
+     led->OnStateChanged();
+-
++
+     switch (new_state) {
+         case kDeviceStateUnknown:
+         case kDeviceStateIdle:
+@@ -886,7 +910,7 @@ void Application::HandleStateChangedEvent() {
+                 if (listening_mode_ == kListeningModeAutoStop) {
+                     audio_service_.WaitForPlaybackQueueEmpty();
+                 }
+-
++
+                 // Send the start listening command
+                 protocol_->SendStartListening(listening_mode_);
+                 audio_service_.EnableVoiceProcessing(true);
+@@ -899,7 +923,7 @@ void Application::HandleStateChangedEvent() {
+             // Disable wake word detection in listening mode
+             audio_service_.EnableWakeWordDetection(false);
+ #endif
+-
++
+             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
+             if (play_popup_on_listening_) {
+                 play_popup_on_listening_ = false;
+@@ -1022,7 +1046,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
+     }
+
+     auto state = GetDeviceState();
+-
++
+     if (state == kDeviceStateIdle) {
+         audio_service_.EncodeWakeWord();
+
+@@ -1040,7 +1064,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
+         Schedule([this]() {
+             AbortSpeaking(kAbortReasonNone);
+         });
+-    } else if (state == kDeviceStateListening) {
++    } else if (state == kDeviceStateListening) {
+         Schedule([this]() {
+             if (protocol_) {
+                 protocol_->CloseAudioChannel();
 diff --git a/main/assets.cc b/main/assets.cc
-index ad61944..6b84daf 100644
+index ad61944..57d14a8 100644
 --- a/main/assets.cc
 +++ b/main/assets.cc
 @@ -3,8 +3,8 @@
@@ -119,10 +284,17 @@ index ad61944..6b84daf 100644
  #if HAVE_LVGL
  #include "display/lcd_display.h"
  #include <spi_flash_mmap.h>
-@@ -356,72 +356,72 @@ bool Assets::LvglStrategy::Apply(Assets* assets) {
+@@ -350,78 +350,78 @@ bool Assets::LvglStrategy::Apply(Assets* assets) {
+             ESP_LOGI(TAG, "Set hide_subtitle to %s", hide ? "true" : "false");
+         }
+     }
+-
++
+     cJSON_Delete(root);
+     return true;
  }
  #endif // HAVE_LVGL
- 
+
 -bool Assets::EmoteStrategy::InitializePartition(Assets* assets) {
 -    assets->partition_valid_ = false;
 -
@@ -255,17 +427,132 @@ index ad61944..6b84daf 100644
 +//     }
 +//     return true;
 +// }
- 
+
  bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
      ESP_LOGI(TAG, "Downloading new version of assets from %s", url.c_str());
+@@ -432,7 +432,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+     // 下载新的资源文件
+     auto network = Board::GetInstance().GetNetwork();
+     auto http = network->CreateHttp(0);
+-
++
+     if (!http->Open("GET", url)) {
+         ESP_LOGE(TAG, "Failed to open HTTP connection");
+         return false;
+@@ -456,14 +456,14 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+
+     // 定义扇区大小为4KB（ESP32的标准扇区大小）
+     const size_t SECTOR_SIZE = esp_partition_get_main_flash_sector_size();
+-
++
+     // 计算需要擦除的扇区数量
+     size_t sectors_to_erase = (content_length + SECTOR_SIZE - 1) / SECTOR_SIZE; // 向上取整
+     size_t total_erase_size = sectors_to_erase * SECTOR_SIZE;
+-
+-    ESP_LOGI(TAG, "Sector size: %u, content length: %u, sectors to erase: %u, total erase size: %u",
++
++    ESP_LOGI(TAG, "Sector size: %u, content length: %u, sectors to erase: %u, total erase size: %u",
+              SECTOR_SIZE, content_length, sectors_to_erase, total_erase_size);
+-
++
+     // 写入新的资源文件到分区，一边erase一边写入
+     char* buffer = (char*)heap_caps_malloc(SECTOR_SIZE, MALLOC_CAP_INTERNAL);
+     if (buffer == nullptr) {
+@@ -474,7 +474,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+     size_t recent_written = 0;
+     size_t current_sector = 0;
+     auto last_calc_time = esp_timer_get_time();
+-
++
+     while (true) {
+         int ret = http->Read(buffer, SECTOR_SIZE);
+         if (ret < 0) {
+@@ -490,19 +490,19 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+         // 检查是否需要擦除新的扇区
+         size_t write_end_offset = total_written + ret;
+         size_t needed_sectors = (write_end_offset + SECTOR_SIZE - 1) / SECTOR_SIZE;
+-
++
+         // 擦除需要的新扇区
+         while (current_sector < needed_sectors) {
+             size_t sector_start = current_sector * SECTOR_SIZE;
+             size_t sector_end = (current_sector + 1) * SECTOR_SIZE;
+-
++
+             // 确保擦除范围不超过分区大小
+             if (sector_end > partition_->size) {
+                 ESP_LOGE(TAG, "Sector end (%u) exceeds partition size (%lu)", sector_end, partition_->size);
+                 heap_caps_free(buffer);
+                 return false;
+             }
+-
++
+             ESP_LOGD(TAG, "Erasing sector %u (offset: %u, size: %u)", current_sector, sector_start, SECTOR_SIZE);
+             esp_err_t err = esp_partition_erase_range(partition_, sector_start, SECTOR_SIZE);
+             if (err != ESP_OK) {
+@@ -510,7 +510,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+                 heap_caps_free(buffer);
+                 return false;
+             }
+-
++
+             current_sector++;
+         }
+
+@@ -529,7 +529,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+         if (esp_timer_get_time() - last_calc_time >= 1000000 || total_written == content_length || ret == 0) {
+             size_t progress = total_written * 100 / content_length;
+             size_t speed = recent_written; // 每秒的字节数
+-            ESP_LOGI(TAG, "Progress: %u%% (%u/%u), Speed: %u B/s, Sectors erased: %u",
++            ESP_LOGI(TAG, "Progress: %u%% (%u/%u), Speed: %u B/s, Sectors erased: %u",
+                      progress, total_written, content_length, speed, current_sector);
+             if (progress_callback) {
+                 progress_callback(progress, speed);
+@@ -538,7 +538,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+             recent_written = 0; // 重置最近写入的字节数
+         }
+     }
+-
++
+     http->Close();
+     heap_caps_free(buffer);
+
+@@ -547,7 +547,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
+         return false;
+     }
+
+-    ESP_LOGI(TAG, "Assets download completed, total written: %u bytes, total sectors erased: %u",
++    ESP_LOGI(TAG, "Assets download completed, total written: %u bytes, total sectors erased: %u",
+              total_written, current_sector);
+
+     // 重新初始化资源分区
 diff --git a/main/assets.h b/main/assets.h
-index 3692e0c..7bfbc5c 100644
+index 3692e0c..1b6f4ad 100644
 --- a/main/assets.h
 +++ b/main/assets.h
-@@ -68,13 +68,13 @@ private:
+@@ -44,7 +44,7 @@ private:
+     void UnApplyPartition();
+     static bool FindPartition(Assets* assets);
+     static bool LoadSrmodelsFromIndex(Assets* assets, cJSON* root = nullptr);
+-
++
+     class AssetStrategy {
+     public:
+         virtual ~AssetStrategy() = default;
+@@ -53,7 +53,7 @@ private:
+         virtual void UnApplyPartition(Assets* assets) = 0;
+         virtual bool GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) = 0;
+     };
+-
++
+     class LvglStrategy : public AssetStrategy {
+     public:
+         bool Apply(Assets* assets) override;
+@@ -67,15 +67,15 @@ private:
+         const char* mmap_root_ = nullptr;
          bool checksum_valid_ = false;
      };
-     
+-
 -    class EmoteStrategy : public AssetStrategy {
 -    public:
 -        bool Apply(Assets* assets) override;
@@ -273,6 +560,8 @@ index 3692e0c..7bfbc5c 100644
 -        void UnApplyPartition(Assets* assets) override;
 -        bool GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) override;
 -    };
+-
++
 +    // class EmoteStrategy : public AssetStrategy {
 +    // public:
 +    //     bool Apply(Assets* assets) override;
@@ -280,15 +569,49 @@ index 3692e0c..7bfbc5c 100644
 +    //     void UnApplyPartition(Assets* assets) override;
 +    //     bool GetAssetData(Assets* assets, const std::string& name, void*& ptr, size_t& size) override;
 +    // };
-     
++
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+
+diff --git a/main/boards/common/backlight.cc b/main/boards/common/backlight.cc
+index c62fd7a..a0e38f6 100644
+--- a/main/boards/common/backlight.cc
++++ b/main/boards/common/backlight.cc
+@@ -31,15 +31,20 @@ Backlight::~Backlight() {
+
+ void Backlight::RestoreBrightness() {
+     // Load brightness from settings
+-    Settings settings("display");
++    Settings settings("display");
+     int saved_brightness = settings.GetInt("brightness", 75);
+-
++
+     // 检查亮度值是否为0或过小，设置默认值
+     if (saved_brightness <= 0) {
+         ESP_LOGW(TAG, "Brightness value (%d) is too small, setting to default (10)", saved_brightness);
+         saved_brightness = 10;  // 设置一个较低的默认值
+     }
+-
++
++    if (brightness_ == saved_brightness && target_brightness_ == saved_brightness) {
++        SetBrightnessImpl(saved_brightness);
++        return;
++    }
++
+     SetBrightness(saved_brightness);
+ }
+
+@@ -118,4 +123,3 @@ void PwmBacklight::SetBrightnessImpl(uint8_t brightness) {
+     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty_cycle);
+     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+ }
+-
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
 index 835997d..ea50d51 100644
 --- a/main/boards/common/i2c_device.cc
 +++ b/main/boards/common/i2c_device.cc
 @@ -32,4 +32,8 @@ uint8_t I2cDevice::ReadReg(uint8_t reg) {
- 
+
  void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
      ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
 +}
@@ -307,13 +630,15 @@ index 7bc917b..874b137 100644
      void ReadRegs(uint8_t reg, uint8_t* buffer, size_t length);
 +    esp_err_t TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms = 100);
  };
- 
+
  #endif // I2C_DEVICE_H
 diff --git a/main/ota.cc b/main/ota.cc
-index bcc0dc5..804a0c1 100644
+index bcc0dc5..6ef1f11 100644
 --- a/main/ota.cc
 +++ b/main/ota.cc
-@@ -28,2 +28,5 @@
+@@ -26,6 +26,9 @@
+
+
  Ota::Ota() {
 +    auto app_desc = esp_app_get_description();
 +    current_version_ = app_desc->version;
@@ -321,6 +646,94 @@ index bcc0dc5..804a0c1 100644
  #ifdef ESP_EFUSE_BLOCK_USR_DATA
      // Read Serial Number from efuse user_data
      uint8_t serial_number[33] = {0};
+@@ -71,7 +74,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
+     return http;
+ }
+
+-/*
++/*
+  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
+  */
+ esp_err_t Ota::CheckVersion() {
+@@ -112,7 +115,7 @@ esp_err_t Ota::CheckVersion() {
+     // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
+     // Parse the JSON response and check if the version is newer
+     // If it is, set has_new_version_ to true and store the new version and URL
+-
++
+     cJSON *root = cJSON_Parse(data.c_str());
+     if (root == NULL) {
+         ESP_LOGE(TAG, "Failed to parse JSON response");
+@@ -190,17 +193,17 @@ esp_err_t Ota::CheckVersion() {
+     if (cJSON_IsObject(server_time)) {
+         cJSON *timestamp = cJSON_GetObjectItem(server_time, "timestamp");
+         cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
+-
++
+         if (cJSON_IsNumber(timestamp)) {
+             // 设置系统时间
+             struct timeval tv;
+             double ts = timestamp->valuedouble;
+-
++
+             // 如果有时区偏移，计算本地时间
+             if (cJSON_IsNumber(timezone_offset)) {
+                 ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
+             }
+-
++
+             tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
+             tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
+             settimeofday(&tv, NULL);
+@@ -395,18 +398,18 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
+     std::vector<int> versionNumbers;
+     std::stringstream ss(version);
+     std::string segment;
+-
++
+     while (std::getline(ss, segment, '.')) {
+         versionNumbers.push_back(std::stoi(segment));
+     }
+-
++
+     return versionNumbers;
+ }
+
+ bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion) {
+     std::vector<int> current = ParseVersion(currentVersion);
+     std::vector<int> newer = ParseVersion(newVersion);
+-
++
+     for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
+         if (newer[i] > current[i]) {
+             return true;
+@@ -414,7 +417,7 @@ bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::st
+             return false;
+         }
+     }
+-
++
+     return newer.size() > current.size();
+ }
+
+@@ -426,7 +429,7 @@ std::string Ota::GetActivationPayload() {
+     std::string hmac_hex;
+ #ifdef SOC_HMAC_SUPPORTED
+     uint8_t hmac_result[32]; // SHA-256 输出为32字节
+-
++
+     // 使用Key0计算HMAC
+     esp_err_t ret = esp_hmac_calculate(HMAC_KEY0, (uint8_t*)activation_challenge_.data(), activation_challenge_.size(), hmac_result);
+     if (ret != ESP_OK) {
+@@ -477,7 +480,7 @@ esp_err_t Ota::Activate() {
+         ESP_LOGE(TAG, "Failed to open HTTP connection");
+         return ESP_FAIL;
+     }
+-
++
+     auto status_code = http->GetStatusCode();
+     if (status_code == 202) {
+         return ESP_ERR_TIMEOUT;
 diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
 index f0cc034..558af21 100644
 --- a/main/protocols/websocket_protocol.cc

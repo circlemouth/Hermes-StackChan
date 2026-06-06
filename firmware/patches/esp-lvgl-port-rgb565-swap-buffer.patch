@@ -1,0 +1,33 @@
+diff --git a/src/lvgl9/esp_lvgl_port_disp.c b/src/lvgl9/esp_lvgl_port_disp.c
+index 0000000..0000000 100644
+--- a/src/lvgl9/esp_lvgl_port_disp.c
++++ b/src/lvgl9/esp_lvgl_port_disp.c
+@@ -359,6 +359,12 @@ lv_display_t *esp_lvgl_port_add_disp(const esp_lvgl_port_display_cfg_t *disp_cfg
+         disp_ctx->draw_buffs[1] = buf2;
+     }
+
++    if (disp_cfg->flags.swap_bytes && !disp_cfg->flags.sw_rotate) {
++        disp_ctx->draw_buffs[2] = heap_caps_aligned_alloc(CONFIG_LV_DRAW_BUF_ALIGN, buffer_size * color_bytes, buff_caps);
++        ESP_GOTO_ON_FALSE(disp_ctx->draw_buffs[2], ESP_ERR_NO_MEM, err, TAG,
++                          "Not enough memory for LVGL byte-swap buffer allocation!");
++    }
++
+     disp = lv_display_create(disp_cfg->hres, disp_cfg->vres);
+
+     /* Set display color format */
+@@ -701,9 +707,14 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
+ #endif //LVGL_PORT_PPA
+     }
+
+-    if (disp_ctx->flags.swap_bytes) {
++    if (disp_ctx->flags.swap_bytes && disp_ctx->draw_buffs[2] && color_map != (uint8_t *)disp_ctx->draw_buffs[2]) {
++        size_t len = lv_area_get_size(area) * lv_color_format_get_size(lv_display_get_color_format(drv));
++        memcpy(disp_ctx->draw_buffs[2], color_map, len);
++        color_map = (uint8_t *)disp_ctx->draw_buffs[2];
++        lv_draw_sw_rgb565_swap(color_map, lv_area_get_size(area));
++    } else if (disp_ctx->flags.swap_bytes) {
+         size_t len = lv_area_get_size(area);
+         lv_draw_sw_rgb565_swap(color_map, len);
+     }
+     /* Transfer data in buffer for monochromatic screen */
+     if (disp_ctx->flags.monochrome) {

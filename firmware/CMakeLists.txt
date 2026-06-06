@@ -13,7 +13,10 @@ project(stack-chan)
 
 set(ESP_ML307_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-ml307-tcp-shutdown.patch")
 set(ESP_ML307_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/78__esp-ml307")
+set(ESP_LVGL_PORT_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-lvgl-port-rgb565-swap-buffer.patch")
+set(ESP_LVGL_PORT_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_lvgl_port")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_ML307_PATCH}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_LVGL_PORT_PATCH}")
 if(EXISTS "${ESP_ML307_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_ML307_PATCH}")
     execute_process(
         COMMAND git apply --check "${ESP_ML307_PATCH}"
@@ -41,6 +44,37 @@ if(EXISTS "${ESP_ML307_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_ML307_PA
             message(STATUS "esp-ml307 TCP shutdown patch already applied")
         else()
             message(FATAL_ERROR "esp-ml307 TCP shutdown patch cannot be applied")
+        endif()
+    endif()
+endif()
+
+if(EXISTS "${ESP_LVGL_PORT_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_LVGL_PORT_PATCH}")
+    execute_process(
+        COMMAND git apply --check "${ESP_LVGL_PORT_PATCH}"
+        WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
+        RESULT_VARIABLE ESP_LVGL_PORT_PATCH_CHECK
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(ESP_LVGL_PORT_PATCH_CHECK EQUAL 0)
+        execute_process(
+            COMMAND git apply "${ESP_LVGL_PORT_PATCH}"
+            WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
+            COMMAND_ERROR_IS_FATAL ANY
+        )
+        message(STATUS "Applied esp_lvgl_port RGB565 swap buffer patch")
+    else()
+        execute_process(
+            COMMAND git apply --reverse --check "${ESP_LVGL_PORT_PATCH}"
+            WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
+            RESULT_VARIABLE ESP_LVGL_PORT_PATCH_REVERSE_CHECK
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+        if(ESP_LVGL_PORT_PATCH_REVERSE_CHECK EQUAL 0)
+            message(STATUS "esp_lvgl_port RGB565 swap buffer patch already applied")
+        else()
+            message(FATAL_ERROR "esp_lvgl_port RGB565 swap buffer patch cannot be applied")
         endif()
     endif()
 endif()

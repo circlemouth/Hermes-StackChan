@@ -467,59 +467,65 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         return;
     }
 
-    DisplayLockGuard lock(this);
+    bool reset_pitch_after_unlock = false;
 
-    // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
+    {
+        DisplayLockGuard lock(this);
 
-    auto& avatar = stackchan.avatar();
+        // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
-    // Map emotion string to stackchan::Emotion
-    if (strcmp(emotion, "neutral") == 0) {
-        avatar.setEmotion(Emotion::Neutral);
-    } else if (strcmp(emotion, "happy") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "laughing") == 0) {
-        avatar.setEmotion(Emotion::Happy);
-    } else if (strcmp(emotion, "angry") == 0) {
-        avatar.setEmotion(Emotion::Angry);
-    } else if (strcmp(emotion, "sad") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "crying") == 0) {
-        avatar.setEmotion(Emotion::Sad);
-    } else if (strcmp(emotion, "sleepy") == 0) {
-        avatar.setEmotion(Emotion::Sleepy);
-        avatar.setSpeech("Zzz…");
-        is_sleeping_ = true;
-        // avatar.mouth().setWeight(10);
+        auto& avatar = stackchan.avatar();
 
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
+        // Map emotion string to stackchan::Emotion
+        if (strcmp(emotion, "neutral") == 0) {
+            avatar.setEmotion(Emotion::Neutral);
+        } else if (strcmp(emotion, "happy") == 0) {
+            avatar.setEmotion(Emotion::Happy);
+        } else if (strcmp(emotion, "laughing") == 0) {
+            avatar.setEmotion(Emotion::Happy);
+        } else if (strcmp(emotion, "angry") == 0) {
+            avatar.setEmotion(Emotion::Angry);
+        } else if (strcmp(emotion, "sad") == 0) {
+            avatar.setEmotion(Emotion::Sad);
+        } else if (strcmp(emotion, "crying") == 0) {
+            avatar.setEmotion(Emotion::Sad);
+        } else if (strcmp(emotion, "sleepy") == 0) {
+            avatar.setEmotion(Emotion::Sleepy);
+            avatar.setSpeech("Zzz...");
+            is_sleeping_ = true;
+            // avatar.mouth().setWeight(10);
+
+            // Stop idle motion
+            ESP_LOGW(TAG, "Stop idle motion");
+            if (idle_motion_modifier_id_ >= 0) {
+                stackchan.removeModifier(idle_motion_modifier_id_);
+                idle_motion_modifier_id_ = -1;
+                stackchan.removeModifier(idle_expression_modifier_id_);
+                idle_expression_modifier_id_ = -1;
+            }
+
+            reset_pitch_after_unlock = true;
+        } else if (strcmp(emotion, "doubtful") == 0) {
+            avatar.setEmotion(Emotion::Doubt);
+        } else {
+            ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
+            avatar.setEmotion(Emotion::Neutral);
         }
 
-        // Return to default pose
+        if (strcmp(emotion, "sleepy") != 0) {
+            is_sleeping_ = false;
+        }
+
+        // Resync blink modifier base eye weights
+        auto blink_modifier = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_));
+        if (blink_modifier) {
+            blink_modifier->resyncEyeWeights();
+        }
+    }
+
+    if (reset_pitch_after_unlock) {
         auto& motion = GetStackChan().motion();
         motion.pitchServo().moveWithSpeed(0, 80);
-
-    } else if (strcmp(emotion, "doubtful") == 0) {
-        avatar.setEmotion(Emotion::Doubt);
-    } else {
-        ESP_LOGW(TAG, "Unknown emotion: %s, using NEUTRAL", emotion);
-        avatar.setEmotion(Emotion::Neutral);
-    }
-
-    if (strcmp(emotion, "sleepy") != 0) {
-        is_sleeping_ = false;
-    }
-
-    // Resync blink modifier base eye weights
-    auto blink_modifier = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_));
-    if (blink_modifier) {
-        blink_modifier->resyncEyeWeights();
     }
 }
 
