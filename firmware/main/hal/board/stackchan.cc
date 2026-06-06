@@ -191,7 +191,10 @@ public:
         WriteReg(0x03, 0b10000001);
         vTaskDelay(pdMS_TO_TICKS(20));
         WriteReg(0x03, 0b10000011);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // The LCD can remain in a bad physical state after SD-card access on the
+        // shared SPI pins. Give the controller enough time after reset release
+        // before sending the software reset/init command sequence.
+        vTaskDelay(pdMS_TO_TICKS(120));
     }
 };
 
@@ -456,8 +459,8 @@ private:
         panel_config.bits_per_pixel             = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(panel_io, &panel_config, &panel));
 
-        esp_lcd_panel_reset(panel);
         aw9523_->ResetIli9342();
+        esp_lcd_panel_reset(panel);
 
         esp_lcd_panel_init(panel);
         esp_lcd_panel_invert_color(panel, true);
