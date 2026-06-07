@@ -748,3 +748,56 @@ index f0cc034..558af21 100644
      std::string token = settings.GetString("token");
      int version = settings.GetInt("version");
      if (version != 0) {
+@@ -91,1 +94,5 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     error_occurred_ = false;
++    if (url.empty()) {
++        SetError("HERMES endpoint error: websocket_url is empty. Check SD /config.json.");
++        return false;
++    }
+@@ -153,7 +160,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
+     if (!websocket_->Connect(url.c_str())) {
+         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
++        SetError("HERMES endpoint error: cannot connect to " + url +
++                 " (code=" + std::to_string(websocket_->GetLastError()) +
++                 "). Check SD /config.json websocket_url and bridge server.");
+         return false;
+     }
+     // Send hello message to describe the client
+@@ -166,7 +175,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
+         ESP_LOGE(TAG, "Failed to receive server hello");
+-        SetError(Lang::Strings::SERVER_TIMEOUT);
++        SetError("HERMES endpoint timeout: no hello from " + url +
++                 ". Check bridge server protocol/path.");
+         return false;
+     }
+     if (on_audio_channel_opened_ != nullptr) {
+diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
+index 5a3463b..cb593f6 100644
+--- a/main/boards/common/wifi_board.cc
++++ b/main/boards/common/wifi_board.cc
+@@ -116,2 +116,12 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
+ void WifiBoard::StartWifiConfigMode() {
+     in_config_mode_ = true;
++    const bool had_saved_wifi = !SsidManager::GetInstance().GetSsidList().empty();
++    std::string hermes_wifi_message = had_saved_wifi
++        ? "HERMES Wi-Fi error: cannot connect to saved Wi-Fi. Check SSID/password in SD /config.json wifi_networks."
++        : "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
++
++    auto display = Board::GetInstance().GetDisplay();
++    if (display != nullptr) {
++        display->SetEmotion("sad");
++        display->SetChatMessage("system", hermes_wifi_message.c_str());
++    }
+@@ -128,4 +138,6 @@ void WifiBoard::StartWifiConfigMode() {
+     // Show config prompt after a short delay
+-    Application::GetInstance().Schedule([&wifi_manager]() {
+-        std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
++    Application::GetInstance().Schedule([&wifi_manager, hermes_wifi_message]() {
++        std::string hint = hermes_wifi_message;
++        hint += "\n";
++        hint += Lang::Strings::CONNECT_TO_HOTSPOT;
+         hint += wifi_manager.GetApSsid();

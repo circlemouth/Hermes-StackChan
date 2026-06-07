@@ -140,8 +140,7 @@ void AvatarScene::showFakeLauncherScreen()
 
 void AvatarScene::showAppReadyState(const char* state)
 {
-    lv_obj_t* screen = lv_screen_active();
-    if (screen == nullptr || state == nullptr) {
+    if (state == nullptr) {
         return;
     }
 
@@ -150,52 +149,20 @@ void AvatarScene::showAppReadyState(const char* state)
         return;
     }
 
-    auto& stackchan = GetStackChan();
-    stackchan.resetAvatar();
-    stackchan.clearModifiers();
-    root_ = screen;
-    resetOverlayPointers();
-
-    lv_obj_clean(screen);
-    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xEDF4FF), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
-
-    lv_obj_t* title = lv_label_create(screen);
-    lv_label_set_text(title, "HERMES");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x7E7B9C), LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
-
-    lv_obj_t* logo = lv_obj_create(screen);
-    lv_obj_set_size(logo, 54, 54);
-    lv_obj_set_style_radius(logo, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(logo, lv_color_hex(0x33CC99), LV_PART_MAIN);
-    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 40);
-
-    const char* status_text = "Connecting to Hermes bridge";
+    const char* status_text = "HERMES connection error: check Wi-Fi and websocket_url in SD /config.json.";
     if (std::strcmp(state, "missing_url") == 0) {
-        status_text = "Bridge URL missing";
+        status_text = "HERMES endpoint error: websocket_url is missing or invalid. Check SD /config.json.";
     } else if (std::strcmp(state, "wifi_missing") == 0) {
-        status_text = "Wi-Fi not connected";
+        status_text = "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
     }
 
-    lv_obj_t* status = lv_label_create(screen);
-    lv_label_set_text(status, status_text);
-    lv_obj_set_width(status, 292);
-    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_color(status, lv_color_hex(0x26206A), LV_PART_MAIN);
-    lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 118);
+    if (!launchHermesApp()) {
+        return;
+    }
 
-    lv_obj_t* device_id = lv_label_create(screen);
-    lv_label_set_text(device_id, "Device ID: simulator");
-    lv_obj_set_width(device_id, 292);
-    lv_label_set_long_mode(device_id, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(device_id, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_style_text_color(device_id, lv_color_hex(0x525064), LV_PART_MAIN);
-    lv_obj_align(device_id, LV_ALIGN_TOP_MID, 0, 158);
+    setEmotion("sad");
+    setChatMessage("system", status_text);
+    update();
 
     if (display_ != nullptr) {
         lv_refr_now(display_);
