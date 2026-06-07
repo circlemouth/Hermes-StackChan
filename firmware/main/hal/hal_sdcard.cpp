@@ -14,7 +14,6 @@
 #include <sdmmc_cmd.h>
 #include <esp_log.h>
 #include <esp_system.h>
-#include <esp_attr.h>
 #include <esp_rom_gpio.h>
 #include <soc/spi_periph.h>
 #include "sdkconfig.h"
@@ -33,10 +32,10 @@ static constexpr int SD_COMMAND_TIMEOUT_MS = 100;
 static constexpr int SD_WAIT_FOR_MISO_MS   = -1;
 static constexpr const char* SD_BOOT_IMPORT_NS = "sd_config";
 static constexpr const char* SD_BOOT_IMPORT_PENDING_KEY = "boot_import";
+static constexpr const char* SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY = "skip_next";
 
 static sdmmc_card_t* s_sd_card = nullptr;
 static bool s_boot_sd_bus_initialized = false;
-RTC_DATA_ATTR static bool s_skip_next_sd_config_autoload = false;
 
 static void prepare_shared_spi_for_sd()
 {
@@ -356,9 +355,9 @@ static bool sd_config_access_requires_clean_reboot(const sd_config::LoadResult& 
 void Hal::requestSdConfigBootImport()
 {
     mclog::tagInfo(TAG, "requesting immediate SD config reload on next boot");
-    s_skip_next_sd_config_autoload = false;
     Settings settings(SD_BOOT_IMPORT_NS, true);
     settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 1);
+    settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
     delay(100);
     esp_restart();
 }
@@ -372,16 +371,14 @@ void Hal::handleBootSdConfigAutoload()
         if (settings.GetInt(SD_BOOT_IMPORT_PENDING_KEY, 0) == 1) {
             mclog::tagInfo(TAG, "manual SD config reload flag consumed");
             settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
-            s_skip_next_sd_config_autoload = false;
+            settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
+        } else if (settings.GetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0) == 1) {
+            // 前回のbootでSDを読み、SPI/LCD保護のため自分で再起動した直後。
+            // このbootではSDを再度触らず通常起動へ進む。
+            mclog::tagInfo(TAG, "skip SD config autoload once after clean reboot");
+            settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
+            return;
         }
-    }
-
-    if (s_skip_next_sd_config_autoload) {
-        // 前回のbootでSDを読み、SPI/LCD保護のため自分で再起動した直後。
-        // このbootではSDを再度触らず通常起動へ進む。
-        mclog::tagInfo(TAG, "skip SD config autoload once after clean reboot");
-        s_skip_next_sd_config_autoload = false;
-        return;
     }
 
     mclog::tagInfo(TAG, "boot-time SD config autoload start before LCD init");
@@ -412,7 +409,10 @@ void Hal::handleBootSdConfigAutoload()
 
     // The display has not been initialized yet, but SD used the same physical
     // pins. Reboot once more so normal startup owns SPI3 from a clean state.
-    s_skip_next_sd_config_autoload = true;
+    {
+        Settings settings(SD_BOOT_IMPORT_NS, true);
+        settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 1);
+    }
     delay(250);
     esp_restart();
 #else
