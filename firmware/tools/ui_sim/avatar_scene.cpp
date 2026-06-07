@@ -154,6 +154,14 @@ void AvatarScene::showAppReadyState(const char* state)
         status_text = "HERMES endpoint error: websocket_url is missing or invalid. Check SD /config.json.";
     } else if (std::strcmp(state, "wifi_missing") == 0) {
         status_text = "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
+    } else if (std::strcmp(state, "wifi_connect_failed") == 0) {
+        status_text = "HERMES Wi-Fi error: cannot connect to configured Wi-Fi. Check SSID/password, 2.4GHz Wi-Fi, router signal, and SD /config.json.";
+    } else if (std::strcmp(state, "endpoint_unreachable") == 0) {
+        status_text = "HERMES endpoint error: cannot connect to websocket_url. Start ai-server and check Wi-Fi.";
+    } else if (std::strcmp(state, "endpoint_timeout") == 0) {
+        status_text = "HERMES endpoint timeout: no hello from websocket_url. Check ai-server bridge.";
+    } else if (std::strcmp(state, "ai_server_timeout") == 0) {
+        status_text = "HERMES AI server error: response timed out. Check ai-server logs, Hermes Dashboard, and model/API settings.";
     }
 
     if (!launchHermesApp()) {

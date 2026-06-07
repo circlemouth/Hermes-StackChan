@@ -1,5 +1,5 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3296aaa 100644
+index d69d43d..a8f0964 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -101,7 +101,7 @@ void Application::Initialize() {
@@ -29,7 +29,20 @@ index d69d43d..3296aaa 100644
              // Print debug info every 10 seconds
              if (clock_ticks_ % 10 == 0) {
                  SystemInfo::PrintHeapStats();
-@@ -318,6 +318,12 @@ void Application::HandleActivationDoneEvent() {
+@@ -280,6 +280,12 @@ void Application::HandleNetworkConnectedEvent() {
+ 
+     // Update the status bar immediately to show the network state
+     auto display = Board::GetInstance().GetDisplay();
++    if (state != kDeviceStateStarting && state != kDeviceStateActivating &&
++            state != kDeviceStateWifiConfiguring && state != kDeviceStateAudioTesting) {
++        display->SetEmotion("sad");
++        display->SetChatMessage("system",
++            "HERMES Wi-Fi error: Wi-Fi disconnected. Check router, signal, and SD /config.json.");
++    }
+     display->UpdateStatusBar(true);
+ }
+ 
+@@ -318,6 +324,12 @@ void Application::HandleActivationDoneEvent() {
          // Play the success sound to indicate the device is ready
          audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
      });
@@ -42,7 +55,7 @@ index d69d43d..3296aaa 100644
  }
  
  void Application::ActivationTask() {
-@@ -352,7 +358,7 @@ void Application::CheckAssetsVersion() {
+@@ -352,7 +364,7 @@ void Application::CheckAssetsVersion() {
          ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
          return;
      }
@@ -51,7 +64,7 @@ index d69d43d..3296aaa 100644
      Settings settings("assets", true);
      // Check if there is a new assets need to be downloaded
      std::string download_url = settings.GetString("download_url");
-@@ -363,7 +369,7 @@ void Application::CheckAssetsVersion() {
+@@ -363,7 +375,7 @@ void Application::CheckAssetsVersion() {
          char message[256];
          snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
          Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down", Lang::Sounds::OGG_UPGRADE);
@@ -60,7 +73,7 @@ index d69d43d..3296aaa 100644
          // Wait for the audio service to be idle for 3 seconds
          vTaskDelay(pdMS_TO_TICKS(3000));
          SetDeviceState(kDeviceStateUpgrading);
-@@ -400,6 +406,18 @@ void Application::CheckNewVersion() {
+@@ -400,6 +412,18 @@ void Application::CheckNewVersion() {
      int retry_count = 0;
      int retry_delay = 10; // Initial retry delay in seconds
  
@@ -79,7 +92,7 @@ index d69d43d..3296aaa 100644
      auto& board = Board::GetInstance();
      while (true) {
          auto display = board.GetDisplay();
-@@ -477,13 +495,26 @@ void Application::InitializeProtocol() {
+@@ -477,13 +501,26 @@ void Application::InitializeProtocol() {
  
      display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
  
@@ -107,7 +120,7 @@ index d69d43d..3296aaa 100644
      }
  
      protocol_->OnConnected([this]() {
-@@ -494,13 +525,13 @@ void Application::InitializeProtocol() {
+@@ -494,13 +531,13 @@ void Application::InitializeProtocol() {
          last_error_message_ = message;
          xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
      });
@@ -123,7 +136,7 @@ index d69d43d..3296aaa 100644
      protocol_->OnAudioChannelOpened([this, codec, &board]() {
          board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
          if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
-@@ -508,7 +539,7 @@ void Application::InitializeProtocol() {
+@@ -508,7 +545,7 @@ void Application::InitializeProtocol() {
                  protocol_->server_sample_rate(), codec->output_sample_rate());
          }
      });
@@ -132,7 +145,7 @@ index d69d43d..3296aaa 100644
      protocol_->OnAudioChannelClosed([this, &board]() {
          board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
          Schedule([this]() {
-@@ -517,7 +548,7 @@ void Application::InitializeProtocol() {
+@@ -517,7 +554,7 @@ void Application::InitializeProtocol() {
              SetDeviceState(kDeviceStateIdle);
          });
      });
@@ -141,7 +154,7 @@ index d69d43d..3296aaa 100644
      protocol_->OnIncomingJson([this, display](const cJSON* root) {
          // Parse JSON data
          auto type = cJSON_GetObjectItem(root, "type");
-@@ -605,38 +636,89 @@ void Application::InitializeProtocol() {
+@@ -605,38 +642,89 @@ void Application::InitializeProtocol() {
              ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
          }
      });
@@ -196,7 +209,7 @@ index d69d43d..3296aaa 100644
 +    if (GetDeviceState() != kDeviceStateIdle) {
 +        ESP_LOGW(TAG, "Skip startup websocket probe: device state is %d", static_cast<int>(GetDeviceState()));
 +        return;
-+    }
+     }
 +
 +    ESP_LOGI(TAG, "Probing local websocket endpoint on HERMES startup");
 +    SetDeviceState(kDeviceStateConnecting);
@@ -218,7 +231,7 @@ index d69d43d..3296aaa 100644
 +
 +    if (!protocol_->OpenAudioChannel()) {
 +        return;
-     }
++    }
 +
 +    ESP_LOGI(TAG, "Startup websocket probe succeeded");
 +    protocol_->CloseAudioChannel();
@@ -259,7 +272,7 @@ index d69d43d..3296aaa 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -673,7 +755,7 @@ void Application::StopListening() {
+@@ -673,7 +761,7 @@ void Application::StopListening() {
  
  void Application::HandleToggleChatEvent() {
      auto state = GetDeviceState();
@@ -268,7 +281,7 @@ index d69d43d..3296aaa 100644
      if (state == kDeviceStateActivating) {
          SetDeviceState(kDeviceStateIdle);
          return;
-@@ -727,7 +809,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -727,7 +815,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
  
  void Application::HandleStartListeningEvent() {
      auto state = GetDeviceState();
@@ -277,7 +290,7 @@ index d69d43d..3296aaa 100644
      if (state == kDeviceStateActivating) {
          SetDeviceState(kDeviceStateIdle);
          return;
-@@ -741,7 +823,7 @@ void Application::HandleStartListeningEvent() {
+@@ -741,7 +829,7 @@ void Application::HandleStartListeningEvent() {
          ESP_LOGE(TAG, "Protocol not initialized");
          return;
      }
@@ -286,7 +299,7 @@ index d69d43d..3296aaa 100644
      if (state == kDeviceStateIdle) {
          if (!protocol_->IsAudioChannelOpened()) {
              SetDeviceState(kDeviceStateConnecting);
-@@ -760,7 +842,7 @@ void Application::HandleStartListeningEvent() {
+@@ -760,7 +848,7 @@ void Application::HandleStartListeningEvent() {
  
  void Application::HandleStopListeningEvent() {
      auto state = GetDeviceState();
@@ -295,7 +308,7 @@ index d69d43d..3296aaa 100644
      if (state == kDeviceStateAudioTesting) {
          audio_service_.EnableAudioTesting(false);
          SetDeviceState(kDeviceStateWifiConfiguring);
-@@ -860,7 +942,7 @@ void Application::HandleStateChangedEvent() {
+@@ -860,12 +948,16 @@ void Application::HandleStateChangedEvent() {
      auto display = board.GetDisplay();
      auto led = board.GetLed();
      led->OnStateChanged();
@@ -304,7 +317,17 @@ index d69d43d..3296aaa 100644
      switch (new_state) {
          case kDeviceStateUnknown:
          case kDeviceStateIdle:
-@@ -886,7 +968,7 @@ void Application::HandleStateChangedEvent() {
+             display->SetStatus(Lang::Strings::STANDBY);
+-            display->ClearChatMessages();  // Clear messages first
++            if (last_error_message_.empty()) {
++                display->ClearChatMessages();  // Clear messages first
++            } else {
++                last_error_message_.clear();  // Keep protocol error bubbles visible for one idle transition.
++            }
+             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+             audio_service_.EnableVoiceProcessing(false);
+             audio_service_.EnableWakeWordDetection(true);
+@@ -886,7 +978,7 @@ void Application::HandleStateChangedEvent() {
                  if (listening_mode_ == kListeningModeAutoStop) {
                      audio_service_.WaitForPlaybackQueueEmpty();
                  }
@@ -313,7 +336,7 @@ index d69d43d..3296aaa 100644
                  // Send the start listening command
                  protocol_->SendStartListening(listening_mode_);
                  audio_service_.EnableVoiceProcessing(true);
-@@ -899,7 +981,7 @@ void Application::HandleStateChangedEvent() {
+@@ -899,7 +991,7 @@ void Application::HandleStateChangedEvent() {
              // Disable wake word detection in listening mode
              audio_service_.EnableWakeWordDetection(false);
  #endif
@@ -322,7 +345,7 @@ index d69d43d..3296aaa 100644
              // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
              if (play_popup_on_listening_) {
                  play_popup_on_listening_ = false;
-@@ -1022,7 +1104,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
+@@ -1022,7 +1114,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
      }
  
      auto state = GetDeviceState();
@@ -331,7 +354,7 @@ index d69d43d..3296aaa 100644
      if (state == kDeviceStateIdle) {
          audio_service_.EncodeWakeWord();
  
-@@ -1040,7 +1122,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
+@@ -1040,7 +1132,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
          Schedule([this]() {
              AbortSpeaking(kAbortReasonNone);
          });
@@ -340,7 +363,7 @@ index d69d43d..3296aaa 100644
          Schedule([this]() {
              if (protocol_) {
                  protocol_->CloseAudioChannel();
-@@ -1116,4 +1198,3 @@ void Application::ResetProtocol() {
+@@ -1116,4 +1208,3 @@ void Application::ResetProtocol() {
          protocol_.reset();
      });
  }
@@ -729,6 +752,72 @@ index 7bc917b..874b137 100644
  };
  
  #endif // I2C_DEVICE_H
+diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
+index 377685b..52b2d23 100644
+--- a/main/boards/common/wifi_board.cc
++++ b/main/boards/common/wifi_board.cc
+@@ -26,6 +26,18 @@ static const char *TAG = "WifiBoard";
+ // Connection timeout in seconds
+ static constexpr int CONNECT_TIMEOUT_SEC = 60;
+ 
++namespace {
++
++std::string BuildHermesWifiErrorMessage() {
++    auto& ssid_manager = SsidManager::GetInstance();
++    if (ssid_manager.GetSsidList().empty()) {
++        return "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
++    }
++    return "HERMES Wi-Fi error: cannot connect to configured Wi-Fi. Check SSID/password, 2.4GHz Wi-Fi, router signal, and SD /config.json.";
++}
++
++}  // namespace
++
+ WifiBoard::WifiBoard() {
+     // Create connection timeout timer
+     esp_timer_create_args_t timer_args = {
+@@ -157,9 +169,14 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
+ }
+ 
+ void WifiBoard::StartWifiConfigMode() {
++    auto previous_state = Application::GetInstance().GetDeviceState();
+     in_config_mode_ = true;
+     // Transition to wifi configuring state
+     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
++    bool show_hermes_wifi_failure = previous_state == kDeviceStateStarting ||
++                                    previous_state == kDeviceStateActivating ||
++                                    previous_state == kDeviceStateWifiConfiguring;
++
+ #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
+     auto& wifi_manager = WifiManager::GetInstance();
+ 
+@@ -179,6 +196,27 @@ void WifiBoard::StartWifiConfigMode() {
+     // initialize esp-blufi protocol
+     blufi.init();
+ #endif
++
++    if (show_hermes_wifi_failure) {
++        Application::GetInstance().Schedule([]() {
++            auto display = Board::GetInstance().GetDisplay();
++            if (display == nullptr) {
++                return;
++            }
++
++            std::string message = BuildHermesWifiErrorMessage();
++            auto& wifi_manager = WifiManager::GetInstance();
++            if (wifi_manager.IsConfigMode()) {
++                message += " Setup hotspot: ";
++                message += wifi_manager.GetApSsid();
++                message += " ";
++                message += wifi_manager.GetApWebUrl();
++            }
++            display->SetEmotion("sad");
++            display->SetChatMessage("system", message.c_str());
++        });
++    }
++
+ #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
+     // Start acoustic provisioning task
+     auto codec = Board::GetInstance().GetAudioCodec();
 diff --git a/main/ota.cc b/main/ota.cc
 index bcc0dc5..6ef1f11 100644
 --- a/main/ota.cc

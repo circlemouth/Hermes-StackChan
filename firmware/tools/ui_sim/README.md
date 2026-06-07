@@ -105,7 +105,7 @@ Simulator-only debug events:
 ]
 ```
 
-Supported `app_ready_state` values are `ready`, `missing_url`, and `wifi_missing`. `ready` runs the Hermes avatar handoff path. `clear_preview` and `clear_notification` remove simulator overlays explicitly.
+Supported `app_ready_state` values are `ready`, `missing_url`, `wifi_missing`, `wifi_connect_failed`, `endpoint_unreachable`, `endpoint_timeout`, and `ai_server_timeout`. `ready` runs the Hermes avatar handoff path. `clear_preview` and `clear_notification` remove simulator overlays explicitly.
 
 For the suspected "HERMES app opens but the face is not drawn" regression, run:
 

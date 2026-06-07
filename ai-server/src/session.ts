@@ -207,7 +207,20 @@ const AUTO_LED_CONFIG = readAutoLedConfig()
 const MAX_SPEECH_TEXT_CHARS = SPEECH_SEGMENTATION_CONFIG.maxSpeechChars
 const MCP_REQUEST_TIMEOUT_MS = 10_000
 const PROCESSING_KEEPALIVE_MS = 10_000
-const PROCESS_ERROR_SPEECH = '返答の処理に時間がかかっています。もう一度短く話してください。'
+const PROCESS_ERROR_SPEECH = '返答処理でエラーが起きました。設定とサーバーログを確認してください。'
+const PROCESS_ERROR_ALERT_MAX_CHARS = 260
+
+function compactErrorForBubble(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error)
+    const compact = raw.replace(/\s+/g, ' ').trim()
+    if (!compact) return 'unknown error'
+    if (compact.length <= PROCESS_ERROR_ALERT_MAX_CHARS) return compact
+    return `${compact.slice(0, PROCESS_ERROR_ALERT_MAX_CHARS - 3)}...`
+}
+
+function buildProcessingErrorAlertMessage(error: unknown): string {
+    return `HERMES AI server error: ${compactErrorForBubble(error)}. Check ai-server logs, Hermes Dashboard, and model/API settings.`
+}
 type AutoLedState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error'
 
 type PendingMcpRequest = {
@@ -529,10 +542,12 @@ export class Session {
         this.process().catch(async (err) => {
             console.error(`[session ${this.sessionId}] process error:`, err)
             this.setAutoLedState('error')
+            this.sendProcessingErrorAlert(err)
             if (this.state === 'processing') {
                 await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.error').catch((error) => {
                     console.error(`[session ${this.sessionId}] error speech failed:`, error)
                 })
+                this.sendProcessingErrorAlert(err)
             }
         }).finally(() => {
             if (this.state === 'processing') {
@@ -691,10 +706,12 @@ export class Session {
         this.processFollowup(prompt).catch(async (err) => {
             console.error(`[session ${this.sessionId}] follow-up error:`, err)
             this.setAutoLedState('error')
+            this.sendProcessingErrorAlert(err)
             if (this.state === 'processing') {
                 await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.followup.error').catch((error) => {
                     console.error(`[session ${this.sessionId}] follow-up error speech failed:`, error)
                 })
+                this.sendProcessingErrorAlert(err)
             }
         }).finally(() => {
             this.followupRunning = false
@@ -897,6 +914,15 @@ export class Session {
             return
         }
         pending.resolve(payload['result'])
+    }
+
+    private sendProcessingErrorAlert(error: unknown): void {
+        this.sendJson({
+            type: 'alert',
+            status: 'HERMES AI ERROR',
+            message: buildProcessingErrorAlertMessage(error),
+            emotion: 'sad',
+        })
     }
 
     private sendJson(obj: Record<string, unknown>): void {
