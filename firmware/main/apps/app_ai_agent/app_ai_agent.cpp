@@ -82,28 +82,26 @@ void AppAiAgent::onOpen()
     ESP_LOGI(TAG, "HERMES explicit open");
 
     std::string websocket_url = get_websocket_url();
-    bool has_wifi_config      = GetHAL().isAppConfiged();
 
     // HERMES handoff is display-sensitive on CoreS3/StackChan: SD and LCD share
-    // SPI/GPIO35. Keep SD access out of this path so LVGL can flush reliably.
-    ESP_LOGI(TAG, "SD config import is disabled on HERMES open to protect shared LCD/SD SPI bus");
-    ESP_LOGI(TAG, "SD config import skipped on HERMES open: websocket_url_configured=%d, wifi_configured=%d",
-             !websocket_url.empty(), has_wifi_config);
-
-    const WifiStatus wifi_status = GetHAL().getWifiStatus();
-    has_wifi_config             = GetHAL().isAppConfiged();
+    // SPI/GPIO35. SD config is always loaded during HAL boot before LCD init,
+    // so keep SD access out of this path.
+    const bool has_sd_config_error = GetHAL().hasSdConfigError();
+    const WifiStatus wifi_status   = GetHAL().getWifiStatus();
+    const bool has_wifi_config     = GetHAL().hasSavedWifiCredentials();
 
     const bool has_websocket_url      = !websocket_url.empty();
     const bool is_wifi_connected      = wifi_status != WifiStatus::None;
     const bool wifi_ready_for_runtime = is_wifi_connected || has_wifi_config;
-    const bool is_hermes_start_ready  = has_websocket_url && wifi_ready_for_runtime;
+    const bool is_hermes_start_ready  = !has_sd_config_error && has_websocket_url && wifi_ready_for_runtime;
     const std::string scheme          = websocket_scheme(websocket_url);
 
+    ESP_LOGI(TAG, "SD config autoload result: error=%d", has_sd_config_error);
     ESP_LOGI(TAG, "websocket_url configured=%d, length=%u, scheme=%s", has_websocket_url,
              static_cast<unsigned>(websocket_url.length()), scheme.c_str());
     ESP_LOGI(TAG, "Wi-Fi status=%s, wifi_configured=%d", wifi_status_to_string(wifi_status), has_wifi_config);
-    ESP_LOGI(TAG, "Hermes start readiness: websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
-             has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
+    ESP_LOGI(TAG, "Hermes start readiness: sd_error=%d, websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
+             has_sd_config_error, has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
 
     if (is_hermes_start_ready) {
         // Mooncake apps are stopped before the Hermes bridge runtime starts, so
@@ -114,11 +112,17 @@ void AppAiAgent::onOpen()
         return;
     }
 
-    const char* status_text = "Connecting to Hermes bridge";
-    if (websocket_url.empty()) {
-        status_text = "Bridge URL missing\nUse Setup > Load SD Config";
+    std::string status_text = "Connecting to Hermes bridge";
+    if (has_sd_config_error) {
+        status_text = "SD config error\nCheck config.json";
+        const std::string detail = GetHAL().getLastSdConfigError();
+        if (!detail.empty()) {
+            ESP_LOGW(TAG, "SD config error detail: %s", detail.c_str());
+        }
+    } else if (websocket_url.empty()) {
+        status_text = "Bridge URL missing\nCheck SD config";
     } else if (!wifi_ready_for_runtime) {
-        status_text = "Wi-Fi not connected";
+        status_text = "Wi-Fi settings missing\nCheck SD config";
     }
 
     {
@@ -150,7 +154,7 @@ void AppAiAgent::onOpen()
         lv_label_set_long_mode(_status->get(), LV_LABEL_LONG_WRAP);
         _status->align(LV_ALIGN_TOP_MID, 0, 118);
         _status->setTextAlign(LV_TEXT_ALIGN_CENTER);
-        _status->setText(status_text);
+        _status->setText(status_text.c_str());
 
         _device_id = std::make_unique<Label>(_panel->get());
         _device_id->setTextFont(&lv_font_montserrat_14);
@@ -165,8 +169,8 @@ void AppAiAgent::onOpen()
     }
 
     if (!is_hermes_start_ready) {
-        ESP_LOGW(TAG, "Hermes start deferred: websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
-                 has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
+        ESP_LOGW(TAG, "Hermes start deferred: sd_error=%d, websocket_url_configured=%d, wifi_status=%s, wifi_configured=%d",
+                 has_sd_config_error, has_websocket_url, wifi_status_to_string(wifi_status), has_wifi_config);
         return;
     }
 }

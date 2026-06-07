@@ -14,8 +14,10 @@
 #include <sdmmc_cmd.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_attr.h>
 #include <esp_rom_gpio.h>
 #include <soc/spi_periph.h>
+#include "sdkconfig.h"
 
 static constexpr const char* TAG = "HAL-SdConfig";
 
@@ -34,6 +36,7 @@ static constexpr const char* SD_BOOT_IMPORT_PENDING_KEY = "boot_import";
 
 static sdmmc_card_t* s_sd_card = nullptr;
 static bool s_boot_sd_bus_initialized = false;
+RTC_DATA_ATTR static bool s_skip_next_sd_config_autoload = false;
 
 static void prepare_shared_spi_for_sd()
 {
@@ -291,28 +294,97 @@ sd_config::LoadResult Hal::loadConfigFromSdCard(std::function<void(std::string_v
     return result;
 }
 
+static std::string join_imported_keys(const std::vector<std::string>& keys)
+{
+    std::string joined;
+    for (const auto& key : keys) {
+        if (!joined.empty()) {
+            joined += ",";
+        }
+        joined += key;
+        if (joined.size() > 900) {
+            joined += ",...";
+            break;
+        }
+    }
+    return joined;
+}
+
+static bool is_missing_sd_or_config(const sd_config::LoadResult& result)
+{
+    if (result.config_file_found) {
+        return false;
+    }
+    return result.error == "SD card not detected" ||
+           result.error.find("Cannot open config.json") != std::string::npos;
+}
+
+static void persist_sd_config_boot_result(const sd_config::LoadResult& result)
+{
+    Settings settings(SD_BOOT_IMPORT_NS, true);
+    settings.SetBool("last_success", result.success);
+    settings.SetBool("last_found", result.config_file_found);
+    settings.SetInt("last_count", static_cast<int>(result.imported_keys.size()));
+    settings.SetString("last_keys", join_imported_keys(result.imported_keys));
+
+    if (result.success) {
+        settings.SetString("last_status", "applied");
+        settings.SetString("last_error", "");
+        return;
+    }
+
+    // SD未挿入、またはSDにconfig.jsonが無い場合はNVS fallbackを許可する。
+    // HERMESアプリでブロックすべきエラーとしては扱わない。
+    if (is_missing_sd_or_config(result)) {
+        settings.SetString("last_status", result.error == "SD card not detected" ? "no_sd" : "no_config");
+        settings.SetString("last_error", "");
+        return;
+    }
+
+    settings.SetString("last_status", "error");
+    settings.SetString("last_error", result.error);
+}
+
+static bool sd_config_access_requires_clean_reboot(const sd_config::LoadResult& result)
+{
+    // SD未挿入なら probe だけで終了しているので通常起動を継続する。
+    // SDがmountされた、config.jsonを開いた、またはSD上のconfig探索まで進んだ場合は、
+    // LCD/SPI3をクリーンな状態に戻すため一度だけ再起動する。
+    return result.error != "SD card not detected";
+}
+
 void Hal::requestSdConfigBootImport()
 {
-    mclog::tagInfo(TAG, "requesting boot-time SD config import");
+    mclog::tagInfo(TAG, "requesting immediate SD config reload on next boot");
+    s_skip_next_sd_config_autoload = false;
     Settings settings(SD_BOOT_IMPORT_NS, true);
     settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 1);
     delay(100);
     esp_restart();
 }
 
-void Hal::handlePendingSdConfigBootImport()
+void Hal::handleBootSdConfigAutoload()
 {
-    Settings settings(SD_BOOT_IMPORT_NS, false);
-    if (settings.GetInt(SD_BOOT_IMPORT_PENDING_KEY, 0) != 1) {
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN || CONFIG_BOARD_TYPE_M5STACK_CORE_S3
+    {
+        // 旧実装の予約フラグ、および Setup > Load SD Config の手動要求を消費する。
+        Settings settings(SD_BOOT_IMPORT_NS, true);
+        if (settings.GetInt(SD_BOOT_IMPORT_PENDING_KEY, 0) == 1) {
+            mclog::tagInfo(TAG, "manual SD config reload flag consumed");
+            settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
+            s_skip_next_sd_config_autoload = false;
+        }
+    }
+
+    if (s_skip_next_sd_config_autoload) {
+        // 前回のbootでSDを読み、SPI/LCD保護のため自分で再起動した直後。
+        // このbootではSDを再度触らず通常起動へ進む。
+        mclog::tagInfo(TAG, "skip SD config autoload once after clean reboot");
+        s_skip_next_sd_config_autoload = false;
         return;
     }
 
-    {
-        Settings write_settings(SD_BOOT_IMPORT_NS, true);
-        write_settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
-    }
-
-    mclog::tagInfo(TAG, "boot-time SD config import start before LCD init");
+    mclog::tagInfo(TAG, "boot-time SD config autoload start before LCD init");
 
     sd_config::LoadResult result;
     esp_err_t err = init_shared_spi_for_boot_sd();
@@ -323,14 +395,28 @@ void Hal::handlePendingSdConfigBootImport()
         result.error = std::string("SPI init failed: ") + esp_err_to_name(err);
     }
 
+    persist_sd_config_boot_result(result);
+
     if (result.success) {
-        mclog::tagInfo(TAG, "boot-time SD config import succeeded; imported_keys={}", result.imported_keys.size());
+        mclog::tagInfo(TAG, "boot-time SD config autoload applied; imported_keys={}, warnings={}",
+                       result.imported_keys.size(), result.warnings.size());
+    } else if (is_missing_sd_or_config(result)) {
+        mclog::tagInfo(TAG, "boot-time SD config autoload skipped; {}", result.error);
     } else {
-        mclog::tagWarn(TAG, "boot-time SD config import failed; error={}", result.error);
+        mclog::tagWarn(TAG, "boot-time SD config autoload failed; error={}", result.error);
+    }
+
+    if (!sd_config_access_requires_clean_reboot(result)) {
+        return;
     }
 
     // The display has not been initialized yet, but SD used the same physical
     // pins. Reboot once more so normal startup owns SPI3 from a clean state.
+    s_skip_next_sd_config_autoload = true;
     delay(250);
     esp_restart();
+#else
+    Settings settings(SD_BOOT_IMPORT_NS, true);
+    settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
+#endif
 }

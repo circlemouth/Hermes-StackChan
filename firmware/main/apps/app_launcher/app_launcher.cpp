@@ -29,9 +29,13 @@ void AppLauncher::onLauncherOpen()
 
     LvglLockGuard lock;
 
+    if (!_startup_checked && GetHAL().hasSdConfigError()) {
+        mclog::tagWarn(getAppInfo().name, "SD config error: {}", GetHAL().getLastSdConfigError());
+    }
+
     if (!_startup_checked && !GetHAL().isAppConfiged()) {
         mclog::tagInfo(getAppInfo().name,
-                       "App config missing; SD config auto-import is disabled. Use Setup > Load SD Config.");
+                       "App config missing; SD config is auto-loaded on boot. Check /config.json or use Setup > Change Wi-Fi.");
     }
 
     const bool need_app_setup   = !GetHAL().isAppConfiged();
@@ -124,7 +128,8 @@ void AppLauncher::screensaver_update()
 bool AppLauncher::try_auto_open_hermes()
 {
 #if CONFIG_HERMES_AUTOSTART
-    if (!_view || _hermes_auto_open_attempted || !GetHAL().isAppConfiged()) {
+    if (!_view || _hermes_auto_open_attempted || !GetHAL().isAppConfiged() ||
+        GetHAL().hasSdConfigError() || !GetHAL().hasHermesBridgeUrl()) {
         return false;
     }
 

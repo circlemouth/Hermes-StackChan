@@ -78,7 +78,7 @@ void SdConfigWorker::setup_start_ui()
     _label_detail->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _label_detail->setWidth(280);
     _label_detail->align(LV_ALIGN_TOP_MID, 0, 100);
-    _label_detail->setText("SD shares LCD pins.\nDevice restarts before reading.");
+    _label_detail->setText("SD config is auto-loaded on boot.\nUse this to restart and reload now.");
 
     _btn_back = std::make_unique<Button>(_panel->get());
     apply_button_common_style(*_btn_back);
@@ -119,7 +119,7 @@ void SdConfigWorker::load_config()
     _loading_label->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _loading_label->align(LV_ALIGN_CENTER, 0, 0);
     _loading_label->setWidth(280);
-    _loading_label->setText("Restarting...\nSD will be read before LCD starts.");
+    _loading_label->setText("Restarting...\nSD config reloads before LCD starts.");
 
     // 2. LVGL を一瞬アンロックしてローディング画面をレンダリングさせる。
     //    この画面から SD へは触らず、boot-time import を予約して再起動する。
@@ -130,8 +130,8 @@ void SdConfigWorker::load_config()
 
     // CoreS3 / StackChan shares LCD DC and SD MISO on GPIO35. Hot-inserting SD
     // while the LCD is active can already disturb the panel, so do not mount SD
-    // from this UI. Reboot first, import config before LCD init, then reboot
-    // again into the normal Launcher/HERMES flow.
+    // from this UI. Reboot first, reload config before LCD init, then reboot
+    // once more if SD access happened so the normal Launcher/HERMES flow owns SPI3.
     GetHAL().requestSdConfigBootImport();
 }
 

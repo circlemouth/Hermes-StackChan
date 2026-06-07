@@ -174,6 +174,10 @@ public:
     bool isBleConnected();
     void startAppConfigServer();
     bool isAppConfiged();
+    bool hasSavedWifiCredentials();
+    bool hasHermesBridgeUrl();
+    bool hasSdConfigError();
+    std::string getLastSdConfigError();
     void resetAppConfiged();
     bool isServoSetupDone();
     void setServoSetupDone(bool done);
@@ -219,8 +223,8 @@ public:
     /* ------------------------------ SD Config --------------------------------- */
     // WARNING: CoreS3 / StackChan shares SPI3 and GPIO35 between LCD and SD.
     // Do not call this during Launcher startup, HERMES app open, display handoff,
-    // or any active LCD UI flow. Setup > Load SD Config uses requestSdConfigBootImport()
-    // so SD is mounted before LCD initialization. New callers must follow AGENTS.md
+    // or any active LCD UI flow. SD config autoload and Setup > Load SD Config
+    // mount SD before LCD initialization. New callers must follow AGENTS.md
     // shared SPI rules.
     sd_config::LoadResult loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
     void requestSdConfigBootImport();
@@ -244,7 +248,7 @@ private:
     void io_expander_init();
     void imu_init();
     void rtc_init();
-    void handlePendingSdConfigBootImport();
+    void handleBootSdConfigAutoload();
 };
 
 Hal& GetHAL();

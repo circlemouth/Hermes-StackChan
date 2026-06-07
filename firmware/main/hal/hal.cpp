@@ -55,7 +55,7 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
-    handlePendingSdConfigBootImport();
+    handleBootSdConfigAutoload();
 
     hermes_board_init();
     robot_mcp_init();

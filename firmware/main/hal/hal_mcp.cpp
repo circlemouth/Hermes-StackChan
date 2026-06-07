@@ -179,6 +179,11 @@ void Hal::robot_mcp_init()
                            cJSON_AddStringToObject(result, "wifi_status",
                                                    wifi_status_to_string(GetHAL().getWifiStatus()));
                            cJSON_AddBoolToObject(result, "wifi_configured", GetHAL().isAppConfiged());
+                           cJSON_AddBoolToObject(result, "sd_config_error", GetHAL().hasSdConfigError());
+                           if (GetHAL().hasSdConfigError()) {
+                               cJSON_AddStringToObject(result, "sd_config_error_detail",
+                                                       GetHAL().getLastSdConfigError().c_str());
+                           }
                            cJSON_AddNumberToObject(result, "speaker_volume", GetHAL().getSpeakerVolume());
                            cJSON_AddNumberToObject(result, "backlight_brightness", GetHAL().getBackLightBrightness());
 #if CONFIG_HERMES_AUTOSTART

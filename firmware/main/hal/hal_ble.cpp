@@ -279,6 +279,33 @@ void Hal::startAppConfigServer()
     mooncake::GetMooncake().extensionManager()->createAbility(std::make_unique<AppConfigServerWorker>());
 }
 
+bool Hal::hasSavedWifiCredentials()
+{
+    return !SsidManager::GetInstance().GetSsidList().empty();
+}
+
+bool Hal::hasHermesBridgeUrl()
+{
+    Settings ws_settings("websocket", false);
+    std::string websocket_url = ws_settings.GetString("url_override", "");
+    if (websocket_url.empty()) {
+        websocket_url = ws_settings.GetString("url", "");
+    }
+    return !websocket_url.empty();
+}
+
+bool Hal::hasSdConfigError()
+{
+    Settings settings("sd_config", false);
+    return !settings.GetString("last_error", "").empty();
+}
+
+std::string Hal::getLastSdConfigError()
+{
+    Settings settings("sd_config", false);
+    return settings.GetString("last_error", "");
+}
+
 bool Hal::isAppConfiged()
 {
     Settings settings("app_config", false);
@@ -286,7 +313,7 @@ bool Hal::isAppConfiged()
         return true;
     }
 
-    const bool has_saved_wifi = !SsidManager::GetInstance().GetSsidList().empty();
+    const bool has_saved_wifi = hasSavedWifiCredentials();
     if (has_saved_wifi) {
         mclog::tagWarn(_tag, "app_config flag is missing but saved Wi-Fi credentials exist; treating app as configured");
         Settings write_settings("app_config", true);
