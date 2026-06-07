@@ -85,7 +85,7 @@ enum class MicTestStatus {
  */
 class BootLogo {
 public:
-    BootLogo()
+    explicit BootLogo(const char* message = "Starting up ...")
     {
         _panel = std::make_unique<uitk::lvgl_cpp::Container>(lv_screen_active());
         _panel->setSize(320, 240);
@@ -104,7 +104,7 @@ public:
         _label_msg->setTextFont(&lv_font_montserrat_16);
         _label_msg->setTextColor(lv_color_hex(0xBFBFBF));
         _label_msg->align(LV_ALIGN_CENTER, 0, 14);
-        _label_msg->setText("Starting up ...");
+        _label_msg->setText(message != nullptr ? message : "Starting up ...");
 
         _label_version = std::make_unique<uitk::lvgl_cpp::Label>(_panel->get());
         _label_version->setTextFont(&lv_font_montserrat_14);
@@ -135,6 +135,7 @@ public:
     std::array<uint8_t, 6> getFactoryMac();
     std::string getFactoryMacString(std::string divider = "");
     void reboot();
+    void requestLauncherReturnReboot();
     void updateHeapStatusLog();
     uint8_t getBatteryLevel();
     bool isBatteryCharging();
@@ -147,6 +148,7 @@ public:
     void lvglUnlock();
     void setBackLightBrightness(uint8_t brightness, bool permanent = false);
     uint8_t getBackLightBrightness();
+    const char* getBootLogoMessage() const;
 
     /* ----------------------------- Hermes Bridge ----------------------------- */
     void requestHermesStart()
@@ -228,6 +230,7 @@ public:
     // shared SPI rules.
     sd_config::LoadResult loadConfigFromSdCard(std::function<void(std::string_view)> onLog = nullptr);
     void requestSdConfigBootImport();
+    void requestSkipNextBootSdConfigAutoload();
 
     /* ---------------------------------- Audio --------------------------------- */
     void setSpeakerVolume(uint8_t volume, bool permanent = false);
@@ -238,6 +241,7 @@ public:
 
 private:
     bool _hermes_start_requested = false;
+    bool _launcher_return_boot_marker = false;
 
     void hermes_board_init();
     void lvgl_init();
@@ -249,6 +253,7 @@ private:
     void imu_init();
     void rtc_init();
     void handleBootSdConfigAutoload();
+    void consumeLauncherReturnRebootMarker();
 };
 
 Hal& GetHAL();

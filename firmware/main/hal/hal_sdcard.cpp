@@ -362,6 +362,22 @@ void Hal::requestSdConfigBootImport()
     esp_restart();
 }
 
+void Hal::requestSkipNextBootSdConfigAutoload()
+{
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN || CONFIG_BOARD_TYPE_M5STACK_CORE_S3
+    // HERMES home return is a UX/safety reboot, not a configuration import.
+    // The next boot must avoid SD probing because CoreS3 / StackChan share
+    // SPI3 and GPIO35 between LCD and SD. Keep this helper NVS-only; do not
+    // touch SD or LCD pins here.
+    mclog::tagInfo(TAG, "requesting skip of next boot-time SD config autoload");
+    Settings settings(SD_BOOT_IMPORT_NS, true);
+    settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
+    settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 1);
+#else
+    mclog::tagInfo(TAG, "skip next boot-time SD config autoload request ignored on non shared-SPI board");
+#endif
+}
+
 void Hal::handleBootSdConfigAutoload()
 {
 #if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN || CONFIG_BOARD_TYPE_M5STACK_CORE_S3
@@ -373,9 +389,9 @@ void Hal::handleBootSdConfigAutoload()
             settings.SetInt(SD_BOOT_IMPORT_PENDING_KEY, 0);
             settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
         } else if (settings.GetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0) == 1) {
-            // 前回のbootでSDを読み、SPI/LCD保護のため自分で再起動した直後。
+            // HERMES home return、またはSD/LCD保護のためのclean reboot直後。
             // このbootではSDを再度触らず通常起動へ進む。
-            mclog::tagInfo(TAG, "skip SD config autoload once after clean reboot");
+            mclog::tagInfo(TAG, "skip SD config autoload once due to protected boot marker");
             settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
             return;
         }

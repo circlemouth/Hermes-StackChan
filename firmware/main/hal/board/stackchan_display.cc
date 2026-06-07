@@ -233,7 +233,7 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         uitk::lvgl_cpp::ScreenActive screen;
         screen.setBgColor(lv_color_hex(0x000000));
     }
-    GetHAL().bootLogo = std::make_unique<BootLogo>();
+    GetHAL().bootLogo = std::make_unique<BootLogo>(GetHAL().getBootLogoMessage());
     Unlock();
 
     // Robot will be created later in the Hermes runtime UI.

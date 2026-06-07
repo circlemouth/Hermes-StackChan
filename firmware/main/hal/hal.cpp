@@ -5,13 +5,20 @@
  */
 #include "hal.h"
 #include <memory>
+#include <atomic>
 #include <mooncake_log.h>
 #include <nvs_flash.h>
+#include <settings.h>
 #include <driver/gpio.h>
 #include "sdkconfig.h"
 
 static std::unique_ptr<Hal> _hal_instance;
 static const std::string_view _tag = "HAL";
+static constexpr const char* _boot_logo_default_message         = "Starting up ...";
+static constexpr const char* _boot_logo_launcher_return_message = "Returning to Launcher...";
+static constexpr const char* _launcher_return_nvs_ns            = "launcher_ret";
+static constexpr const char* _launcher_return_pending_key       = "pending";
+static std::atomic_bool _launcher_return_reboot_requested{false};
 
 static void prepareSharedSpiPinsBeforeBoardInit()
 {
@@ -55,6 +62,7 @@ void Hal::init()
     }
     ESP_ERROR_CHECK(ret);
 
+    consumeLauncherReturnRebootMarker();
     handleBootSdConfigAutoload();
 
     hermes_board_init();
@@ -110,6 +118,27 @@ std::string Hal::getFactoryMacString(std::string divider)
 void Hal::reboot()
 {
     esp_restart();
+}
+
+void Hal::consumeLauncherReturnRebootMarker()
+{
+    Settings settings(_launcher_return_nvs_ns, true);
+    _launcher_return_boot_marker = settings.GetInt(_launcher_return_pending_key, 0) == 1;
+    if (_launcher_return_boot_marker) {
+        mclog::tagInfo(_tag, "Launcher return boot marker consumed");
+        settings.SetInt(_launcher_return_pending_key, 0);
+    }
+}
+
+const char* Hal::getBootLogoMessage() const
+{
+    return _launcher_return_boot_marker ? _boot_logo_launcher_return_message : _boot_logo_default_message;
+}
+
+static void mark_launcher_return_reboot_marker()
+{
+    Settings settings(_launcher_return_nvs_ns, true);
+    settings.SetInt(_launcher_return_pending_key, 1);
 }
 
 static void _confirm_ota_image_if_stable()
@@ -210,10 +239,103 @@ static void _stackchan_update_task(void* param)
         }
 
         if (launcher_reboot_requested) {
-            ESP_LOGI("HAL", "HERMES home indicator requested Launcher reboot");
-            GetHAL().reboot();
+            ESP_LOGI("HAL", "HERMES home indicator requested Launcher return reboot");
+            launcher_reboot_requested = false;
+            GetHAL().requestLauncherReturnReboot();
         }
     }
+}
+
+static void show_launcher_return_reboot_overlay_locked()
+{
+    view::destroy_home_indicator();
+    view::destroy_status_bar();
+    GetHAL().bootLogo.reset();
+
+    lv_disp_t* display = hal_bridge::display_get_lvgl_display();
+    if (display == nullptr) {
+        display = lv_display_get_default();
+    }
+    if (display == nullptr) {
+        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: LVGL display is null");
+        return;
+    }
+
+    lv_display_set_default(display);
+
+    lv_obj_t* top_layer = lv_display_get_layer_top(display);
+    if (top_layer != nullptr) {
+        lv_obj_clean(top_layer);
+    }
+
+    lv_obj_t* sys_layer = lv_display_get_layer_sys(display);
+    if (sys_layer != nullptr) {
+        lv_obj_clean(sys_layer);
+    }
+
+    lv_obj_t* parent = top_layer;
+    if (parent == nullptr) {
+        parent = lv_display_get_screen_active(display);
+    }
+    if (parent == nullptr) {
+        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: LVGL parent is null");
+        return;
+    }
+
+    lv_obj_t* overlay = lv_obj_create(parent);
+    if (overlay == nullptr) {
+        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: create failed");
+        return;
+    }
+
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, 320, 240);
+    lv_obj_align(overlay, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_FLOATING);
+
+    lv_obj_t* title = lv_label_create(overlay);
+    lv_label_set_text(title, "STACKCHAN");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
+
+    lv_obj_t* message = lv_label_create(overlay);
+    lv_label_set_text(message, _boot_logo_launcher_return_message);
+    lv_obj_set_style_text_font(message, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(message, lv_color_hex(0xBFBFBF), LV_PART_MAIN);
+    lv_obj_align(message, LV_ALIGN_CENTER, 0, 18);
+
+    lv_obj_invalidate(overlay);
+    lv_refr_now(display);
+}
+
+void Hal::requestLauncherReturnReboot()
+{
+    if (_launcher_return_reboot_requested.exchange(true)) {
+        ESP_LOGW(_tag.data(), "Launcher return reboot already requested; ignoring duplicate request");
+        return;
+    }
+
+    ESP_LOGI(_tag.data(), "Launcher return reboot requested from HERMES home indicator");
+
+    tools::on_reminder_triggered().clear();
+    mark_launcher_return_reboot_marker();
+
+    // This only writes an NVS marker. It intentionally does not touch SD while
+    // the LCD is active on the shared CoreS3 / StackChan SPI3 bus.
+    requestSkipNextBootSdConfigAutoload();
+
+    {
+        LvglLockGuard lock;
+        show_launcher_return_reboot_overlay_locked();
+    }
+
+    delay(150);
+    esp_restart();
 }
 
 void Hal::startHermes()
@@ -397,7 +519,6 @@ void Hal::lvgl_init()
 /* -------------------------------------------------------------------------- */
 /*                                 Warm Reboot                                */
 /* -------------------------------------------------------------------------- */
-#include <settings.h>
 #include <string_view>
 
 static std::string_view _warm_boot_nvs_ns  = "warm_boot";
