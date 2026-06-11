@@ -208,18 +208,23 @@ const MAX_SPEECH_TEXT_CHARS = SPEECH_SEGMENTATION_CONFIG.maxSpeechChars
 const MCP_REQUEST_TIMEOUT_MS = 10_000
 const PROCESSING_KEEPALIVE_MS = 10_000
 const PROCESS_ERROR_SPEECH = '返答処理でエラーが起きました。設定とサーバーログを確認してください。'
-const PROCESS_ERROR_ALERT_MAX_CHARS = 260
+const PROCESS_ERROR_ALERT_MAX_CHARS = 120
+
+function isMissingSttProviderError(message: string): boolean {
+    return /No STT provider available/i.test(message)
+}
 
 function compactErrorForBubble(error: unknown): string {
     const raw = error instanceof Error ? error.message : String(error)
     const compact = raw.replace(/\s+/g, ' ').trim()
     if (!compact) return 'unknown error'
+    if (isMissingSttProviderError(compact)) return 'STT設定がありません。サーバー設定を確認してください。'
     if (compact.length <= PROCESS_ERROR_ALERT_MAX_CHARS) return compact
     return `${compact.slice(0, PROCESS_ERROR_ALERT_MAX_CHARS - 3)}...`
 }
 
 function buildProcessingErrorAlertMessage(error: unknown): string {
-    return `HERMES AI server error: ${compactErrorForBubble(error)}. Check ai-server logs, Hermes Dashboard, and model/API settings.`
+    return `HERMES AI server error: ${compactErrorForBubble(error)}`
 }
 type AutoLedState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error'
 

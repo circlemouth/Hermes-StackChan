@@ -111,6 +111,39 @@ test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus 
     session.close()
 })
 
+test('Session shows a short chat bubble when STT is not configured', async () => {
+    const ws = new MockWebSocket()
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: async () => Buffer.alloc(320),
+        transcribeWav: async () => {
+            throw new Error(
+                'No STT provider available. Install faster-whisper for free local transcription, configure HERMES_LOCAL_STT_COMMAND or install a local whisper CLI, set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral Voxtral Transcribe.',
+            )
+        },
+        hermes: {
+            submitPrompt: async () => 'unused',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('error wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'alert'))
+
+    const alert = jsonMessages(ws).find((msg) => msg['type'] === 'alert')
+    assert.equal(alert?.['status'], 'HERMES AI ERROR')
+    assert.equal(alert?.['message'], 'HERMES AI server error: STT設定がありません。サーバー設定を確認してください。')
+
+    session.close()
+})
+
 
 test('Session speaks queued follow-up prompts when idle', async () => {
     const ws = new MockWebSocket()
