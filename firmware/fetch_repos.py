@@ -29,7 +29,7 @@ def clone_or_update_repo(
             if os.path.isabs(patch_path)
             else os.path.join(os.getcwd(), patch_path)
         )
-        # 使用 git apply --check 先检测补丁是否能应用，避免报错
+        # 使用 git apply --check 先检测补丁是否能应用，避免重复应用。
         check_result = subprocess.run(
             ["git", "-C", path, "apply", "--check", patch_full_path]
         )
@@ -37,7 +37,16 @@ def clone_or_update_repo(
             subprocess.run(["git", "-C", path, "apply", patch_full_path], check=True)
             print(f"Applied patch {patch_path} to {path}")
         else:
-            print(f"Patch {patch_path} cannot be applied cleanly to {path}, skipped.")
+            reverse_check_result = subprocess.run(
+                ["git", "-C", path, "apply", "--reverse", "--check", patch_full_path]
+            )
+            if reverse_check_result.returncode == 0:
+                print(f"Patch {patch_path} already applied to {path}")
+            else:
+                raise RuntimeError(
+                    f"Patch {patch_path} cannot be applied cleanly to {path}; "
+                    "the dependency may be partially patched or at an unexpected revision"
+                )
 
 
 def fetch_dependencies():
