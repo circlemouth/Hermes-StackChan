@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <cstring>
 #include <cctype>
+#include <string_view>
 
 static constexpr const char* TAG = "SdConfig";
 
@@ -173,6 +174,32 @@ static std::string get_string(cJSON* object, const char* key, const char* fallba
     return fallback ? fallback : "";
 }
 
+static std::string trim_ascii_space_and_control(std::string value)
+{
+    auto is_trim_char = [](unsigned char c) {
+        return c <= 0x20 || c == 0x7f;
+    };
+
+    while (!value.empty() && is_trim_char(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && is_trim_char(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+static std::string sanitize_config_string(std::string value)
+{
+    if (value.size() >= 3 &&
+        static_cast<unsigned char>(value[0]) == 0xef &&
+        static_cast<unsigned char>(value[1]) == 0xbb &&
+        static_cast<unsigned char>(value[2]) == 0xbf) {
+        value.erase(0, 3);
+    }
+    return trim_ascii_space_and_control(std::move(value));
+}
+
 static bool get_int(cJSON* object, const char* key, int& out)
 {
     if (!object || !cJSON_IsObject(object)) {
@@ -298,10 +325,10 @@ static std::string build_websocket_url_from_aiavatar_keys(cJSON* root, ConfigSna
 
 static void parse_websocket_config(cJSON* root, ConfigSnapshot& snapshot)
 {
-    std::string websocket_url = get_first_string(root, {"websocket_url", "bridge_url", "ws_url"});
+    std::string websocket_url = sanitize_config_string(get_first_string(root, {"websocket_url", "bridge_url", "ws_url"}));
     cJSON* websocket = cJSON_GetObjectItem(root, "websocket");
     if (websocket_url.empty() && websocket && cJSON_IsObject(websocket)) {
-        websocket_url = get_first_string(websocket, {"url", "websocket_url", "bridge_url"});
+        websocket_url = sanitize_config_string(get_first_string(websocket, {"url", "websocket_url", "bridge_url"}));
     }
     if (websocket_url.empty()) {
         websocket_url = build_websocket_url_from_aiavatar_keys(root, snapshot);
@@ -336,8 +363,8 @@ static void parse_websocket_config(cJSON* root, ConfigSnapshot& snapshot)
 
 static void parse_wifi_config(cJSON* root, ConfigSnapshot& snapshot)
 {
-    const std::string flat_ssid = get_nested_wifi_string(root, {"wifi_ssid"}, {"ssid"});
-    const std::string flat_pass = get_nested_wifi_string(root, {"wifi_password", "wifi_pass"}, {"password", "pass"});
+    const std::string flat_ssid = sanitize_config_string(get_nested_wifi_string(root, {"wifi_ssid"}, {"ssid"}));
+    const std::string flat_pass = sanitize_config_string(get_nested_wifi_string(root, {"wifi_password", "wifi_pass"}, {"password", "pass"}));
 
     cJSON* networks = cJSON_GetObjectItem(root, "wifi_networks");
     if (networks && cJSON_IsArray(networks)) {
@@ -350,9 +377,9 @@ static void parse_wifi_config(cJSON* root, ConfigSnapshot& snapshot)
             }
 
             WifiProfile profile;
-            profile.name = get_string(item, "name");
-            profile.ssid = get_string(item, "ssid");
-            profile.password = get_first_string(item, {"pass", "password"});
+            profile.name = sanitize_config_string(get_string(item, "name"));
+            profile.ssid = sanitize_config_string(get_string(item, "ssid"));
+            profile.password = sanitize_config_string(get_first_string(item, {"pass", "password"}));
 
             if (!profile.ssid.empty()) {
                 if (append_wifi_profile(snapshot, profile, fmt::format("wifi_networks[{}]", index).c_str())) {

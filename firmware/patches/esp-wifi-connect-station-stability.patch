@@ -1,0 +1,124 @@
+diff --git a/wifi_station.cc b/wifi_station.cc
+index 120886d..65cb49d 100644
+--- a/wifi_station.cc
++++ b/wifi_station.cc
+@@ -18,6 +18,75 @@
+ #define WIFI_EVENT_SCAN_DONE_BIT BIT2
+ #define MAX_RECONNECT_COUNT 5
+ 
++static const char* wifi_disconnect_reason_name(uint8_t reason) {
++    switch (reason) {
++        case WIFI_REASON_AUTH_EXPIRE:
++            return "AUTH_EXPIRE";
++        case WIFI_REASON_AUTH_LEAVE:
++            return "AUTH_LEAVE";
++        case WIFI_REASON_ASSOC_EXPIRE:
++            return "ASSOC_EXPIRE";
++        case WIFI_REASON_ASSOC_TOOMANY:
++            return "ASSOC_TOOMANY";
++        case WIFI_REASON_NOT_AUTHED:
++            return "NOT_AUTHED";
++        case WIFI_REASON_NOT_ASSOCED:
++            return "NOT_ASSOCED";
++        case WIFI_REASON_ASSOC_LEAVE:
++            return "ASSOC_LEAVE";
++        case WIFI_REASON_ASSOC_NOT_AUTHED:
++            return "ASSOC_NOT_AUTHED";
++        case WIFI_REASON_DISASSOC_PWRCAP_BAD:
++            return "DISASSOC_PWRCAP_BAD";
++        case WIFI_REASON_DISASSOC_SUPCHAN_BAD:
++            return "DISASSOC_SUPCHAN_BAD";
++        case WIFI_REASON_BSS_TRANSITION_DISASSOC:
++            return "BSS_TRANSITION_DISASSOC";
++        case WIFI_REASON_IE_INVALID:
++            return "IE_INVALID";
++        case WIFI_REASON_MIC_FAILURE:
++            return "MIC_FAILURE";
++        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
++            return "4WAY_HANDSHAKE_TIMEOUT";
++        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
++            return "GROUP_KEY_UPDATE_TIMEOUT";
++        case WIFI_REASON_IE_IN_4WAY_DIFFERS:
++            return "IE_IN_4WAY_DIFFERS";
++        case WIFI_REASON_GROUP_CIPHER_INVALID:
++            return "GROUP_CIPHER_INVALID";
++        case WIFI_REASON_PAIRWISE_CIPHER_INVALID:
++            return "PAIRWISE_CIPHER_INVALID";
++        case WIFI_REASON_AKMP_INVALID:
++            return "AKMP_INVALID";
++        case WIFI_REASON_UNSUPP_RSN_IE_VERSION:
++            return "UNSUPP_RSN_IE_VERSION";
++        case WIFI_REASON_INVALID_RSN_IE_CAP:
++            return "INVALID_RSN_IE_CAP";
++        case WIFI_REASON_802_1X_AUTH_FAILED:
++            return "802_1X_AUTH_FAILED";
++        case WIFI_REASON_CIPHER_SUITE_REJECTED:
++            return "CIPHER_SUITE_REJECTED";
++        case WIFI_REASON_BEACON_TIMEOUT:
++            return "BEACON_TIMEOUT";
++        case WIFI_REASON_NO_AP_FOUND:
++            return "NO_AP_FOUND";
++        case WIFI_REASON_AUTH_FAIL:
++            return "AUTH_FAIL";
++        case WIFI_REASON_ASSOC_FAIL:
++            return "ASSOC_FAIL";
++        case WIFI_REASON_HANDSHAKE_TIMEOUT:
++            return "HANDSHAKE_TIMEOUT";
++        case WIFI_REASON_CONNECTION_FAIL:
++            return "CONNECTION_FAIL";
++        case WIFI_REASON_AP_TSF_RESET:
++            return "AP_TSF_RESET";
++        case WIFI_REASON_ROAMING:
++            return "ROAMING";
++        default:
++            return "UNKNOWN";
++    }
++}
++
+ WifiStation::WifiStation() {
+     // Create the event group
+     event_group_ = xEventGroupCreate();
+@@ -135,6 +204,8 @@ void WifiStation::Start() {
+                                                         &instance_got_ip_));
+     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+     ESP_ERROR_CHECK(esp_wifi_start());
++    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
++    ESP_LOGI(TAG, "WiFi power save disabled for stable StackChan bridge connection");
+ 
+     if (max_tx_power_ != 0) {
+         ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(max_tx_power_));
+@@ -221,12 +292,23 @@ void WifiStation::StartConnect() {
+     bzero(&wifi_config, sizeof(wifi_config));
+     strcpy((char *)wifi_config.sta.ssid, ap_record.ssid.c_str());
+     strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
++    wifi_config.sta.listen_interval = 0;
++    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
++    wifi_config.sta.pmf_cfg.capable = true;
++    wifi_config.sta.pmf_cfg.required = false;
+     if (remember_bssid_) {
+         wifi_config.sta.channel = ap_record.channel;
+         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
+         wifi_config.sta.bssid_set = true;
+     }
+-    wifi_config.sta.listen_interval = 10;
++    ESP_LOGI(TAG,
++             "Connecting with saved WiFi profile: ssid_len=%u password_len=%u channel=%d authmode=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x",
++             static_cast<unsigned>(ap_record.ssid.length()),
++             static_cast<unsigned>(ap_record.password.length()),
++             ap_record.channel,
++             ap_record.authmode,
++             ap_record.bssid[0], ap_record.bssid[1], ap_record.bssid[2],
++             ap_record.bssid[3], ap_record.bssid[4], ap_record.bssid[5]);
+     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+ 
+     reconnect_count_ = 0;
+@@ -323,7 +405,8 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
+         bool was_connected = this_->was_connected_;
+         this_->was_connected_ = false;
+         wifi_event_sta_disconnected_t* event = static_cast<wifi_event_sta_disconnected_t*>(event_data);
+-        ESP_LOGI(TAG, "WiFi disconnected, reason: %d", event->reason);
++        ESP_LOGI(TAG, "WiFi disconnected, reason: %d (%s)", event->reason,
++                 wifi_disconnect_reason_name(event->reason));
+         if (was_connected && this_->on_disconnected_) {
+             this_->on_disconnected_(event->reason);
+         }
