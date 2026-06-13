@@ -13,6 +13,7 @@ type DashboardMock = {
 
 type DashboardMockOptions = {
     completePrompt?: boolean
+    promptEvents?: Array<Record<string, unknown>>
 }
 
 const originalEnv = {
@@ -65,6 +66,16 @@ async function startDashboardMock(html: string, options: DashboardMockOptions = 
             if (message['method'] === 'prompt.submit') {
                 send(ws, { jsonrpc: '2.0', id: message['id'], result: { status: 'streaming' } })
                 if (!completePrompt) return
+                if (options.promptEvents) {
+                    for (const event of options.promptEvents) {
+                        send(ws, {
+                            jsonrpc: '2.0',
+                            method: 'event',
+                            params: event,
+                        })
+                    }
+                    return
+                }
                 send(ws, {
                     jsonrpc: '2.0',
                     method: 'event',
@@ -170,6 +181,56 @@ test('HermesClient connects to Dashboard /api/ws, creates a separate session, su
     assert.deepEqual(dashboard.requests[2]['params'], {
         session_id: 'stackchan-test-session',
     })
+})
+
+test('HermesClient streams prompt deltas for the active session', async () => {
+    const dashboard = await startDashboardMock(
+        '<script>window.__HERMES_SESSION_TOKEN__="abc123";</script>',
+        {
+            promptEvents: [
+                {
+                    type: 'message.delta',
+                    session_id: 'some-existing-dashboard-session',
+                    text: '別セッション',
+                },
+                {
+                    type: 'message.delta',
+                    session_id: 'stackchan-test-session',
+                    text: '一つ目。',
+                },
+                {
+                    type: 'message.delta',
+                    session_id: 'stackchan-test-session',
+                    payload: { text: '二つ目。' },
+                },
+                {
+                    type: 'message.complete',
+                    session_id: 'stackchan-test-session',
+                    payload: { text: '一つ目。二つ目。' },
+                },
+            ],
+        },
+    )
+    process.env.HERMES_CONNECT_MODE = 'dashboard_ws'
+    process.env.HERMES_DASHBOARD_URL = dashboard.url
+    delete process.env.HERMES_DASHBOARD_TOKEN
+
+    const client = new HermesClient()
+    const events: Array<Record<string, unknown>> = []
+    try {
+        for await (const event of client.streamPrompt('こんにちは')) {
+            events.push(event)
+        }
+    } finally {
+        await client.dispose()
+        await dashboard.close()
+    }
+
+    assert.deepEqual(events, [
+        { type: 'delta', text: '一つ目。' },
+        { type: 'delta', text: '二つ目。' },
+        { type: 'complete', text: '一つ目。二つ目。' },
+    ])
 })
 
 test('HermesClient reports a clear error when Dashboard token is missing', async () => {

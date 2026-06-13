@@ -30,6 +30,10 @@ type PendingRequest = {
 type EventListener = (event: HermesEvent) => void
 type CloseListener = (error: Error) => void
 
+export type HermesPromptStreamEvent =
+    | { type: 'delta'; text: string }
+    | { type: 'complete'; text?: string }
+
 type HermesTransport = {
     start(onLine: (line: string) => void, onClose: (error: Error) => void): Promise<void>
     sendLine(line: string): Promise<void>
@@ -313,6 +317,81 @@ class RpcHermesClient {
         })
     }
 
+    async *streamPrompt(prompt: string): AsyncGenerator<HermesPromptStreamEvent> {
+        const sessionId = await this.ensureSession()
+        const turnTimeoutMs = Number(process.env.HERMES_TURN_TIMEOUT_MS ?? DEFAULT_TURN_TIMEOUT_MS)
+        const queue: HermesPromptStreamEvent[] = []
+        let done = false
+        let failure: Error | undefined
+        let wake: (() => void) | undefined
+
+        const notify = () => {
+            wake?.()
+            wake = undefined
+        }
+        const timer = setTimeout(() => {
+            failure = new Error(`Hermes prompt timed out after ${turnTimeoutMs}ms`)
+            done = true
+            cleanup()
+            notify()
+        }, turnTimeoutMs)
+        const cleanup = () => {
+            clearTimeout(timer)
+            this.listeners.delete(onEvent)
+            this.closeListeners.delete(onClose)
+        }
+        const onClose: CloseListener = (error) => {
+            failure = error
+            done = true
+            cleanup()
+            notify()
+        }
+        const onEvent: EventListener = (event) => {
+            if (event.session_id !== sessionId) return
+            const text = eventText(event)
+            if (event.type === 'message.delta' && text !== null) {
+                queue.push({ type: 'delta', text })
+                notify()
+                return
+            }
+            if (event.type === 'message.complete') {
+                done = true
+                queue.push({
+                    type: 'complete',
+                    text: text ?? undefined,
+                })
+                cleanup()
+                notify()
+            }
+        }
+
+        this.listeners.add(onEvent)
+        this.closeListeners.add(onClose)
+        this.request('prompt.submit', { session_id: sessionId, text: prompt })
+            .catch((error) => {
+                failure = error instanceof Error ? error : new Error(String(error))
+                done = true
+                cleanup()
+                notify()
+            })
+
+        try {
+            while (!done || queue.length > 0) {
+                if (queue.length > 0) {
+                    yield queue.shift() as HermesPromptStreamEvent
+                    continue
+                }
+                if (failure) throw failure
+                await new Promise<void>((resolve) => {
+                    wake = resolve
+                })
+            }
+            if (failure) throw failure
+        } finally {
+            cleanup()
+        }
+    }
+
     async interrupt(): Promise<void> {
         if (!this.sessionId) return
         await this.request('session.interrupt', { session_id: this.sessionId }).then(() => undefined)
@@ -441,6 +520,10 @@ export class HermesClient {
 
     async submitPrompt(prompt: string): Promise<string> {
         return await this.client.submitPrompt(prompt)
+    }
+
+    async *streamPrompt(prompt: string): AsyncGenerator<HermesPromptStreamEvent> {
+        yield* this.client.streamPrompt(prompt)
     }
 
     async interrupt(): Promise<void> {

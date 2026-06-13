@@ -6,9 +6,11 @@ import type { LocalRmsVadConfig } from '../src/local_vad.ts'
 
 class MockWebSocket {
     sent: Array<string | Buffer> = []
+    onSend?: (data: string | Buffer) => void
 
     send(data: string | Buffer): void {
         this.sent.push(data)
+        this.onSend?.(data)
     }
 }
 
@@ -443,6 +445,84 @@ test('Session synthesizes and streams TTS one sentence segment at a time', async
         ['一つ目です。', '二つ目です！'],
     )
     assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([1]), Buffer.from([2])])
+
+    session.close()
+})
+
+test('Session prefetches the next TTS segment while streaming the current segment', async () => {
+    const ws = new MockWebSocket()
+    const events: string[] = []
+    ws.onSend = (data) => {
+        if (Buffer.isBuffer(data)) events.push(`frame:${data.toString('utf8')}`)
+    }
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => '説明して',
+        hermes: {
+            submitPrompt: async () => '一つ目です。二つ目です！',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            events.push(`synth:${text}`)
+            return Buffer.from(text)
+        },
+        encodeWavToOpusFrames: (wav) => wav.toString('utf8').startsWith('一')
+            ? [Buffer.from('one-a'), Buffer.from('one-b')]
+            : [Buffer.from('two')],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => events.includes('frame:one-a'))
+    assert.ok(events.indexOf('synth:二つ目です！') < events.indexOf('frame:one-a'))
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    session.close()
+})
+
+test('Session speaks stable LLM stream sentences before message completion', async () => {
+    const ws = new MockWebSocket()
+    const events: string[] = []
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        decodeOpusFrames: () => Buffer.alloc(320),
+        transcribeWav: async () => '説明して',
+        hermes: {
+            submitPrompt: async () => 'unused',
+            streamPrompt: async function* () {
+                events.push('delta:one')
+                yield { type: 'delta', text: '一つ目です。' }
+                events.push('delta:two')
+                yield { type: 'delta', text: '二つ目です！' }
+                events.push('complete')
+                yield { type: 'complete' }
+            },
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            events.push(`synth:${text}`)
+            return Buffer.from(text)
+        },
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => events.includes('complete'))
+    assert.ok(events.indexOf('synth:一つ目です。') < events.indexOf('delta:two'))
+    assert.deepEqual(
+        jsonMessages(ws).filter((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start').map((msg) => msg['text']),
+        ['一つ目です。', '二つ目です！'],
+    )
 
     session.close()
 })

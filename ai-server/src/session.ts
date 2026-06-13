@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto'
 import type WebSocket from 'ws'
 import { createInputOpusDecoder, decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, INPUT_SAMPLE_RATE, INPUT_FRAME_DURATION_MS, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS, type InputOpusDecoder } from './audio.js'
-import { HermesClient } from './hermes.js'
+import { HermesClient, type HermesPromptStreamEvent } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
 import { registerDeviceSession } from './device_control.js'
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
@@ -192,6 +192,18 @@ export function splitStackChanSpeechText(
     return segments.filter(Boolean).slice(0, config.maxSegments)
 }
 
+function stableSpeechSegmentsFromPartialReply(
+    text: string,
+    config: SpeechSegmentationConfig = SPEECH_SEGMENTATION_CONFIG,
+): string[] {
+    const speech = normalizeSpeechText(stripMediaForSpeech(text))
+    if (!speech) return []
+    const segments = splitStackChanSpeechText(text, config, '')
+    if (segments.length === 0) return []
+    if (/[。！？!?\n]$/.test(speech)) return segments
+    return segments.slice(0, -1)
+}
+
 // auto モード: フレームが途切れてから処理開始するまでの無音判定時間 (ms)
 const TURN_CONTROL_CONFIG = readTurnControlConfig()
 const SILENCE_TIMEOUT_MS = TURN_CONTROL_CONFIG.silenceTimeoutMs
@@ -236,8 +248,23 @@ type PendingMcpRequest = {
 
 type HermesSessionClient = {
     submitPrompt(prompt: string): Promise<string>
+    streamPrompt?(prompt: string): AsyncIterable<HermesPromptStreamEvent>
     interrupt(): Promise<void>
     dispose(): Promise<void>
+}
+
+type TtsPlayback = {
+    generation: number
+    label: string
+    streamStartMs: number
+    streamedFrames: number
+    segmentCount: number
+    interrupted: boolean
+}
+
+type PrefetchedSegment = {
+    index: number
+    promise: Promise<Buffer[]>
 }
 
 type SessionDeps = {
@@ -736,6 +763,13 @@ export class Session {
     }
 
     private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
+        if (this.hermes.streamPrompt && readEnvBool('STACKCHAN_STREAM_LLM_TTS', true)) {
+            return await this.speakHermesReplyStreaming(prompt, llmLabel, ttsLabel)
+        }
+        return await this.speakHermesReplyBuffered(prompt, llmLabel, ttsLabel)
+    }
+
+    private async speakHermesReplyBuffered(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
         const processingKeepalive = setInterval(() => {
             this.sendJson({ type: 'llm', emotion: 'doubtful' })
         }, PROCESSING_KEEPALIVE_MS)
@@ -759,6 +793,66 @@ export class Session {
         return reply
     }
 
+    private async speakHermesReplyStreaming(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
+        const streamPrompt = this.hermes.streamPrompt
+        if (!streamPrompt) return await this.speakHermesReplyBuffered(prompt, llmLabel, ttsLabel)
+
+        const processingKeepalive = setInterval(() => {
+            this.sendJson({ type: 'llm', emotion: 'doubtful' })
+        }, PROCESSING_KEEPALIVE_MS)
+        this.sendJson({ type: 'llm', emotion: 'doubtful' })
+
+        const llmStartMs = nowMs()
+        let reply = ''
+        let spokenSegments = 0
+        let playback: TtsPlayback | undefined
+
+        try {
+            for await (const event of streamPrompt.call(this.hermes, prompt)) {
+                if (event.type === 'delta') {
+                    reply += event.text
+                } else if (event.type === 'complete' && event.text) {
+                    reply = event.text
+                }
+
+                if (this.state !== 'processing') break
+                const stableSegments = stableSpeechSegmentsFromPartialReply(reply, this.speechSegmentationConfig)
+                while (spokenSegments < stableSegments.length && this.state === 'processing') {
+                    playback ??= this.startTtsPlayback(ttsLabel)
+                    await this.speakSegmentInPlayback(
+                        playback,
+                        stableSegments[spokenSegments],
+                        `${ttsLabel}.stream.segment${spokenSegments}`,
+                        spokenSegments,
+                    )
+                    spokenSegments += 1
+                    if (playback.interrupted) break
+                }
+            }
+        } finally {
+            clearInterval(processingKeepalive)
+        }
+
+        console.log(`[timing] done session:${this.sessionId}:${llmLabel}.stream elapsed=${elapsedMs(llmStartMs)}`)
+        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): "${reply}"`)
+        this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
+        void this.displayFirstImageFromReply(reply)
+
+        const finalSegments = splitStackChanSpeechText(reply, this.speechSegmentationConfig)
+        if (!playback) {
+            await this.speakSegments(finalSegments, ttsLabel)
+            return reply
+        }
+
+        try {
+            const remainingSegments = finalSegments.slice(spokenSegments)
+            await this.speakSegmentsInPlayback(playback, remainingSegments, ttsLabel, spokenSegments)
+        } finally {
+            this.finishTtsPlayback(playback)
+        }
+        return reply
+    }
+
     private async synthesizeSegmentToOpus(speechText: string, label: string): Promise<Buffer[]> {
         const wav = await withTiming(
             `session:${this.sessionId}:${label}.synthesize`,
@@ -775,6 +869,15 @@ export class Session {
 
     private async speakSegments(segments: string[], label: string): Promise<void> {
         if (segments.length === 0) return
+        const playback = this.startTtsPlayback(label)
+        try {
+            await this.speakSegmentsInPlayback(playback, segments, label, 0)
+        } finally {
+            this.finishTtsPlayback(playback)
+        }
+    }
+
+    private startTtsPlayback(label: string): TtsPlayback {
         const generation = this.ttsGeneration + 1
         this.ttsGeneration = generation
         this.ttsStopSent = false
@@ -783,44 +886,106 @@ export class Session {
         this.resetBargeInDetector()
         this.sendJson({ type: 'tts', state: 'start' })
         this.setAutoLedState('speaking')
+        return {
+            generation,
+            label,
+            streamStartMs: nowMs(),
+            streamedFrames: 0,
+            segmentCount: 0,
+            interrupted: false,
+        }
+    }
 
-        let interrupted = false
-        const streamStartMs = nowMs()
-        let streamedFrames = 0
+    private isTtsPlaybackActive(playback: TtsPlayback): boolean {
+        return this.state === 'processing' && this.ttsGeneration === playback.generation
+    }
+
+    private prefetchSegment(segment: string, label: string, index: number): PrefetchedSegment {
+        const promise = this.synthesizeSegmentToOpus(segment, `${label}.segment${index}`)
+        promise.catch(() => undefined)
+        return { index, promise }
+    }
+
+    private async speakSegmentsInPlayback(
+        playback: TtsPlayback,
+        segments: string[],
+        label: string,
+        startIndex: number,
+    ): Promise<void> {
+        let prefetched: PrefetchedSegment | undefined
         try {
-            for (let i = 0; i < segments.length; i++) {
-                if (this.state !== 'processing' || this.ttsGeneration !== generation) {
-                    interrupted = true
+            for (let offset = 0; offset < segments.length; offset++) {
+                const index = startIndex + offset
+                if (!this.isTtsPlaybackActive(playback)) {
+                    playback.interrupted = true
                     break
                 }
-                const segment = segments[i]
-                this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index: i })
-                const opusFrames = await this.synthesizeSegmentToOpus(segment, `${label}.segment${i}`)
-                for (const frame of opusFrames) {
-                    if (this.state !== 'processing' || this.ttsGeneration !== generation) {
-                        interrupted = true
-                        break
-                    }
-                    this.sendBinary(wrapOpusPayload(frame, this.version))
-                    streamedFrames += 1
-                    await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
-                }
-                if (this.state !== 'processing' || this.ttsGeneration !== generation) {
-                    interrupted = true
-                    break
-                }
-                this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index: i })
+
+                const segment = segments[offset]
+                const framesPromise = prefetched?.index === index ? prefetched.promise : undefined
+                prefetched = undefined
+                const nextSegment = segments[offset + 1]
+                await this.speakSegmentInPlayback(
+                    playback,
+                    segment,
+                    `${label}.segment${index}`,
+                    index,
+                    framesPromise,
+                    () => {
+                        if (nextSegment && this.isTtsPlaybackActive(playback)) {
+                            prefetched = this.prefetchSegment(nextSegment, label, index + 1)
+                        }
+                    },
+                )
+                if (playback.interrupted) break
             }
         } finally {
-            this.sendTtsStopOnce(generation)
-            if (this.ttsGeneration === generation) {
-                this.ttsStreaming = false
-                this.resetBargeInDetector()
-            }
+            prefetched?.promise.catch(() => undefined)
         }
-        console.log(`[timing] done session:${this.sessionId}:${label}.stream elapsed=${elapsedMs(streamStartMs)} frames=${streamedFrames} segments=${segments.length}`)
+    }
 
-        if (!interrupted && this.state === 'processing' && this.ttsGeneration === generation) {
+    private async speakSegmentInPlayback(
+        playback: TtsPlayback,
+        segment: string,
+        label: string,
+        index: number,
+        framesPromise?: Promise<Buffer[]>,
+        onFramesReady?: () => void,
+    ): Promise<void> {
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
+
+        this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
+        const opusFrames = framesPromise ? await framesPromise : await this.synthesizeSegmentToOpus(segment, label)
+        onFramesReady?.()
+        for (const frame of opusFrames) {
+            if (!this.isTtsPlaybackActive(playback)) {
+                playback.interrupted = true
+                break
+            }
+            this.sendBinary(wrapOpusPayload(frame, this.version))
+            playback.streamedFrames += 1
+            await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
+        }
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
+        playback.segmentCount += 1
+        this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private finishTtsPlayback(playback: TtsPlayback): void {
+        this.sendTtsStopOnce(playback.generation)
+        if (this.ttsGeneration === playback.generation) {
+            this.ttsStreaming = false
+            this.resetBargeInDetector()
+        }
+        console.log(`[timing] done session:${this.sessionId}:${playback.label}.stream elapsed=${elapsedMs(playback.streamStartMs)} frames=${playback.streamedFrames} segments=${playback.segmentCount}`)
+
+        if (!playback.interrupted && this.state === 'processing' && this.ttsGeneration === playback.generation) {
             // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
             this.cooldownUntil = Date.now() + this.postTtsCooldownMs
         }
