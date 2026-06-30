@@ -1,5 +1,14 @@
 menu "Hermes Runtime"
 
+config STACKCHAN_SERVER_URL
+    string "StackChan server base URL"
+    default "http://localhost:3000"
+    help
+        Base URL (scheme + host + port, no trailing slash) of the StackChan backend.
+        The HAL composes endpoint paths like /stackChan/device/user,
+        /stackChan/apps and /stackChan/ws from this base. Override in your
+        sdkconfig.defaults.local to point at a self-hosted deployment.
+
 config OTA_URL
     string "Default OTA URL"
     default ""

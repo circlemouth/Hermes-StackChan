@@ -392,7 +392,14 @@ void StackChanAvatarDisplay::SetupUI()
         lv_obj_move_foreground(avatar_panel);
     }
     avatar->getPanel()->onClick().connect([]() {
+        static uint32_t last_toggle_tick = 0;
+        const uint32_t now               = GetHAL().millis();
+        if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
+            return;
+        }
+
         if (hal_bridge::is_hermes_ready()) {
+            last_toggle_tick = now;
             hal_bridge::toggle_hermes_chat_state();
         }
     });

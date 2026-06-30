@@ -145,12 +145,18 @@ public:
         }
 
         int current_pos = _scs_bus.ReadPos(_config.id);
-        if (current_pos < 0) {
-            mclog::tagWarn(_tag, "id: {} ReadPos failed", _config.id);
-            return Servo::getCurrentAngle();
+        if (!is_raw_pos_valid(current_pos)) {
+            const int fallback_angle = uitk::clamp(Servo::getCurrentAngle(), getAngleLimit().x, getAngleLimit().y);
+            mclog::tagWarn(
+                _tag,
+                "id: {} ignore invalid current pos: {}, fallback angle: {}",
+                _config.id,
+                current_pos,
+                fallback_angle);
+            return fallback_angle;
         }
 
-        int angle       = (current_pos - _zero_pos) * 5 * 10 / 16;
+        int angle       = raw_pos_to_angle(current_pos);
         angle           = uitk::clamp(angle, getAngleLimit().x, getAngleLimit().y);
         // mclog::tagInfo(_tag, "id: {} current pos: {} angle: {}", _id, current_pos, angle);
         return angle;
@@ -215,8 +221,13 @@ public:
         }
 
         const int current_pos = _scs_bus.ReadPos(_config.id);
-        if (current_pos < 0) {
-            mclog::tagWarn(_tag, "id: {} ReadPos failed, zero calibration not saved", _config.id);
+        if (!is_raw_pos_valid(current_pos)) {
+            mclog::tagWarn(
+                _tag,
+                "id: {} ignore invalid zero calibration pos: {}, keep zero pos: {}",
+                _config.id,
+                current_pos,
+                _zero_pos);
             return;
         }
 
@@ -279,6 +290,16 @@ private:
     Mode _current_mode = Mode::Position;
     bool _available    = true;
     bool _torque_enabled_cache = false;
+
+    bool is_raw_pos_valid(int raw_pos) const
+    {
+        return raw_pos >= _config.rawPosLimit.x && raw_pos <= _config.rawPosLimit.y;
+    }
+
+    int raw_pos_to_angle(int raw_pos) const
+    {
+        return (raw_pos - _zero_pos) * 5 * 10 / 16;
+    }
 
     bool restore_position_mode()
     {
