@@ -19,7 +19,7 @@ namespace stackchan {
  */
 class IdleMotionModifier : public Modifier {
 public:
-    IdleMotionModifier(uint32_t interval_min = 4000, uint32_t interval_max = 8000)
+    IdleMotionModifier(uint32_t interval_min = 6000, uint32_t interval_max = 12000)
         : _interval_min(interval_min), _interval_max(interval_max)
     {
         _next_tick = GetHAL().millis() + 1000;  // 启动 1 秒后开始第一次动作
@@ -73,39 +73,39 @@ private:
 
         int action = Random::getInstance().getInt(0, 100);
 
-        if (action < 50) {
-            // 【动作 1：随意环视】使用归一化坐标 (-1.0 ~ 1.0)
-            float target_x = Random::getInstance().getFloat(-0.4f, 0.4f);   // 左右看
-            float target_y = Random::getInstance().getFloat(-0.95f, 0.2f);  // 上下看
-            int speed      = Random::getInstance().getInt(150, 300);
+        if (action < 60) {
+            // Calm gaze drift around the user-facing posture.
+            float target_x = Random::getInstance().getFloat(-0.22f, 0.22f);
+            float target_y = Random::getInstance().getFloat(-0.28f, 0.18f);
+            int speed      = Random::getInstance().getInt(90, 180);
 
             // mclog::info("action 1: look at normalized ({}, {}) in speed {}", target_x, target_y, speed);
             motion.lookAtNormalized(target_x, target_y, speed);
-        } else if (action < 80) {
-            // 【动作 2：微小的观察动作】基于当前位置的小偏移
+        } else if (action < 90) {
+            // Small observation movement from the current head angle.
             auto current = motion.getCurrentAngles();  // Vector2i(yaw, pitch)
 
-            int diff_yaw   = Random::getInstance().getInt(-150, 150);
-            int diff_pitch = Random::getInstance().getInt(-80, 80);
+            int diff_yaw   = Random::getInstance().getInt(-80, 80);
+            int diff_pitch = Random::getInstance().getInt(-35, 35);
 
-            int target_yaw   = uitk::clamp(current.x + diff_yaw, -800, 800);
-            int target_pitch = uitk::clamp(current.y + diff_pitch, 0, 600);
-            int speed        = Random::getInstance().getInt(100, 250);
+            int target_yaw   = uitk::clamp(current.x + diff_yaw, -450, 450);
+            int target_pitch = uitk::clamp(current.y + diff_pitch, 30, 500);
+            int speed        = Random::getInstance().getInt(80, 160);
 
             // mclog::info("action 2: small move to ({}, {}) in speed {}", target_yaw, target_pitch, speed);
             motion.moveWithSpeed(target_yaw, target_pitch, speed);
-        } else if (action < 90) {
-            // 【动作 3：快速撇一眼】速度快，跨度中等
-            int target_yaw   = Random::getInstance().getInt(-500, 500);
-            int target_pitch = Random::getInstance().getInt(100, 400);
-            int speed        = Random::getInstance().getInt(250, 400);
+        } else if (action < 96) {
+            // Occasional glance, still bounded to avoid a twitchy idle loop.
+            int target_yaw   = Random::getInstance().getInt(-300, 300);
+            int target_pitch = Random::getInstance().getInt(80, 360);
+            int speed        = Random::getInstance().getInt(140, 240);
 
             // mclog::info("action 3: quick glance to ({}, {}) in speed {}", target_yaw, target_pitch, speed);
             motion.moveWithSpeed(target_yaw, target_pitch, speed);
         } else {
             // 【动作 4：yaw 回正】
-            int target_pitch = Random::getInstance().getInt(50, 400);
-            int speed        = Random::getInstance().getInt(100, 300);
+            int target_pitch = Random::getInstance().getInt(80, 260);
+            int speed        = Random::getInstance().getInt(80, 160);
 
             // mclog::info("action 4: go home to (0, {}) in speed {}", target_pitch, speed);
             motion.moveWithSpeed(0, target_pitch, speed);

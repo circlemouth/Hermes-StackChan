@@ -3,6 +3,7 @@
 .claude
 .codex/
 ai-server/node_modules
+ai-server/probe-runs/
 .env
 ai-server/dist
 .mcp.json

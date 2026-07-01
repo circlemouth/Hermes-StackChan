@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
-import { inferStackChanEmotion, readBargeInConfig, readEnvInt, readSpeechSegmentationConfig, readTurnControlConfig, Session, splitStackChanSpeechText } from '../src/session.ts'
+import { inferStackChanEmotion, isIgnorableShortTranscript, isIgnorableTimeoutTranscript, readBargeInConfig, readEnvInt, readSpeechSegmentationConfig, readTurnControlConfig, Session, splitStackChanSpeechText } from '../src/session.ts'
 import type { LocalRmsVadConfig } from '../src/local_vad.ts'
 
 class MockWebSocket {
@@ -189,6 +189,21 @@ test('inferStackChanEmotion maps reply text to StackChan expressions', () => {
     assert.equal(inferStackChanEmotion('了解しました。'), 'neutral')
 })
 
+test('isIgnorableShortTranscript ignores only narrow filler fragments', () => {
+    assert.equal(isIgnorableShortTranscript('えっ'), true)
+    assert.equal(isIgnorableShortTranscript(' あ。 '), true)
+    assert.equal(isIgnorableShortTranscript('はい'), false)
+    assert.equal(isIgnorableShortTranscript('うん'), false)
+    assert.equal(isIgnorableShortTranscript('こんにちは'), false)
+})
+
+test('isIgnorableTimeoutTranscript ignores timeout-only backchannels', () => {
+    assert.equal(isIgnorableTimeoutTranscript('お'), true)
+    assert.equal(isIgnorableTimeoutTranscript('うん'), true)
+    assert.equal(isIgnorableTimeoutTranscript('はい'), false)
+    assert.equal(isIgnorableTimeoutTranscript('短く返事して'), false)
+})
+
 test('readEnvInt uses fallback, parsed values, and clamping', () => {
     assert.equal(readEnvInt('MISSING', 10, 1, 20, {}), 10)
     assert.equal(readEnvInt('VALUE', 10, 1, 20, { VALUE: '12.6' }), 13)
@@ -220,7 +235,7 @@ test('readBargeInConfig and readSpeechSegmentationConfig clamp environment value
         STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS: '-10',
     }), {
         enabled: false,
-        rmsThreshold: 0.3,
+        rmsThreshold: 1,
         startSpeechMs: 60,
         minSpeechMs: 3000,
         ignoreTtsStartMs: 0,

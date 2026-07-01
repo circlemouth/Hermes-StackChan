@@ -287,6 +287,8 @@ Movement behavior:
 
 - Hermes can intentionally move the head or set LEDs through MCP tools.
 - Firmware continues autonomous blinking, idle motion, and speaking motion.
+- Idle movement levels are `Off`, `Calm`, `Natural`, and `Lively`; `Natural` is the default and uses small 6-12 second gaze shifts.
+- Firmware also applies small state poses: facing forward while listening, subtle speaking motion during TTS, and a relaxed return to center on standby.
 - `ai-server` infers simple StackChan emotions from Hermes replies instead of always sending `neutral`.
 - `ai-server` sets subtle automatic LED colors for listening, thinking, speaking, and idle; explicit Hermes LED tool calls temporarily take priority.
 - This mixed-control model keeps robot behavior natural without requiring Hermes to micromanage every frame.

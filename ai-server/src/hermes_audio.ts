@@ -12,6 +12,8 @@ type CommandResult = {
 type TranscriptionResult = {
     success?: boolean
     transcript?: string
+    text?: string
+    result?: string
     error?: string
 }
 
@@ -64,6 +66,28 @@ function hermesPythonEnv(): NodeJS.ProcessEnv {
     }
 }
 
+function configuredSttUrl(): string {
+    return process.env.HERMES_STT_URL ?? process.env.STACKCHAN_STT_URL ?? ''
+}
+
+async function transcribeWithOpenAiCompatibleStt(wav: Buffer, url: string): Promise<string> {
+    const form = new FormData()
+    form.append('model', process.env.HERMES_STT_MODEL ?? process.env.STACKCHAN_STT_MODEL ?? 'whisper-1')
+    form.append('language', process.env.HERMES_STT_LANGUAGE ?? process.env.HERMES_LOCAL_STT_LANGUAGE ?? 'ja')
+    form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'input.wav')
+
+    const apiKey = process.env.HERMES_STT_API_KEY ?? process.env.WHISPER_API_KEY ?? ''
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: apiKey ? { authorization: `Bearer ${apiKey}` } : undefined,
+        body: form,
+    })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`STT endpoint failed: HTTP ${response.status}: ${text}`)
+    const result = JSON.parse(text) as TranscriptionResult
+    return String(result.text ?? result.transcript ?? result.result ?? '').trim()
+}
+
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
     await mkdir(TEMP_ROOT, { recursive: true })
     const dir = path.join(TEMP_ROOT, randomUUID())
@@ -82,6 +106,9 @@ function parseJson<T>(stdout: string, label: string): T {
 }
 
 export async function transcribeWithHermes(wav: Buffer): Promise<string> {
+    const sttUrl = configuredSttUrl()
+    if (sttUrl) return await transcribeWithOpenAiCompatibleStt(wav, sttUrl)
+
     return await withTempDir(async (dir) => {
         const inputPath = path.join(dir, 'input.wav')
         await writeFile(inputPath, wav)

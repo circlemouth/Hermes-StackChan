@@ -87,7 +87,7 @@ export function readTurnControlConfig(env: Record<string, string | undefined> = 
 export function readBargeInConfig(env: Record<string, string | undefined> = process.env): BargeInConfig {
     return {
         enabled: readEnvBool('STACKCHAN_BARGE_IN_ENABLED', true, env),
-        rmsThreshold: readEnvFloat('STACKCHAN_BARGE_IN_RMS_THRESHOLD', 0.03, 0.005, 0.3, env),
+        rmsThreshold: readEnvFloat('STACKCHAN_BARGE_IN_RMS_THRESHOLD', 0.03, 0.005, 1.0, env),
         startSpeechMs: readEnvInt('STACKCHAN_BARGE_IN_START_SPEECH_MS', 180, INPUT_FRAME_DURATION_MS, 2000, env),
         minSpeechMs: readEnvInt('STACKCHAN_BARGE_IN_MIN_SPEECH_MS', 180, INPUT_FRAME_DURATION_MS, 3000, env),
         ignoreTtsStartMs: readEnvInt('STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS', 300, 0, 5000, env),
@@ -221,6 +221,43 @@ const MCP_REQUEST_TIMEOUT_MS = 10_000
 const PROCESSING_KEEPALIVE_MS = 10_000
 const PROCESS_ERROR_SPEECH = '返答処理でエラーが起きました。設定とサーバーログを確認してください。'
 const PROCESS_ERROR_ALERT_MAX_CHARS = 120
+const AUTO_RESUME_LISTENING = readEnvBool('STACKCHAN_AUTO_RESUME_LISTENING', true)
+const IGNORE_SHORT_TRANSCRIPTS = readEnvBool('STACKCHAN_IGNORE_SHORT_TRANSCRIPTS', true)
+const DEFAULT_IGNORED_SHORT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー'])
+const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー', 'お', 'おっ', 'うん', 'ん'])
+
+function stackChanVoicePrompt(prompt: string): string {
+    const prefix = process.env.STACKCHAN_REPLY_PROMPT_PREFIX?.trim()
+    if (!prefix) return prompt
+    return `${prefix}\nユーザー: ${prompt}`
+}
+
+function normalizedShortTranscript(text: string): string {
+    return text
+        .normalize('NFKC')
+        .trim()
+        .replace(/[、。！？!?\s]/g, '')
+        .replace(/[ー〜~]+$/g, 'ー')
+}
+
+export function isIgnorableShortTranscript(text: string): boolean {
+    if (!IGNORE_SHORT_TRANSCRIPTS) return false
+    const normalized = normalizedShortTranscript(text)
+    if (!normalized) return false
+
+    const configured = process.env.STACKCHAN_IGNORED_SHORT_TRANSCRIPTS
+    const ignored = configured
+        ? new Set(configured.split(',').map(item => normalizedShortTranscript(item)).filter(Boolean))
+        : DEFAULT_IGNORED_SHORT_TRANSCRIPTS
+    return ignored.has(normalized)
+}
+
+export function isIgnorableTimeoutTranscript(text: string): boolean {
+    if (!IGNORE_SHORT_TRANSCRIPTS) return false
+    const normalized = normalizedShortTranscript(text)
+    if (!normalized) return false
+    return DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS.has(normalized)
+}
 
 function isMissingSttProviderError(message: string): boolean {
     return /No STT provider available/i.test(message)
@@ -327,6 +364,7 @@ export class Session {
     private ttsStartedAt = 0
     private manualLedHoldUntil = 0
     private lastAutoLedState?: AutoLedState
+    private lastListenMode = ''
     private processingSource: 'local-vad' | 'listen-stop' | 'max-duration' | 'arrival-gap' = 'arrival-gap'
     private currentSpeechMs = 0
     private followupQueue: string[] = []
@@ -555,17 +593,15 @@ export class Session {
         const pcmBytes = this.pcmChunks.reduce((sum, chunk) => sum + chunk.length, 0)
         const minPcmBytes = Math.ceil((this.localVadConfig.minSpeechMs / 1000) * INPUT_SAMPLE_RATE) * 2
         if (!force && hasVadPcm && (this.currentSpeechMs < this.localVadConfig.minSpeechMs || pcmBytes < minPcmBytes)) {
-            console.log(`[session ${this.sessionId}] too little VAD speech speechMs=${this.currentSpeechMs} pcmBytes=${pcmBytes}, skipping`)
+            console.log(`[session ${this.sessionId}] too little VAD speech speechMs=${this.currentSpeechMs} pcmBytes=${pcmBytes}, restarting listen`)
             this.resetCapture()
-            this.state = 'idle'
-            this.drainFollowupQueue()
+            this.startListening('short-speech')
             return
         }
         if (!force && !hasVadPcm && this.opusFrames.length < MIN_FRAMES_FOR_STT) {
-            console.log(`[session ${this.sessionId}] too few frames (${this.opusFrames.length}), skipping`)
+            console.log(`[session ${this.sessionId}] too few frames (${this.opusFrames.length}), restarting listen`)
             this.resetCapture()
-            this.state = 'idle'
-            this.drainFollowupQueue()
+            this.startListening('too-few-frames')
             return
         }
         this.processingSource = reason
@@ -583,11 +619,25 @@ export class Session {
             }
         }).finally(() => {
             if (this.state === 'processing') {
-                this.state = 'idle'
-                this.setAutoLedState('idle')
+                if (this.shouldAutoResumeListening()) {
+                    this.state = 'idle'
+                    this.setAutoLedState('idle')
+                    if (Date.now() < this.cooldownUntil) {
+                        this.delayListeningUntilCooldownEnds('post-tts')
+                    } else {
+                        this.startListening('post-tts')
+                    }
+                } else {
+                    this.state = 'idle'
+                    this.setAutoLedState('idle')
+                }
             }
             this.drainFollowupQueue()
         })
+    }
+
+    private shouldAutoResumeListening(): boolean {
+        return AUTO_RESUME_LISTENING && this.lastListenMode === 'realtime' && !this.closed
     }
 
     private startListening(source: string): void {
@@ -601,11 +651,9 @@ export class Session {
         // 最長録音タイマーをセット
         this.maxDurationTimer = setTimeout(() => {
             if (this.shouldUseLocalVad() && this.pcmChunks.length === 0 && this.currentSpeechMs === 0) {
-                console.log(`[session ${this.sessionId}] max duration reached without VAD speech, skipping`)
+                console.log(`[session ${this.sessionId}] max duration reached without VAD speech, restarting listen`)
                 this.resetCapture()
-                this.state = 'idle'
-                this.setAutoLedState('idle')
-                this.drainFollowupQueue()
+                this.startListening('empty-timeout')
                 return
             }
             console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
@@ -647,7 +695,9 @@ export class Session {
             const listenState = msg['state'] as string | undefined
             if (listenState === 'start' || listenState === 'detect') {
                 const isWakeWordStart = listenState === 'detect'
-                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${String(msg['mode'] ?? '')}`
+                const mode = String(msg['mode'] ?? '')
+                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${mode}`
+                if (!isWakeWordStart) this.lastListenMode = mode
                 if (!isWakeWordStart && Date.now() < this.cooldownUntil) {
                     if (this.state === 'listening') {
                         console.log(`[session ${this.sessionId}] listen start already active (${source})`)
@@ -710,9 +760,18 @@ export class Session {
             { pcmBytes: pcm.length },
         )
         console.log(`[session ${this.sessionId}] STT: "${text}"`)
-        this.sendJson({ type: 'stt', text })
 
         if (!text.trim()) return
+        if (isIgnorableShortTranscript(text)) {
+            console.log(`[session ${this.sessionId}] ignored short transcript: "${text}"`)
+            return
+        }
+        if (source === 'max-duration' && vadPcm.length === 0 && isIgnorableTimeoutTranscript(text)) {
+            console.log(`[session ${this.sessionId}] ignored timeout transcript: "${text}"`)
+            return
+        }
+
+        this.sendJson({ type: 'stt', text })
 
         // 2. Hermes LLM turn -> 3. Hermes TTS -> Opus -> device
         await this.speakHermesReply(text, 'llm', 'tts')
@@ -763,10 +822,11 @@ export class Session {
     }
 
     private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
+        const hermesPrompt = stackChanVoicePrompt(prompt)
         if (this.hermes.streamPrompt && readEnvBool('STACKCHAN_STREAM_LLM_TTS', true)) {
-            return await this.speakHermesReplyStreaming(prompt, llmLabel, ttsLabel)
+            return await this.speakHermesReplyStreaming(hermesPrompt, llmLabel, ttsLabel)
         }
-        return await this.speakHermesReplyBuffered(prompt, llmLabel, ttsLabel)
+        return await this.speakHermesReplyBuffered(hermesPrompt, llmLabel, ttsLabel)
     }
 
     private async speakHermesReplyBuffered(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {

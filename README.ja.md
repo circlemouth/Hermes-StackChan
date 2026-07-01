@@ -288,6 +288,8 @@ interrupt の扱い:
 
 - Hermes は MCP tool で意図的に首を動かしたり LED 色を変えたりできます。
 - firmware は自律瞬き、待機モーション、発話中モーションを継続します。
+- 待機モーションの設定値は `Off`、`Calm`、`Natural`、`Lively` です。既定の `Natural` は小さな視線移動を 6-12 秒間隔で行います。
+- firmware は会話状態に応じて、聞き取り中は正面寄り、TTS中は控えめな発話モーション、待機復帰時は自然に中央へ戻る姿勢制御も行います。
 - `ai-server` は Hermes の返答文から簡単な StackChan emotion を推定し、常に `neutral` にならないようにします。
 - `ai-server` は listening / thinking / speaking / idle の控えめな LED 色を自動設定します。Hermes が明示的に LED tool を呼んだ場合は、その色を短時間優先します。
 - この混合制御により、Hermes が細かい動作 frame を毎回制御しなくても自然なロボット動作を保てます。

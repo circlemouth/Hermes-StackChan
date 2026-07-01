@@ -12,6 +12,13 @@
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
+    enum class ConversationPose {
+        None,
+        Idle,
+        Listening,
+        Speaking,
+    };
+
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_       = nullptr;
     int speaking_modifier_id_           = -1;
@@ -26,6 +33,8 @@ private:
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
 
     void CreateIdleMotionModifier();
+    int CreateIdleExpressionModifier();
+    void ApplyConversationPose(ConversationPose pose);
 
 protected:
     virtual bool Lock(int timeout_ms = 0) override;

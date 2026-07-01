@@ -19,6 +19,7 @@
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 #include <apps/common/common.h>
+#include <algorithm>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
@@ -454,16 +455,85 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
             idle_motion_modifier_id_ = -1;
             return;
         case 1:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(8000, 12000));
-            return;
-        case 3:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(2000, 4000));
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(9000, 14000));
             return;
         case 2:
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(6000, 12000));
+            return;
+        case 3:
         default:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>());
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(2500, 4500));
             return;
     }
+}
+
+int StackChanAvatarDisplay::CreateIdleExpressionModifier()
+{
+    auto& stackchan = GetStackChan();
+
+    switch (idle_motion_level_) {
+        case 0:
+            return -1;
+        case 1:
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(5000, 10000));
+        case 2:
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(3500, 8000));
+        case 3:
+        default:
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(2000, 6000));
+    }
+}
+
+void StackChanAvatarDisplay::ApplyConversationPose(ConversationPose pose)
+{
+    if (pose == ConversationPose::None || idle_motion_level_ == 0) {
+        return;
+    }
+
+    auto& stackchan = GetStackChan();
+    if (!stackchan.hasAvatar()) {
+        return;
+    }
+
+    auto& motion = stackchan.motion();
+    if (motion.isModifyLocked()) {
+        return;
+    }
+
+    const auto yaw_limit   = motion.yawServo().getAngleLimit();
+    const auto pitch_limit = motion.pitchServo().getAngleLimit();
+    const auto current     = motion.getCurrentAngles();
+
+    int target_yaw   = current.x;
+    int target_pitch = current.y;
+    int speed        = 100;
+
+    switch (pose) {
+        case ConversationPose::Idle:
+            target_yaw   = 0;
+            target_pitch = 120;
+            speed        = 80;
+            break;
+        case ConversationPose::Listening:
+            target_yaw   = 0;
+            target_pitch = 150;
+            speed        = 130;
+            break;
+        case ConversationPose::Speaking:
+            if (motion.isMoving()) {
+                return;
+            }
+            target_yaw   = std::clamp(current.x + (current.x >= 0 ? -20 : 20), -140, 140);
+            target_pitch = current.y + 25;
+            speed        = 90;
+            break;
+        case ConversationPose::None:
+            return;
+    }
+
+    target_yaw   = std::clamp(target_yaw, yaw_limit.x, yaw_limit.y);
+    target_pitch = std::clamp(target_pitch, pitch_limit.x, pitch_limit.y);
+    motion.moveWithSpeed(target_yaw, target_pitch, speed);
 }
 
 void StackChanAvatarDisplay::SetEmotion(const char* emotion)
@@ -507,6 +577,8 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
             if (idle_motion_modifier_id_ >= 0) {
                 stackchan.removeModifier(idle_motion_modifier_id_);
                 idle_motion_modifier_id_ = -1;
+            }
+            if (idle_expression_modifier_id_ >= 0) {
                 stackchan.removeModifier(idle_expression_modifier_id_);
                 idle_expression_modifier_id_ = -1;
             }
@@ -659,92 +731,99 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
     }
 
-    DisplayLockGuard lock(this);
-    auto& avatar = stackchan.avatar();
+    ConversationPose pose_after_unlock = ConversationPose::None;
 
-    bool is_idle      = false;
+    {
+        DisplayLockGuard lock(this);
+        auto& avatar = stackchan.avatar();
 
-    if (strcmp(status, Lang::Strings::LISTENING) == 0) {
-        if (speaking_modifier_id_ >= 0) {
-            // Start speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
+        bool is_idle = false;
 
-        GetHAL().setRgbColor(0, 0, 50, 0);
-        GetHAL().refreshRgb();
-
-    } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
-        _is_hermes_ready = true;
-
-        if (speaking_modifier_id_ >= 0) {
-            // Stop speaking
-            stackchan.removeModifier(speaking_modifier_id_);
-            avatar.mouth().setWeight(0);
-            speaking_modifier_id_ = -1;
-        }
-
-        is_idle = true;
-
-        GetHAL().setRgbColor(0, 0, 0, 0);
-        GetHAL().refreshRgb();
-
-    } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        if (speaking_modifier_id_ < 0) {
-            const bool enable_light_speaking_motion = idle_motion_level_ > 0;
-            speaking_modifier_id_ =
-                stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, enable_light_speaking_motion));
-        }
-
-        GetHAL().setRgbColor(0, 0, 0, 50);
-        GetHAL().refreshRgb();
-    } else {
-        avatar.setSpeech(status);
-    }
-
-    if (is_idle) {
-        // Start idle motion
-        ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
-            if (idle_motion_level_ > 0) {
-                CreateIdleMotionModifier();
+        if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+            if (speaking_modifier_id_ >= 0) {
+                stackchan.removeModifier(speaking_modifier_id_);
+                avatar.mouth().setWeight(0);
+                speaking_modifier_id_ = -1;
             }
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
+
+            pose_after_unlock = ConversationPose::Listening;
+            GetHAL().setRgbColor(0, 0, 50, 0);
+            GetHAL().refreshRgb();
+
+        } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
+            _is_hermes_ready = true;
+
+            if (speaking_modifier_id_ >= 0) {
+                stackchan.removeModifier(speaking_modifier_id_);
+                avatar.mouth().setWeight(0);
+                speaking_modifier_id_ = -1;
+            }
+
+            is_idle           = true;
+            pose_after_unlock = ConversationPose::Idle;
+
+            GetHAL().setRgbColor(0, 0, 0, 0);
+            GetHAL().refreshRgb();
+
+        } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
+            if (speaking_modifier_id_ < 0) {
+                const bool enable_light_speaking_motion = idle_motion_level_ > 0;
+                speaking_modifier_id_ =
+                    stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, enable_light_speaking_motion));
+            }
+
+            pose_after_unlock = ConversationPose::Speaking;
+            GetHAL().setRgbColor(0, 0, 0, 50);
+            GetHAL().refreshRgb();
+        } else {
+            avatar.setSpeech(status);
         }
 
-        _is_hermes_idle = true;
-    } else {
-        // Stop idle motion
-        ESP_LOGW(TAG, "Stop idle motion");
-        if (idle_motion_modifier_id_ >= 0) {
-            stackchan.removeModifier(idle_motion_modifier_id_);
-            idle_motion_modifier_id_ = -1;
-            stackchan.removeModifier(idle_expression_modifier_id_);
-            idle_expression_modifier_id_ = -1;
+        if (is_idle) {
+            ESP_LOGW(TAG, "Start idle motion");
+            if (idle_motion_modifier_id_ < 0) {
+                if (idle_motion_level_ > 0) {
+                    CreateIdleMotionModifier();
+                }
+                idle_expression_modifier_id_ = CreateIdleExpressionModifier();
+            }
+
+            _is_hermes_idle = true;
+        } else {
+            ESP_LOGW(TAG, "Stop idle motion");
+            if (idle_motion_modifier_id_ >= 0) {
+                stackchan.removeModifier(idle_motion_modifier_id_);
+                idle_motion_modifier_id_ = -1;
+            }
+            if (idle_expression_modifier_id_ >= 0) {
+                stackchan.removeModifier(idle_expression_modifier_id_);
+                idle_expression_modifier_id_ = -1;
+            }
+
+            _is_hermes_idle = false;
         }
 
-        _is_hermes_idle = false;
-    }
-
-    // Clear sleep state
-    if (is_sleeping_) {
-        avatar.setSpeech("");
-        avatar.setEmotion(Emotion::Neutral);
-        is_sleeping_ = false;
-    }
-
-    stackchan.update();
-    if (display_ != nullptr) {
-        lv_obj_t* active_screen = lv_display_get_screen_active(display_);
-        if (active_screen != nullptr) {
-            lv_obj_invalidate(active_screen);
+        // Clear sleep state
+        if (is_sleeping_) {
+            avatar.setSpeech("");
+            avatar.setEmotion(Emotion::Neutral);
+            is_sleeping_ = false;
         }
-        lv_refr_now(display_);
-    } else {
-        ESP_LOGW(TAG, "SetStatus refresh fallback: LVGL display is null");
-        lv_refr_now(nullptr);
+
+        stackchan.update();
+        if (display_ != nullptr) {
+            lv_obj_t* active_screen = lv_display_get_screen_active(display_);
+            if (active_screen != nullptr) {
+                lv_obj_invalidate(active_screen);
+            }
+            lv_refr_now(display_);
+        } else {
+            ESP_LOGW(TAG, "SetStatus refresh fallback: LVGL display is null");
+            lv_refr_now(nullptr);
+        }
     }
+
+    ApplyConversationPose(pose_after_unlock);
 }
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)

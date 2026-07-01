@@ -6,6 +6,8 @@
     "build": "tsc",
     "test": "tsx --test test/*.test.ts",
     "start": "node dist/index.js",
+    "start:env": "node -r ./scripts/load_env.cjs dist/index.js",
+    "probe:voice": "tsx scripts/voice_loop_probe.ts",
     "mcp:stackchan": "node dist/stackchan_mcp_server.js",
     "mcp:stackchan:dev": "tsx src/stackchan_mcp_server.ts"
   },

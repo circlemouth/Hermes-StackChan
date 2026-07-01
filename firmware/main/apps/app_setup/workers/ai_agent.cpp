@@ -15,7 +15,7 @@ using namespace setup_workers;
 static std::string _tag = "Setup-AIAgent";
 
 namespace {
-static const std::array<const char*, 4> _idle_motion_level_labels = {{"Off", "Low", "Medium", "High"}};
+static const std::array<const char*, 4> _idle_motion_level_labels = {{"Off", "Calm", "Natural", "Lively"}};
 
 }  // namespace
 
