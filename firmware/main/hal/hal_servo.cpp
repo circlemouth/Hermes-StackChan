@@ -62,14 +62,20 @@ class ScsServo : public Servo {
 public:
     static inline const std::string _tag = "ScsServo";
 
-    ScsServo(const ServoConfig_t& config) : _config(config)
+    ScsServo(const ServoConfig_t& config, bool readback_available = true)
+        : _config(config), _readback_available(readback_available)
     {
     }
 
     void init() override
     {
         set_angle_limit(_config.angleLimit);
-        if (!restore_position_mode()) {
+        if (!_readback_available) {
+            mclog::tagWarn(
+                _tag,
+                "id: {} readback unavailable; keeping servo write-only so motion commands can still be delivered",
+                _config.id);
+        } else if (!restore_position_mode()) {
             mclog::tagWarn(
                 _tag,
                 "id: {} position mode recovery is unverified; keeping servo write-only instead of disabling it",
@@ -128,19 +134,32 @@ public:
         }
 
         const int ret = _scs_bus.WritePos(_config.id, mapped_angle, 20, 0);
-        mclog::tagInfo(_tag, "id: {} WritePos({}, 20, 0) ret: {}", _config.id, mapped_angle, ret);
         if (ret != 1) {
-            mclog::tagWarn(
-                _tag,
-                "id: {} WritePos ACK/readback failed, ret: {}; command may still have been delivered",
-                _config.id,
-                ret);
+            _write_failure_count++;
+            if (_write_failure_count == 1 || (_write_failure_count % 64) == 0) {
+                mclog::tagWarn(
+                    _tag,
+                    "id: {} WritePos ACK/readback failed {} times, latest ret: {}; command may still have been delivered",
+                    _config.id,
+                    _write_failure_count,
+                    ret);
+            }
+            if (_write_failure_count >= 8) {
+                _available = false;
+                mclog::tagWarn(
+                    _tag,
+                    "id: {} disabling servo writes after {} consecutive failures",
+                    _config.id,
+                    _write_failure_count);
+            }
+        } else {
+            _write_failure_count = 0;
         }
     }
 
     int getCurrentAngle() override
     {
-        if (!_available) {
+        if (!_available || !_readback_available) {
             return Servo::getCurrentAngle();
         }
 
@@ -164,7 +183,7 @@ public:
 
     bool is_moving_impl() override
     {
-        if (!_available) {
+        if (!_available || !_readback_available) {
             return false;
         }
 
@@ -200,7 +219,7 @@ public:
 
     bool getTorqueEnabled() override
     {
-        if (!_available) {
+        if (!_available || !_readback_available) {
             return false;
         }
 
@@ -215,8 +234,8 @@ public:
 
     void setCurrentAngleAsZero() override
     {
-        if (!_available) {
-            mclog::tagWarn(_tag, "id: {} skip zero calibration because servo is unavailable", _config.id);
+        if (!_available || !_readback_available) {
+            mclog::tagWarn(_tag, "id: {} skip zero calibration because servo readback is unavailable", _config.id);
             return;
         }
 
@@ -289,7 +308,9 @@ private:
     int _zero_pos      = 0;
     Mode _current_mode = Mode::Position;
     bool _available    = true;
+    bool _readback_available = true;
     bool _torque_enabled_cache = false;
+    int _write_failure_count = 0;
 
     bool is_raw_pos_valid(int raw_pos) const
     {
@@ -378,31 +399,43 @@ private:
     }
 };
 
-static void log_servo_readback_status(const ServoConfig_t& config, const char* axis)
+static bool probe_servo_readback_status(const ServoConfig_t& config, const char* axis)
 {
     const int ping_id = _scs_bus.Ping(static_cast<u8>(config.id));
-    if (ping_id == config.id) {
+    const bool ping_ok = ping_id == config.id;
+    if (ping_ok) {
         mclog::tagInfo(_hal_servo_tag, "{} servo id {} Ping OK", axis, config.id);
     } else {
         mclog::tagWarn(
             _hal_servo_tag,
-            "{} servo id {} Ping failed, ret: {}; not falling back to NullServo",
+            "{} servo id {} Ping failed, ret: {}",
             axis,
             config.id,
             ping_id);
     }
 
     const int current_pos = _scs_bus.ReadPos(config.id);
-    if (current_pos >= 0) {
+    const bool read_pos_ok = current_pos >= 0;
+    if (read_pos_ok) {
         mclog::tagInfo(_hal_servo_tag, "{} servo id {} ReadPos OK: {}", axis, config.id, current_pos);
     } else {
         mclog::tagWarn(
             _hal_servo_tag,
-            "{} servo id {} ReadPos failed, ret: {}; keeping ScsServo in readback_unverified mode",
+            "{} servo id {} ReadPos failed, ret: {}",
             axis,
             config.id,
             current_pos);
     }
+
+    if (!ping_ok && !read_pos_ok) {
+        mclog::tagWarn(
+            _hal_servo_tag,
+            "{} servo id {} readback unavailable; using write-only SCS servo",
+            axis,
+            config.id);
+        return false;
+    }
+    return true;
 }
 
 void Hal::servo_init()
@@ -434,10 +467,12 @@ void Hal::servo_init()
         yaw_servo   = std::make_unique<NullServo>(yaw_servo_config.angleLimit);
         pitch_servo = std::make_unique<NullServo>(pitch_servo_config.angleLimit);
     } else {
-        log_servo_readback_status(yaw_servo_config, "yaw");
-        log_servo_readback_status(pitch_servo_config, "pitch");
-        yaw_servo   = std::make_unique<ScsServo>(yaw_servo_config);
-        pitch_servo = std::make_unique<ScsServo>(pitch_servo_config);
+        yaw_servo = std::make_unique<ScsServo>(
+            yaw_servo_config,
+            probe_servo_readback_status(yaw_servo_config, "yaw"));
+        pitch_servo = std::make_unique<ScsServo>(
+            pitch_servo_config,
+            probe_servo_readback_status(pitch_servo_config, "pitch"));
     }
 
     auto motion      = std::make_unique<Motion>(std::move(yaw_servo), std::move(pitch_servo));

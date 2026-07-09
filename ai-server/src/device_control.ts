@@ -3,6 +3,8 @@ import { resolveDisplayImageSource } from './media.js'
 
 export type StackChanToolName =
     | 'stackchan_get_status'
+    | 'stackchan_set_speaker_volume'
+    | 'stackchan_play_test_tone'
     | 'stackchan_get_head_angles'
     | 'stackchan_set_head_angles'
     | 'stackchan_set_led_color'
@@ -17,10 +19,27 @@ export type StackChanToolName =
 export type StackChanDeviceSession = {
     callRobotTool(name: string, args: Record<string, unknown>): Promise<unknown>
     enqueueFollowup(prompt: string): Promise<void>
+    getBridgeStatus(): StackChanBridgeStatus
+}
+
+export type StackChanBridgeStatus = {
+    connected: boolean
+    sessionId?: string
+    state?: string
+    readyForPrompt: boolean
+    reason: string
+    ttsStreaming?: boolean
+    cooldownRemainingMs?: number
+    followupRunning?: boolean
+    followupQueued?: number
+    pendingMcp?: number
+    lastListenMode?: string
 }
 
 const TOOL_MAP: Record<StackChanToolName, string> = {
     stackchan_get_status: 'self.robot.get_status',
+    stackchan_set_speaker_volume: 'self.robot.set_speaker_volume',
+    stackchan_play_test_tone: 'self.audio.play_test_tone',
     stackchan_get_head_angles: 'self.robot.get_head_angles',
     stackchan_set_head_angles: 'self.robot.set_head_angles',
     stackchan_set_led_color: 'self.robot.set_led_color',
@@ -104,6 +123,38 @@ function readReminderRepeat(value: unknown): boolean {
     return false
 }
 
+function clampSpeakerVolume(value: unknown): number {
+    const volume = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(volume)) {
+        throw new Error('volume must be a finite number')
+    }
+    return Math.max(0, Math.min(100, Math.round(volume)))
+}
+
+function clampToneFrequency(value: unknown): number {
+    const frequency = typeof value === 'number' ? value : Number(value ?? 440)
+    if (!Number.isFinite(frequency)) {
+        throw new Error('frequency_hz must be a finite number')
+    }
+    return Math.max(100, Math.min(2000, Math.round(frequency)))
+}
+
+function clampToneDurationMs(value: unknown): number {
+    const duration = typeof value === 'number' ? value : Number(value ?? 800)
+    if (!Number.isFinite(duration)) {
+        throw new Error('duration_ms must be a finite number')
+    }
+    return Math.max(100, Math.min(3000, Math.round(duration)))
+}
+
+function clampToneAmplitude(value: unknown): number {
+    const amplitude = typeof value === 'number' ? value : Number(value ?? 6000)
+    if (!Number.isFinite(amplitude)) {
+        throw new Error('amplitude must be a finite number')
+    }
+    return Math.max(500, Math.min(16000, Math.round(amplitude)))
+}
+
 function readReminderId(value: unknown): number {
     const id = typeof value === 'number' ? value : Number(value)
     if (!Number.isInteger(id) || id < 0) {
@@ -154,6 +205,21 @@ async function callStackChanTool(name: StackChanToolName, args: Record<string, u
         })
     }
 
+    if (name === 'stackchan_set_speaker_volume') {
+        return await activeSession.callRobotTool(TOOL_MAP[name], {
+            volume: clampSpeakerVolume(args['volume']),
+            permanent: readReminderRepeat(args['permanent']),
+        })
+    }
+
+    if (name === 'stackchan_play_test_tone') {
+        return await activeSession.callRobotTool(TOOL_MAP[name], {
+            frequency_hz: clampToneFrequency(args['frequency_hz']),
+            duration_ms: clampToneDurationMs(args['duration_ms']),
+            amplitude: clampToneAmplitude(args['amplitude']),
+        })
+    }
+
     if (name === 'stackchan_stop_reminder') {
         return await activeSession.callRobotTool(TOOL_MAP[name], {
             id: readReminderId(args['id']),
@@ -176,6 +242,18 @@ export function startDeviceControlServer(port: number, host = '127.0.0.1'): void
 
     const server = http.createServer(async (req, res) => {
         const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+        if (req.method === 'GET' && pathname === '/internal/status') {
+            sendJson(res, 200, {
+                success: true,
+                result: activeSession?.getBridgeStatus() ?? {
+                    connected: false,
+                    readyForPrompt: false,
+                    reason: 'no_device_session',
+                },
+            })
+            return
+        }
+
         if (req.method !== 'POST' || (pathname !== '/tools/call' && pathname !== '/internal/followup')) {
             sendJson(res, 404, { success: false, error: 'not found' })
             return

@@ -21,6 +21,9 @@ type WavInfo = {
 type ProbeResult = {
     index: number
     prompt: string
+    playTarget: string
+    playTargetName: string
+    playTargetVolume: number | null
     promptDurationMs: number
     playbackElapsedMs: number
     responseStartMsFromRecordingStart: number | null
@@ -28,6 +31,8 @@ type ProbeResult = {
     internalTranscript: string | null
     internalSttElapsedMs: number | null
     internalFirstTtsSynthesizeElapsedMs: number | null
+    internalFirstTtsFrameSentElapsedMs: number | null
+    internalFirstAudibleTtsFrameSentElapsedMs: number | null
     internalProcessElapsedMs: number | null
     internalLogError?: string
     transcript: string
@@ -41,6 +46,27 @@ type PipeWireTarget = {
     selector: string
     requestedName: string
     volume: number | null
+}
+
+type BridgeStatus = {
+    connected?: boolean
+    readyForPrompt?: boolean
+    reason?: string
+    state?: string
+    ttsStreaming?: boolean
+    cooldownRemainingMs?: number
+    followupRunning?: boolean
+    followupQueued?: number
+}
+
+type OptionalRunResult = RunResult & {
+    ok: boolean
+    error?: string
+}
+
+type AudioPreflightReport = {
+    ok: boolean
+    lines: string[]
 }
 
 const DEFAULT_PROMPTS = [
@@ -60,18 +86,28 @@ const BLUETOOTH_DEVICE = process.env.STACKCHAN_PROBE_BLUETOOTH_DEVICE ?? ''
 const BLUETOOTH_DEVICE_NAME = process.env.STACKCHAN_PROBE_BLUETOOTH_DEVICE_NAME ?? PLAY_TARGET_NAME
 const BLUETOOTH_CONNECT_TIMEOUT_MS = readEnvInt('STACKCHAN_PROBE_BLUETOOTH_CONNECT_TIMEOUT_MS', 12000, 1000, 60000)
 const BLUETOOTH_SETTLE_MS = readEnvInt('STACKCHAN_PROBE_BLUETOOTH_SETTLE_MS', 4000, 500, 20000)
-const RECORD_TARGET = process.env.STACKCHAN_PROBE_RECORD_TARGET ?? '57'
+const RECORD_TARGET = process.env.STACKCHAN_PROBE_RECORD_TARGET ?? ''
+const RECORD_TARGET_NAME = process.env.STACKCHAN_PROBE_RECORD_TARGET_NAME ?? 'C505 HD Webcam'
 const RECORD_LEAD_MS = readEnvInt('STACKCHAN_PROBE_RECORD_LEAD_MS', 500, 0, 5000)
 const RESPONSE_WINDOW_MS = readEnvInt('STACKCHAN_PROBE_RESPONSE_WINDOW_MS', 9000, 2000, 60000)
-const RESPONSE_GUARD_MS = readEnvInt('STACKCHAN_PROBE_RESPONSE_GUARD_MS', 250, 0, 3000)
+const RESPONSE_GUARD_MS = readEnvInt('STACKCHAN_PROBE_RESPONSE_GUARD_MS', 700, 0, 3000)
 const SPEECH_RMS_THRESHOLD = readEnvFloat('STACKCHAN_PROBE_SPEECH_RMS_THRESHOLD', 0.018, 0.001, 0.2)
 const SPEECH_MIN_MS = readEnvInt('STACKCHAN_PROBE_SPEECH_MIN_MS', 120, 20, 2000)
+const PRE_PROMPT_QUIET_MS = readEnvInt('STACKCHAN_PROBE_PRE_PROMPT_QUIET_MS', 1500, 0, 10000)
+const PRE_PROMPT_QUIET_TIMEOUT_MS = readEnvInt('STACKCHAN_PROBE_PRE_PROMPT_QUIET_TIMEOUT_MS', 30000, 1000, 120000)
+const PRE_PROMPT_QUIET_RMS_THRESHOLD = readEnvFloat('STACKCHAN_PROBE_PRE_PROMPT_QUIET_RMS_THRESHOLD', 0.06, 0.001, 0.2)
 const PROMPT_LEAD_SILENCE_MS = readEnvInt('STACKCHAN_PROBE_PROMPT_LEAD_SILENCE_MS', 800, 0, 3000)
 const PROMPT_WARMUP_TONE_MS = readEnvInt('STACKCHAN_PROBE_PROMPT_WARMUP_TONE_MS', 0, 0, 3000)
 const PROMPT_WARMUP_TONE_VOLUME = readEnvFloat('STACKCHAN_PROBE_PROMPT_WARMUP_TONE_VOLUME', 0.02, 0.001, 0.2)
 const AI_SERVER_SERVICE = process.env.STACKCHAN_PROBE_AI_SERVER_SERVICE ?? 'stackchan-ai-server.service'
+const BRIDGE_STATUS_URL = process.env.STACKCHAN_PROBE_BRIDGE_STATUS_URL ??
+    `http://127.0.0.1:${process.env.STACKCHAN_CONTROL_PORT ?? '8766'}/internal/status`
+const WAIT_BRIDGE_READY = readEnvBool('STACKCHAN_PROBE_WAIT_BRIDGE_READY', true)
+const BRIDGE_READY_TIMEOUT_MS = readEnvInt('STACKCHAN_PROBE_BRIDGE_READY_TIMEOUT_MS', 60000, 1000, 300000)
+const BRIDGE_READY_POLL_MS = readEnvInt('STACKCHAN_PROBE_BRIDGE_READY_POLL_MS', 500, 100, 5000)
 const STT_URL = process.env.STACKCHAN_PROBE_STT_URL ?? 'http://127.0.0.1:52626/v1/audio/transcriptions'
 const STT_API_KEY = process.env.STACKCHAN_PROBE_STT_API_KEY ?? process.env.WHISPER_API_KEY ?? ''
+const CURRENT_USER = process.env.USER || process.env.LOGNAME || 'hayato'
 
 function loadDotEnvFile(filePath: string): void {
     if (!existsSync(filePath)) return
@@ -150,6 +186,19 @@ function run(command: string, args: string[], options: { cwd?: string, timeoutMs
     })
 }
 
+async function runOptional(command: string, args: string[], options: { cwd?: string, timeoutMs?: number } = {}): Promise<OptionalRunResult> {
+    try {
+        return { ok: true, ...(await run(command, args, options)) }
+    } catch (error) {
+        return {
+            ok: false,
+            stdout: '',
+            stderr: '',
+            error: error instanceof Error ? error.message : String(error),
+        }
+    }
+}
+
 function parseBluetoothDevice(devices: string, deviceName: string): string | null {
     const needle = deviceName.trim().toLowerCase()
     if (!needle) return null
@@ -162,26 +211,196 @@ function parseBluetoothDevice(devices: string, deviceName: string): string | nul
     return null
 }
 
+function parseWpctlSectionEntries(status: string, sectionName: string): Array<{ id: string, name: string }> {
+    const entries: Array<{ id: string, name: string }> = []
+    let inAudio = false
+    let inSection = false
+    for (const line of status.split(/\r?\n/)) {
+        if (/^Audio\s*$/.test(line)) {
+            inAudio = true
+            inSection = false
+            continue
+        }
+        if (/^Video\s*$/.test(line) || /^Settings\s*$/.test(line)) {
+            inAudio = false
+            inSection = false
+            continue
+        }
+        if (!inAudio) continue
+
+        if (new RegExp(`^\\s*├─ ${sectionName}:`).test(line)) {
+            inSection = true
+            continue
+        }
+        if (inSection && /^\s*├─ /.test(line)) {
+            inSection = false
+        }
+        if (!inSection) continue
+
+        const match = line.match(/^\D*(\d+)\.\s+(.+?)(?:\s+\[|$)/)
+        if (match) entries.push({ id: match[1], name: match[2].trim() })
+    }
+    return entries
+}
+
+function readProcFile(filePath: string): string {
+    try {
+        return readFileSync(filePath, 'utf8')
+    } catch {
+        return ''
+    }
+}
+
+function summarizeAlsaCards(cards: string): string {
+    const names = cards
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => /^\d+\s+\[/.test(line))
+    if (names.length === 0) return 'none'
+    return names.join(' | ')
+}
+
+async function readDevSndSummary(): Promise<string> {
+    const listing = await runOptional('ls', ['-l', '/dev/snd'], { timeoutMs: 2000 })
+    if (!listing.ok) return listing.error ?? 'unavailable'
+    return listing.stdout.trim() || 'empty'
+}
+
+function devSndAclTargets(): string[] {
+    const preferred = [
+        '/dev/snd/controlC2',
+        '/dev/snd/pcmC2D0c',
+        '/dev/snd/controlC0',
+    ]
+    return preferred.filter(target => existsSync(target))
+}
+
+async function readDevSndAclSummary(): Promise<string> {
+    const targets = devSndAclTargets()
+    if (targets.length === 0) return 'no /dev/snd control/pcm targets exist'
+    const acl = await runOptional('getfacl', ['-p', ...targets], { timeoutMs: 2000 })
+    if (!acl.ok) return acl.error ?? 'getfacl unavailable'
+    return acl.stdout
+        .split(/\r?\n/)
+        .filter(line => /^(# file:|user:|group:|mask:|other:)/.test(line))
+        .join('\n')
+}
+
+async function readBluetoothInfo(): Promise<string> {
+    const device = BLUETOOTH_DEVICE || parseBluetoothDevice((await runOptional('bluetoothctl', ['devices'], { timeoutMs: 3000 })).stdout, BLUETOOTH_DEVICE_NAME)
+    if (!device) return `Bluetooth device "${BLUETOOTH_DEVICE_NAME}" not found`
+    const info = await runOptional('bluetoothctl', ['info', device], { timeoutMs: 3000 })
+    return info.ok ? info.stdout.trim() : (info.error ?? 'bluetoothctl info unavailable')
+}
+
+function bluetoothIsConnected(info: string): boolean {
+    return /^(\s*)Connected:\s+yes\s*$/mi.test(info)
+}
+
+function commandSummary(result: OptionalRunResult): string {
+    if (!result.ok) return `failed (${result.error})`
+    const text = `${result.stdout}${result.stderr}`.trim()
+    if (!text) return 'ok'
+    return text.split(/\r?\n/).slice(0, 3).join(' ; ')
+}
+
+async function runAudioPreflight(): Promise<AudioPreflightReport> {
+    const lines: string[] = []
+    const failures: string[] = []
+
+    const wpctl = await runOptional('wpctl', ['status'], { timeoutMs: 3000 })
+    const wpctlStatus = wpctl.stdout
+    const devices = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Devices') : []
+    const sinks = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Sinks') : []
+    const sources = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Sources') : []
+    const playTarget = wpctl.ok ? parseWpctlTarget(wpctlStatus, PLAY_TARGET_NAME) : null
+    const recordTarget = wpctl.ok ? parseWpctlSectionTarget(wpctlStatus, 'Sources', RECORD_TARGET || RECORD_TARGET_NAME) : null
+    const arecord = await runOptional('arecord', ['-l'], { timeoutMs: 3000 })
+    const aplay = await runOptional('aplay', ['-l'], { timeoutMs: 3000 })
+    const user = await runOptional('id', [], { timeoutMs: 2000 })
+    const userLine = user.stdout.trim()
+    const bluetoothInfo = await readBluetoothInfo()
+    const sndAclSummary = await readDevSndAclSummary()
+
+    lines.push('Audio preflight')
+    lines.push(`- Bridge: ${bridgeWaitSummary(await readBridgeStatus().catch(() => ({ connected: false, readyForPrompt: false, reason: 'status_unavailable' })))}`)
+    lines.push(`- PipeWire command: ${wpctl.ok ? 'ok' : `failed (${wpctl.error})`}`)
+    lines.push(`- PipeWire audio devices: ${devices.length}`)
+    lines.push(`- PipeWire sinks: ${sinks.length ? sinks.map(s => `${s.id}:${s.name}`).join(' | ') : 'none'}`)
+    lines.push(`- PipeWire sources: ${sources.length ? sources.map(s => `${s.id}:${s.name}`).join(' | ') : 'none'}`)
+    lines.push(`- Requested JBL sink name: ${JSON.stringify(PLAY_TARGET_NAME)} -> ${playTarget ? `${playTarget.id}:${playTarget.name}` : 'not found'}`)
+    lines.push(`- Requested recording target: ${RECORD_TARGET || RECORD_TARGET_NAME || '(default)'} -> ${recordTarget ? `${recordTarget.id}:${recordTarget.name}` : 'not found'}`)
+
+    const alsaCards = readProcFile('/proc/asound/cards')
+    const alsaDevices = readProcFile('/proc/asound/devices')
+    lines.push(`- ALSA cards in kernel: ${summarizeAlsaCards(alsaCards)}`)
+    lines.push(`- arecord -l: ${commandSummary(arecord)}`)
+    lines.push(`- aplay -l: ${commandSummary(aplay)}`)
+    lines.push(`- /dev/snd: ${(await readDevSndSummary()).split(/\r?\n/).slice(0, 8).join(' ; ')}`)
+    lines.push(`- /dev/snd ACL sample: ${sndAclSummary.replace(/\n/g, ' ; ')}`)
+    lines.push(`- User: ${userLine || 'unknown'}`)
+    lines.push(`- Bluetooth JBL: ${bluetoothInfo.split(/\r?\n/).filter(line => /^(Device|Name:|Connected:|Paired:|Trusted:)/.test(line.trim())).join(' ; ') || 'unavailable'}`)
+
+    if (!wpctl.ok) failures.push('PipeWire status cannot be read.')
+    if (devices.length === 0) failures.push('PipeWire sees no audio devices.')
+    if (!PLAY_TARGET && !playTarget) failures.push(`JBL playback sink "${PLAY_TARGET_NAME}" is not available in PipeWire.`)
+    if (!recordTarget) failures.push(`Recording target "${RECORD_TARGET || RECORD_TARGET_NAME}" is not available in PipeWire sources.`)
+    if (!bluetoothIsConnected(bluetoothInfo)) failures.push(`Bluetooth speaker "${BLUETOOTH_DEVICE_NAME}" is not connected.`)
+    if (!arecord.ok || /no soundcards|サウンドカードが見つかりません/i.test(`${arecord.stdout}${arecord.stderr}`)) {
+        failures.push('arecord cannot see a capture device.')
+    }
+    if (!aplay.ok || /no soundcards|サウンドカードが見つかりません/i.test(`${aplay.stdout}${aplay.stderr}`)) {
+        failures.push('aplay cannot see a playback device.')
+    }
+
+    const hasAlsaCards = /^\s*\d+\s+\[/.test(alsaCards)
+    if (hasAlsaCards && devices.length === 0) {
+        failures.push('ALSA cards exist, but the current PipeWire session cannot access them.')
+        if (!/\baudio\b/.test(userLine)) {
+            failures.push('The current user is not in the audio group and /dev/snd is likely seat/ACL-gated.')
+        }
+    }
+
+    if (failures.length > 0) {
+        lines.push('')
+        lines.push('Required before physical 10-turn probing:')
+        for (const failure of failures) lines.push(`- ${failure}`)
+        lines.push('')
+        lines.push('Likely local fixes:')
+        lines.push(`- Run: sudo setfacl -m u:${CURRENT_USER}:rw /dev/snd/*`)
+        lines.push(`- Or add ${CURRENT_USER} to the audio group and start a fresh login session.`)
+        lines.push('- Then run: systemctl --user restart pipewire wireplumber')
+        lines.push(`- Reconnect JBL if needed: bluetoothctl connect ${BLUETOOTH_DEVICE || '<JBL_MAC>'}`)
+        lines.push('- Alternatively, log into the local desktop seat as hayato so audio-device ACLs are assigned to this user.')
+    }
+
+    return { ok: failures.length === 0, lines }
+}
+
 function parseWpctlTarget(status: string, targetName: string): PipeWireTarget | null {
+    return parseWpctlSectionTarget(status, 'Sinks', targetName)
+}
+
+function parseWpctlSectionTarget(status: string, sectionName: 'Sinks' | 'Sources', targetName: string): PipeWireTarget | null {
     const normalizedNeedle = targetName.trim().toLowerCase()
     if (!normalizedNeedle) return null
 
-    let inSinks = false
+    let inSection = false
     for (const line of status.split(/\r?\n/)) {
-        if (/^\s*├─ Sinks:/.test(line)) {
-            inSinks = true
+        if (new RegExp(`^\\s*├─ ${sectionName}:`).test(line)) {
+            inSection = true
             continue
         }
-        if (inSinks && /^\s*├─ /.test(line)) {
-            inSinks = false
+        if (inSection && /^\s*├─ /.test(line)) {
+            inSection = false
         }
-        if (!inSinks) continue
+        if (!inSection) continue
 
         const match = line.match(/^\D*(\d+)\.\s+(.+?)(?:\s+\[vol:|$)/)
         if (!match) continue
 
         const name = match[2].trim()
-        if (name.toLowerCase().includes(normalizedNeedle)) {
+        if (match[1] === targetName || name.toLowerCase().includes(normalizedNeedle)) {
             return {
                 id: match[1],
                 name,
@@ -193,6 +412,17 @@ function parseWpctlTarget(status: string, targetName: string): PipeWireTarget | 
     }
 
     return null
+}
+
+async function resolveRecordTarget(): Promise<PipeWireTarget | null> {
+    if (!RECORD_TARGET && !RECORD_TARGET_NAME) return null
+    const status = (await run('wpctl', ['status'])).stdout
+    const target = parseWpctlSectionTarget(status, 'Sources', RECORD_TARGET || RECORD_TARGET_NAME)
+    if (!target) {
+        throw new Error(`PipeWire recording target "${RECORD_TARGET || RECORD_TARGET_NAME}" was not found. Run "npm run probe:voice -- --devices" after connecting the USB camera microphone.`)
+    }
+    target.volume = await getPipeWireVolume(target.selector)
+    return target
 }
 
 async function getPipeWireVolume(selector: string): Promise<number | null> {
@@ -324,6 +554,136 @@ async function detectSpeechStartMs(filePath: string, afterMs: number): Promise<n
     return null
 }
 
+async function recordMicSample(recordingPath: string, durationMs: number, recordTarget?: PipeWireTarget | null): Promise<void> {
+    const args = [
+        ...(recordTarget?.selector ? ['--target', recordTarget.selector] : []),
+        '--rate', '16000',
+        '--channels', '1',
+        '--format', 's16',
+        recordingPath,
+    ]
+    const recorder = spawn('pw-record', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const recorderErrors: Buffer[] = []
+    recorder.stderr.on('data', (chunk: Buffer) => recorderErrors.push(chunk))
+    await sleep(durationMs)
+
+    recorder.kill('SIGINT')
+    const exitCode = await new Promise<number | null>((resolve) => {
+        const timeout = setTimeout(() => {
+            recorder.kill('SIGTERM')
+        }, 2000)
+        recorder.on('close', (code) => {
+            clearTimeout(timeout)
+            resolve(code)
+        })
+    })
+    if (exitCode !== 0 && exitCode !== null) {
+        const recordedBytes = await stat(recordingPath).then(info => info.size).catch(() => 0)
+        if (recordedBytes > 44) return
+        const stderr = Buffer.concat(recorderErrors).toString('utf8')
+        throw new Error(`pw-record quiet sample failed with code ${exitCode}: ${stderr}`)
+    }
+}
+
+async function maxSpeechRms(filePath: string): Promise<number> {
+    const wav = await readFile(filePath)
+    const info = readWavInfo(wav)
+    const bytesPerSampleFrame = info.channels * (info.bitsPerSample / 8)
+    const frameMs = 20
+    const frameBytes = Math.max(bytesPerSampleFrame, Math.round(info.sampleRate * frameMs / 1000) * bytesPerSampleFrame)
+    let maxRms = 0
+
+    for (let offset = info.dataOffset; offset < info.dataOffset + info.dataBytes; offset += frameBytes) {
+        maxRms = Math.max(maxRms, rmsForFrame(wav, info, offset, frameBytes))
+    }
+    return maxRms
+}
+
+async function waitForQuietBeforePrompt(runDir: string, index: number): Promise<void> {
+    if (PRE_PROMPT_QUIET_MS <= 0) return
+    const recordTarget = await resolveRecordTarget()
+
+    const deadline = Date.now() + PRE_PROMPT_QUIET_TIMEOUT_MS
+    let attempt = 0
+    while (true) {
+        attempt += 1
+        const samplePath = path.join(runDir, `quiet-${index}-${attempt}.wav`)
+        await recordMicSample(samplePath, PRE_PROMPT_QUIET_MS, recordTarget)
+        const maxRms = await maxSpeechRms(samplePath)
+        if (maxRms < PRE_PROMPT_QUIET_RMS_THRESHOLD) {
+            if (attempt > 1) {
+                console.log(`[probe] ${index}: pre-prompt quiet after ${attempt} checks maxRms=${maxRms.toFixed(4)}`)
+            }
+            return
+        }
+        if (Date.now() >= deadline) {
+            console.warn(`[probe] ${index}: pre-prompt quiet timeout, proceeding maxRms=${maxRms.toFixed(4)}`)
+            return
+        }
+        console.log(`[probe] ${index}: waiting for M5 speech to finish maxRms=${maxRms.toFixed(4)}`)
+        await sleep(500)
+    }
+}
+
+async function readBridgeStatus(): Promise<BridgeStatus> {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 1500)
+    try {
+        const response = await fetch(BRIDGE_STATUS_URL, { signal: controller.signal })
+        const text = await response.text()
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${text}`)
+        const body = JSON.parse(text) as Record<string, unknown>
+        const result = body['result']
+        if (typeof result !== 'object' || result === null) {
+            throw new Error('Bridge status response did not include result')
+        }
+        return result as BridgeStatus
+    } finally {
+        clearTimeout(timeout)
+    }
+}
+
+function bridgeWaitSummary(status: BridgeStatus): string {
+    const parts = [
+        `connected=${status.connected === true}`,
+        `ready=${status.readyForPrompt === true}`,
+        `reason=${status.reason ?? 'unknown'}`,
+    ]
+    if (status.state) parts.push(`state=${status.state}`)
+    if (status.ttsStreaming !== undefined) parts.push(`tts=${status.ttsStreaming}`)
+    if (typeof status.cooldownRemainingMs === 'number') parts.push(`cooldown=${Math.round(status.cooldownRemainingMs)}ms`)
+    if (status.followupRunning !== undefined) parts.push(`followup=${status.followupRunning}`)
+    if (typeof status.followupQueued === 'number') parts.push(`queued=${status.followupQueued}`)
+    return parts.join(' ')
+}
+
+async function waitForBridgeReadyBeforePrompt(index: number): Promise<void> {
+    if (!WAIT_BRIDGE_READY) return
+
+    const deadline = Date.now() + BRIDGE_READY_TIMEOUT_MS
+    let lastSummary = ''
+    let lastLogAt = 0
+    while (true) {
+        const status = await readBridgeStatus()
+        if (status.connected === true && status.readyForPrompt === true) {
+            if (lastSummary) console.log(`[probe] ${index}: bridge ready ${bridgeWaitSummary(status)}`)
+            return
+        }
+
+        const summary = bridgeWaitSummary(status)
+        const now = Date.now()
+        if (summary !== lastSummary || now - lastLogAt > 5000) {
+            console.log(`[probe] ${index}: waiting for bridge readiness ${summary}`)
+            lastSummary = summary
+            lastLogAt = now
+        }
+        if (now >= deadline) {
+            throw new Error(`Bridge did not become ready before prompt ${index}: ${summary}`)
+        }
+        await sleep(BRIDGE_READY_POLL_MS)
+    }
+}
+
 async function transcribeWav(filePath: string): Promise<string> {
     const wav = await readFile(filePath)
     const form = new FormData()
@@ -346,6 +706,8 @@ type InternalTurnSummary = Pick<ProbeResult,
     'internalTranscript' |
     'internalSttElapsedMs' |
     'internalFirstTtsSynthesizeElapsedMs' |
+    'internalFirstTtsFrameSentElapsedMs' |
+    'internalFirstAudibleTtsFrameSentElapsedMs' |
     'internalProcessElapsedMs' |
     'internalLogError'
 >
@@ -363,12 +725,18 @@ function lastRegexNumber(text: string, pattern: RegExp): number | null {
     return Number.isFinite(parsed) ? parsed : null
 }
 
+const INTERNAL_TTS_SEGMENT_SYNTHESIZE_RE = /\[timing\] done [^\n]*:tts(?:\.followup)?(?:\.stream)?\.(?:segment0|error\.segment0)\.synthesize elapsed=([0-9.]+)ms/g
+const INTERNAL_TTS_FIRST_FRAME_RE = /\[timing\] mark [^\n]*:tts(?:\.followup)?(?:\.stream)?\.first_frame_sent elapsed=([0-9.]+)ms/g
+const INTERNAL_TTS_FIRST_AUDIBLE_FRAME_RE = /\[timing\] mark [^\n]*:tts(?:\.followup)?(?:\.stream)?\.first_audible_frame_sent elapsed=([0-9.]+)ms/g
+
 async function readInternalTurnSummary(sinceEpochMs: number): Promise<InternalTurnSummary> {
     if (!AI_SERVER_SERVICE) {
         return {
             internalTranscript: null,
             internalSttElapsedMs: null,
             internalFirstTtsSynthesizeElapsedMs: null,
+            internalFirstTtsFrameSentElapsedMs: null,
+            internalFirstAudibleTtsFrameSentElapsedMs: null,
             internalProcessElapsedMs: null,
         }
     }
@@ -384,7 +752,9 @@ async function readInternalTurnSummary(sinceEpochMs: number): Promise<InternalTu
         return {
             internalTranscript: lastRegexValue(stdout, /\] STT: "([^"]*)"/g),
             internalSttElapsedMs: lastRegexNumber(stdout, /\[timing\] done [^\n]*:stt elapsed=([0-9.]+)ms/g),
-            internalFirstTtsSynthesizeElapsedMs: lastRegexNumber(stdout, /\[timing\] done [^\n]*:tts\.(?:stream\.)?(?:segment0|error\.segment0|followup\.segment0)\.synthesize elapsed=([0-9.]+)ms/g),
+            internalFirstTtsSynthesizeElapsedMs: lastRegexNumber(stdout, INTERNAL_TTS_SEGMENT_SYNTHESIZE_RE),
+            internalFirstTtsFrameSentElapsedMs: lastRegexNumber(stdout, INTERNAL_TTS_FIRST_FRAME_RE),
+            internalFirstAudibleTtsFrameSentElapsedMs: lastRegexNumber(stdout, INTERNAL_TTS_FIRST_AUDIBLE_FRAME_RE),
             internalProcessElapsedMs: lastRegexNumber(stdout, /\[timing\] done [^\n]*:process elapsed=([0-9.]+)ms/g),
         }
     } catch (error) {
@@ -392,15 +762,17 @@ async function readInternalTurnSummary(sinceEpochMs: number): Promise<InternalTu
             internalTranscript: null,
             internalSttElapsedMs: null,
             internalFirstTtsSynthesizeElapsedMs: null,
+            internalFirstTtsFrameSentElapsedMs: null,
+            internalFirstAudibleTtsFrameSentElapsedMs: null,
             internalProcessElapsedMs: null,
             internalLogError: error instanceof Error ? error.message : String(error),
         }
     }
 }
 
-async function recordWhilePlaying(promptPath: string, recordingPath: string, playTarget: PipeWireTarget): Promise<number> {
+async function recordWhilePlaying(promptPath: string, recordingPath: string, playTarget: PipeWireTarget, recordTarget: PipeWireTarget | null): Promise<number> {
     const args = [
-        ...(RECORD_TARGET ? ['--target', RECORD_TARGET] : []),
+        ...(recordTarget?.selector ? ['--target', recordTarget.selector] : []),
         '--rate', '16000',
         '--channels', '1',
         '--format', 's16',
@@ -457,16 +829,41 @@ async function writePromptWav(prompt: string, promptPath: string): Promise<void>
 
     const rawPromptPath = promptPath.replace(/\.wav$/i, '.raw.wav')
     await writeFile(rawPromptPath, wav)
+
     if (PROMPT_WARMUP_TONE_MS > 0) {
-        await run('ffmpeg', [
-            '-y',
-            '-loglevel', 'error',
+        const args = ['-y', '-loglevel', 'error']
+        const filters: string[] = []
+        const labels: string[] = []
+        let inputIndex = 0
+
+        args.push(
             '-f', 'lavfi',
             '-t', (PROMPT_WARMUP_TONE_MS / 1000).toFixed(3),
             '-i', 'sine=frequency=180:sample_rate=24000',
-            '-i', rawPromptPath,
+        )
+        filters.push(`[${inputIndex}:a]volume=${PROMPT_WARMUP_TONE_VOLUME},aresample=24000[a${inputIndex}]`)
+        labels.push(`[a${inputIndex}]`)
+        inputIndex += 1
+
+        if (PROMPT_LEAD_SILENCE_MS > 0) {
+            args.push(
+                '-f', 'lavfi',
+                '-t', (PROMPT_LEAD_SILENCE_MS / 1000).toFixed(3),
+                '-i', 'anullsrc=r=24000:cl=mono',
+            )
+            filters.push(`[${inputIndex}:a]aresample=24000[a${inputIndex}]`)
+            labels.push(`[a${inputIndex}]`)
+            inputIndex += 1
+        }
+
+        args.push('-i', rawPromptPath)
+        filters.push(`[${inputIndex}:a]aresample=24000[a${inputIndex}]`)
+        labels.push(`[a${inputIndex}]`)
+
+        await run('ffmpeg', [
+            ...args,
             '-filter_complex',
-            `[0:a]volume=${PROMPT_WARMUP_TONE_VOLUME},aresample=24000[a0];[1:a]aresample=24000[a1];[a0][a1]concat=n=2:v=0:a=1[out]`,
+            `${filters.join(';')};${labels.join('')}concat=n=${labels.length}:v=0:a=1[out]`,
             '-map', '[out]',
             '-ac', '1',
             promptPath,
@@ -489,10 +886,13 @@ async function probeOne(prompt: string, index: number, runDir: string, playTarge
     const responsePath = path.join(runDir, `response-${index}.wav`)
     await writePromptWav(prompt, promptPath)
     const promptDurationMs = await wavDurationMs(promptPath)
+    const recordTarget = await resolveRecordTarget()
 
-    console.log(`[probe] ${index}: playing prompt through target=${playTarget.selector} (${playTarget.name}), recording target=${RECORD_TARGET}`)
+    await waitForBridgeReadyBeforePrompt(index)
+    await waitForQuietBeforePrompt(runDir, index)
+    console.log(`[probe] ${index}: playing prompt through target=${playTarget.selector} (${playTarget.name}), recording target=${recordTarget?.selector ?? '(default)'}${recordTarget ? ` (${recordTarget.name})` : ''}`)
     const internalLogSinceMs = Date.now()
-    const playbackElapsedMs = await recordWhilePlaying(promptPath, recordingPath, playTarget)
+    const playbackElapsedMs = await recordWhilePlaying(promptPath, recordingPath, playTarget, recordTarget)
     const promptEndMs = RECORD_LEAD_MS + playbackElapsedMs
     const detectAfterMs = promptEndMs + RESPONSE_GUARD_MS
     const responseStartMs = await detectSpeechStartMs(recordingPath, detectAfterMs)
@@ -504,6 +904,9 @@ async function probeOne(prompt: string, index: number, runDir: string, playTarge
     return {
         index,
         prompt,
+        playTarget: playTarget.selector,
+        playTargetName: playTarget.name,
+        playTargetVolume: playTarget.volume,
         promptDurationMs,
         playbackElapsedMs,
         responseStartMsFromRecordingStart: responseStartMs,
@@ -525,9 +928,14 @@ async function main(): Promise<void> {
             '  STACKCHAN_PROBE_PLAY_TARGET       PipeWire sink id/name for playback; overrides name lookup',
             '  STACKCHAN_PROBE_PLAY_TARGET_NAME  PipeWire sink name substring, default "JBL Flip 3"',
             '  STACKCHAN_PROBE_PLAY_VOLUME       Playback volume set before probing, default 0.35',
-            '  STACKCHAN_PROBE_RECORD_TARGET     PipeWire source id/name for USB camera mic, default 57',
+            '  STACKCHAN_PROBE_RECORD_TARGET     PipeWire source id/name for USB camera mic; overrides name lookup',
+            '  STACKCHAN_PROBE_RECORD_TARGET_NAME PipeWire source name substring, default "C505 HD Webcam"',
             '  STACKCHAN_PROBE_RESPONSE_WINDOW_MS Recording window after prompt playback, default 9000',
             '  STACKCHAN_PROBE_SPEECH_RMS_THRESHOLD RMS threshold for acoustic response start, default 0.018',
+            '  STACKCHAN_PROBE_RESPONSE_GUARD_MS Ignore prompt tail before detecting response, default 700',
+            '  STACKCHAN_PROBE_PRE_PROMPT_QUIET_MS Quiet webcam-mic window before each prompt, default 1500',
+            '  STACKCHAN_PROBE_WAIT_BRIDGE_READY Wait until ai-server reports listening/ready before each prompt, default true',
+            '  STACKCHAN_PROBE_BRIDGE_READY_TIMEOUT_MS Timeout for bridge readiness before failing a prompt',
             '  STACKCHAN_PROBE_PROMPT_LEAD_SILENCE_MS Silence prepended before JBL prompt playback, default 800',
             '  STACKCHAN_PROBE_PROMPT_WARMUP_TONE_MS Low-volume tone prepended before JBL prompt playback, default 0',
             '  STACKCHAN_PROBE_BLUETOOTH_RECONNECT Try bluetoothctl reconnect when JBL sink is missing, default true',
@@ -537,7 +945,14 @@ async function main(): Promise<void> {
             '  STACKCHAN_PROBE_STT_API_KEY       Optional transcription endpoint API key',
             '',
             'Use --devices to print PipeWire devices without playing audio.',
+            'Use --preflight to verify JBL playback, USB mic recording, PipeWire, ALSA, and bridge readiness.',
         ].join('\n'))
+        return
+    }
+    if (args.includes('--preflight')) {
+        const preflight = await runAudioPreflight()
+        console.log(preflight.lines.join('\n'))
+        if (!preflight.ok) process.exitCode = 1
         return
     }
     if (args.includes('--devices')) {
@@ -550,13 +965,19 @@ async function main(): Promise<void> {
     const selectedPrompts = prompts.length > 0 ? prompts : DEFAULT_PROMPTS
     const runDir = path.join(RUN_ROOT, new Date().toISOString().replace(/[:.]/g, '-'))
     await mkdir(runDir, { recursive: true })
-    const playTarget = await setPlayTargetVolume(await resolvePlayTarget())
+    const preflight = await runAudioPreflight()
+    if (!preflight.ok) {
+        await writeFile(path.join(runDir, 'preflight.txt'), `${preflight.lines.join('\n')}\n`)
+        throw new Error(`Audio preflight failed. Details were written to ${path.join(runDir, 'preflight.txt')}`)
+    }
+    const initialPlayTarget = await setPlayTargetVolume(await resolvePlayTarget())
 
     console.log(`[probe] run directory: ${runDir}`)
-    console.log(`[probe] playback target: ${playTarget.selector} (${playTarget.name}), volume=${playTarget.volume ?? 'unknown'}`)
+    console.log(`[probe] playback target: ${initialPlayTarget.selector} (${initialPlayTarget.name}), volume=${initialPlayTarget.volume ?? 'unknown'}`)
     console.log(`[probe] prompts: ${selectedPrompts.length}`)
     const results: ProbeResult[] = []
     for (let i = 0; i < selectedPrompts.length; i++) {
+        const playTarget = await setPlayTargetVolume(await resolvePlayTarget())
         const result = await probeOne(selectedPrompts[i], i + 1, runDir, playTarget)
         results.push(result)
         console.log(`[probe] ${result.index}: latency=${result.responseLatencyMsFromPlaybackEnd ?? 'not-detected'}ms internalStt=${JSON.stringify(result.internalTranscript)} transcript=${JSON.stringify(result.transcript)}`)
@@ -564,15 +985,18 @@ async function main(): Promise<void> {
 
     const reportPath = path.join(runDir, 'report.json')
     await writeFile(reportPath, `${JSON.stringify({
-        playTarget: playTarget.selector,
-        playTargetName: playTarget.name,
-        playTargetRequestedName: playTarget.requestedName,
-        playTargetVolume: playTarget.volume,
+        playTarget: initialPlayTarget.selector,
+        playTargetName: initialPlayTarget.name,
+        playTargetRequestedName: initialPlayTarget.requestedName,
+        playTargetVolume: initialPlayTarget.volume,
         configuredPlayVolume: PLAY_VOLUME,
-        recordTarget: RECORD_TARGET,
+        recordTarget: RECORD_TARGET || RECORD_TARGET_NAME,
         promptLeadSilenceMs: PROMPT_LEAD_SILENCE_MS,
         promptWarmupToneMs: PROMPT_WARMUP_TONE_MS,
         promptWarmupToneVolume: PROMPT_WARMUP_TONE_VOLUME,
+        waitBridgeReady: WAIT_BRIDGE_READY,
+        bridgeStatusUrl: BRIDGE_STATUS_URL,
+        bridgeReadyTimeoutMs: BRIDGE_READY_TIMEOUT_MS,
         aiServerService: AI_SERVER_SERVICE,
         responseWindowMs: RESPONSE_WINDOW_MS,
         speechRmsThreshold: SPEECH_RMS_THRESHOLD,

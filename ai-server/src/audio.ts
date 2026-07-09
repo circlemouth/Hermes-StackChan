@@ -8,20 +8,25 @@ export const INPUT_FRAME_SAMPLES = (INPUT_SAMPLE_RATE * INPUT_FRAME_DURATION_MS)
 export const OUTPUT_SAMPLE_RATE = 24000
 export const OUTPUT_FRAME_DURATION_MS = 60
 const OUTPUT_FRAME_SAMPLES = (OUTPUT_SAMPLE_RATE * OUTPUT_FRAME_DURATION_MS) / 1000  // 1440
+const OUTPUT_GAIN = readOutputGain()
+const OUTPUT_PCM_INPUT_MODE = readOpusPcmInputMode()
 
 const inputDecoder = new OpusScript(INPUT_SAMPLE_RATE, 1)
-const outputEncoder = new OpusScript(OUTPUT_SAMPLE_RATE, 1, OpusScript.Application.AUDIO)
 
 export type InputOpusDecoder = {
     decodeFrame(opus: Buffer): Buffer
+    dispose(): void
 }
 
 export function createInputOpusDecoder(): InputOpusDecoder {
-    const decoder = new OpusScript(INPUT_SAMPLE_RATE, 1)
+    const decoder = new OpusScript(INPUT_SAMPLE_RATE, 1) as OpusDecoderInternals
     return {
         decodeFrame(opus: Buffer): Buffer {
             const pcm = decoder.decode(opus)
             return Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+        },
+        dispose(): void {
+            decoder.delete?.()
         },
     }
 }
@@ -36,7 +41,8 @@ export function extractOpusPayload(data: Buffer, version: number): Buffer | null
         if (data.length < 4) return null
         if (data[0] !== 0x00 && data[0] !== 0x01) return null  // type != Opus
         const size = data.readUInt16BE(2)
-        return data.subarray(4, 4 + size)
+        if (size <= 0 || 4 + size > data.length) return null
+        return Buffer.from(data.subarray(4, 4 + size))
     }
     if (version === 2) {
         if (data.length < 16) return null
@@ -44,8 +50,10 @@ export function extractOpusPayload(data: Buffer, version: number): Buffer | null
         const type = data.readUInt16BE(2)
         if (type !== 0) return null
         const size = data.readUInt32BE(12)
-        return data.subarray(16, 16 + size)
+        if (size <= 0 || 16 + size > data.length) return null
+        return Buffer.from(data.subarray(16, 16 + size))
     }
+    if (data.length === 0) return null
     return data  // raw
 }
 
@@ -124,23 +132,113 @@ function resamplePcm(pcm: Buffer, fromRate: number, toRate: number): Buffer {
     return out
 }
 
-export function encodeWavToOpusFrames(wav: Buffer): Buffer[] {
+function readOutputGain(): number {
+    const gain = Number(process.env.STACKCHAN_TTS_OUTPUT_GAIN ?? 0.65)
+    if (!Number.isFinite(gain)) return 0.65
+    return Math.max(0.1, Math.min(1.0, gain))
+}
+
+type OpusPcmInputMode = 'direct' | 'buffer' | 'int16'
+
+function readOpusPcmInputMode(): OpusPcmInputMode {
+    const mode = process.env.STACKCHAN_OPUS_PCM_INPUT?.trim().toLowerCase()
+    if (mode === 'int16') return mode
+    return 'buffer'
+}
+
+type OpusEncoderInternals = {
+    encode(buffer: Buffer, frameSize: number): Buffer
+    handler?: {
+        _encode(inputPointer: number, inputLength: number, outputPointer: number, frameSize: number): number
+    }
+    inPCM?: Uint16Array
+    inPCMPointer?: number
+    outOpusPointer?: number
+    delete?: () => void
+}
+
+type OpusDecoderInternals = {
+    decode(buffer: Buffer): Buffer
+    delete?: () => void
+}
+
+function encodePcmFrame(outputEncoder: OpusEncoderInternals, chunk: Buffer): Buffer {
+    if (OUTPUT_PCM_INPUT_MODE === 'int16') {
+        return outputEncoder.encode(pcmChunkToInt16Array(chunk), OUTPUT_FRAME_SAMPLES)
+    }
+
+    // OpusScript's public encode() builds HEAPU16.subarray() with a byte pointer
+    // as the element index. Once the shared WASM heap grows, that view can become
+    // length 0 and TTS frames fail with "offset is out of bounds". Keep the same
+    // PCM representation the wrapper expects, but create the view from a byte
+    // offset so output TTS stays stable after long input-decoder activity.
+    const heapBuffer = outputEncoder.inPCM?.buffer
+    const inputPointer = outputEncoder.inPCMPointer
+    const outputPointer = outputEncoder.outOpusPointer
+    const handler = outputEncoder.handler
+    if (
+        heapBuffer
+        && typeof inputPointer === 'number'
+        && typeof outputPointer === 'number'
+        && Number.isInteger(inputPointer)
+        && Number.isInteger(outputPointer)
+        && handler
+    ) {
+        const pcmWords = new Uint16Array(heapBuffer, inputPointer, chunk.length)
+        pcmWords.set(chunk)
+        const encodedLength = handler._encode(inputPointer, chunk.length, outputPointer, OUTPUT_FRAME_SAMPLES)
+        if (encodedLength < 0) throw new Error(`Encode error: ${encodedLength}`)
+        return Buffer.from(new Uint8Array(heapBuffer, outputPointer, encodedLength))
+    }
+
+    return outputEncoder.encode(chunk, OUTPUT_FRAME_SAMPLES)
+}
+
+function applyPcmGain(pcm: Buffer, gain: number): Buffer {
+    if (gain >= 0.999) return pcm
+    const out = Buffer.alloc(pcm.length)
+    for (let i = 0; i + 1 < pcm.length; i += 2) {
+        const sample = pcm.readInt16LE(i)
+        const scaled = Math.round(sample * gain)
+        out.writeInt16LE(Math.max(-32768, Math.min(32767, scaled)), i)
+    }
+    return out
+}
+
+export function encodeWavToOpusFrames(wav: Buffer, leadSilenceMs = 0): Buffer[] {
     const { pcm, sampleRate } = wavToPcm(wav)
-    const resampled = resamplePcm(pcm, sampleRate, OUTPUT_SAMPLE_RATE)
-
     const frameBytes = OUTPUT_FRAME_SAMPLES * 2
-    const frames: Buffer[] = []
+    let resampled = applyPcmGain(resamplePcm(pcm, sampleRate, OUTPUT_SAMPLE_RATE), OUTPUT_GAIN)
+    if (leadSilenceMs > 0) {
+        const leadFrames = Math.ceil(leadSilenceMs / OUTPUT_FRAME_DURATION_MS)
+        resampled = Buffer.concat([Buffer.alloc(leadFrames * frameBytes, 0), resampled])
+    }
 
-    for (let i = 0; i < resampled.length; i += frameBytes) {
-        let chunk = resampled.subarray(i, i + frameBytes)
-        if (chunk.length < frameBytes) {
-            const padded = Buffer.alloc(frameBytes, 0)
-            chunk.copy(padded)
-            chunk = padded
+    const frames: Buffer[] = []
+    const outputEncoder = new OpusScript(OUTPUT_SAMPLE_RATE, 1, OpusScript.Application.AUDIO)
+
+    try {
+        for (let i = 0; i < resampled.length; i += frameBytes) {
+            let chunk = resampled.subarray(i, i + frameBytes)
+            if (chunk.length < frameBytes) {
+                const padded = Buffer.alloc(frameBytes, 0)
+                chunk.copy(padded)
+                chunk = padded
+            }
+            const encoded = encodePcmFrame(outputEncoder, chunk)
+            frames.push(Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength))
         }
-        const encoded = outputEncoder.encode(chunk, OUTPUT_FRAME_SAMPLES)
-        frames.push(Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength))
+    } finally {
+        outputEncoder.delete?.()
     }
 
     return frames
+}
+
+function pcmChunkToInt16Array(chunk: Buffer): Buffer {
+    const samples = new Int16Array(OUTPUT_FRAME_SAMPLES)
+    for (let sample = 0; sample < OUTPUT_FRAME_SAMPLES; sample++) {
+        samples[sample] = chunk.readInt16LE(sample * 2)
+    }
+    return samples as unknown as Buffer
 }

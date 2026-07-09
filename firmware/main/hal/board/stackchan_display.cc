@@ -6,6 +6,7 @@
 #include "stackchan_display.h"
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_random.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <cstring>
@@ -78,6 +79,24 @@ static lv_obj_t* create_hermes_avatar_screen(lv_disp_t* display)
     lv_refr_now(display);
     ESP_LOGI(TAG, "Hermes avatar screen loaded: display=%p previous=%p screen=%p", display, previous_screen, screen);
     return screen;
+}
+
+static int random_range(int min_value, int max_value)
+{
+    if (max_value <= min_value) {
+        return min_value;
+    }
+    return min_value + static_cast<int>(esp_random() % static_cast<uint32_t>(max_value - min_value + 1));
+}
+
+static bool is_thinking_status(const char* status)
+{
+    if (status == nullptr) {
+        return false;
+    }
+    return std::strstr(status, "thinking") != nullptr || std::strstr(status, "Thinking") != nullptr ||
+           std::strstr(status, "processing") != nullptr || std::strstr(status, "Processing") != nullptr ||
+           std::strstr(status, "考え") != nullptr || std::strstr(status, "思考") != nullptr;
 }
 
 // Have to register themes, so the asset apply can update the text font
@@ -455,14 +474,14 @@ void StackChanAvatarDisplay::CreateIdleMotionModifier()
             idle_motion_modifier_id_ = -1;
             return;
         case 1:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(9000, 14000));
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(12000, 20000));
             return;
         case 2:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(6000, 12000));
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(6000, 10000));
             return;
         case 3:
         default:
-            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(2500, 4500));
+            idle_motion_modifier_id_ = stackchan.addModifier(std::make_unique<IdleMotionModifier>(3000, 5500));
             return;
     }
 }
@@ -475,12 +494,12 @@ int StackChanAvatarDisplay::CreateIdleExpressionModifier()
         case 0:
             return -1;
         case 1:
-            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(5000, 10000));
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(9000, 16000));
         case 2:
-            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(3500, 8000));
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(6000, 12000));
         case 3:
         default:
-            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(2000, 6000));
+            return stackchan.addModifier(std::make_unique<IdleExpressionModifier>(2800, 6500));
     }
 }
 
@@ -510,22 +529,38 @@ void StackChanAvatarDisplay::ApplyConversationPose(ConversationPose pose)
 
     switch (pose) {
         case ConversationPose::Idle:
-            target_yaw   = 0;
-            target_pitch = 120;
-            speed        = 80;
+            target_yaw   = random_range(-60, 60);
+            target_pitch = random_range(90, 150);
+            speed        = random_range(55, 90);
             break;
         case ConversationPose::Listening:
-            target_yaw   = 0;
-            target_pitch = 150;
-            speed        = 130;
+            target_yaw   = random_range(-18, 18);
+            target_pitch = random_range(135, 170);
+            speed        = random_range(105, 145);
+            break;
+        case ConversationPose::Thinking:
+            if (motion.isMoving()) {
+                return;
+            }
+            target_yaw   = random_range(-35, 35);
+            target_pitch = random_range(150, 190);
+            speed        = random_range(70, 110);
             break;
         case ConversationPose::Speaking:
             if (motion.isMoving()) {
                 return;
             }
-            target_yaw   = std::clamp(current.x + (current.x >= 0 ? -20 : 20), -140, 140);
-            target_pitch = current.y + 25;
-            speed        = 90;
+            if (random_range(0, 99) < 55) {
+                target_yaw   = current.x + random_range(-12, 12);
+                target_pitch = current.y + random_range(18, 36);
+            } else if (random_range(0, 99) < 75) {
+                target_yaw   = current.x + random_range(-35, 35);
+                target_pitch = current.y + random_range(5, 25);
+            } else {
+                target_yaw   = random_range(-15, 15);
+                target_pitch = random_range(120, 155);
+            }
+            speed = random_range(80, 130);
             break;
         case ConversationPose::None:
             return;
@@ -746,6 +781,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
                 speaking_modifier_id_ = -1;
             }
 
+            if (idle_motion_level_ > 1 && random_range(0, 99) < 35) {
+                stackchan.addModifier(std::make_unique<TimedEmotionModifier>(Emotion::Neutral, 900));
+            }
             pose_after_unlock = ConversationPose::Listening;
             GetHAL().setRgbColor(0, 0, 50, 0);
             GetHAL().refreshRgb();
@@ -767,13 +805,29 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
         } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
             if (speaking_modifier_id_ < 0) {
-                const bool enable_light_speaking_motion = idle_motion_level_ > 0;
+                const bool enable_light_speaking_motion = idle_motion_level_ >= 3;
                 speaking_modifier_id_ =
                     stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, enable_light_speaking_motion));
             }
 
+            if (idle_motion_level_ > 1 && random_range(0, 99) < 30) {
+                stackchan.addModifier(std::make_unique<TimedEmotionModifier>(Emotion::Happy, 700));
+            }
             pose_after_unlock = ConversationPose::Speaking;
             GetHAL().setRgbColor(0, 0, 0, 50);
+            GetHAL().refreshRgb();
+        } else if (is_thinking_status(status)) {
+            if (speaking_modifier_id_ >= 0) {
+                stackchan.removeModifier(speaking_modifier_id_);
+                avatar.mouth().setWeight(0);
+                speaking_modifier_id_ = -1;
+            }
+
+            if (idle_motion_level_ > 0) {
+                stackchan.addModifier(std::make_unique<TimedEmotionModifier>(Emotion::Doubt, 1400));
+            }
+            pose_after_unlock = ConversationPose::Thinking;
+            GetHAL().setRgbColor(0, 24, 36, 12);
             GetHAL().refreshRgb();
         } else {
             avatar.setSpeech(status);

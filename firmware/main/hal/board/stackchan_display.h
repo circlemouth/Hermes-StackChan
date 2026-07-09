@@ -16,6 +16,7 @@ private:
         None,
         Idle,
         Listening,
+        Thinking,
         Speaking,
     };
 

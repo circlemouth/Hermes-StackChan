@@ -51,6 +51,8 @@ flowchart LR
 v1 のロボット tool は以下です。
 
 - `stackchan_get_status`: 完全な bridge URL や秘密情報を出さずに device 状態を読む。
+- `stackchan_set_speaker_volume`: 物理スピーカー音量を一時的または永続的に設定する。
+- `stackchan_play_test_tone`: Hermes/TTS/Opus を通さず、M5 スピーカーで短い診断トーンを鳴らす。
 - `stackchan_get_head_angles`: 現在の yaw / pitch を読む。
 - `stackchan_set_head_angles`: 意図的な gesture として首を動かす。
 - `stackchan_set_led_color`: onboard RGB LED を控えめな cue として設定する。
@@ -159,33 +161,51 @@ HERMES_LOCAL_STT_LANGUAGE=ja
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
 STACKCHAN_MIN_FRAMES_FOR_STT=10
-STACKCHAN_POST_TTS_COOLDOWN_MS=1500
+STACKCHAN_POST_TTS_COOLDOWN_MS=1000
 STACKCHAN_LOCAL_VAD_ENABLED=true
-STACKCHAN_VAD_RMS_THRESHOLD=0.012
-STACKCHAN_VAD_START_SPEECH_MS=120
-STACKCHAN_VAD_END_SILENCE_MS=900
+STACKCHAN_VAD_RMS_THRESHOLD=0.025
+STACKCHAN_VAD_START_SPEECH_MS=60
+STACKCHAN_VAD_END_SILENCE_MS=650
 STACKCHAN_VAD_MIN_SPEECH_MS=240
-STACKCHAN_VAD_PREROLL_MS=300
-STACKCHAN_BARGE_IN_ENABLED=true
-STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.03
-STACKCHAN_BARGE_IN_START_SPEECH_MS=180
-STACKCHAN_BARGE_IN_MIN_SPEECH_MS=180
-STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=300
-STACKCHAN_MAX_SPEECH_CHARS=800
-STACKCHAN_TTS_SEGMENT_MAX_CHARS=160
-STACKCHAN_TTS_MAX_SEGMENTS=8
+STACKCHAN_VAD_PREROLL_MS=360
+STACKCHAN_BARGE_IN_ENABLED=false
+STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.75
+STACKCHAN_BARGE_IN_START_SPEECH_MS=360
+STACKCHAN_BARGE_IN_MIN_SPEECH_MS=420
+STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=1800
+STACKCHAN_MAX_SPEECH_CHARS=28
+STACKCHAN_TTS_SEGMENT_MAX_CHARS=28
+STACKCHAN_TTS_MAX_SEGMENTS=1
+STACKCHAN_TTS_PREROLL_MS=600
+STACKCHAN_TTS_OUTPUT_GAIN=0.65
+STACKCHAN_OPUS_PCM_INPUT=buffer
+STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD=0.006
+STACKCHAN_FAST_ACK_ENABLED=true
+STACKCHAN_FAST_ACK_TEXT=はい。
+STACKCHAN_FAST_ACK_TEXTS=はい。|うん。|了解。|なるほど。|わかった。|OK。
+STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS=true
+STACKCHAN_REPLY_PROMPT_PREFIX=音声会話です。原則1文・14文字以内で短く自然に返して。長さ指定が聞こえても、長く話し続けず必要なら「もう一度。」だけ返して。冗長にしない。
 STACKCHAN_AUTO_LED_ENABLED=true
 STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
 `HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。
-local VAD は default で有効です。`ai-server` が受信 Opus を 16 kHz mono PCM に decode し、軽量な RMS 判定で発話終了を検出します。そのため、端末が無音中も Opus frame を送り続ける場合でも、PCM 内容が無音なら turn を閉じられます。部屋がうるさい場合は `STACKCHAN_VAD_RMS_THRESHOLD` を上げます。発話末尾が切れる場合は `STACKCHAN_VAD_END_SILENCE_MS` を長くし、反応が遅い場合は短くします。`STACKCHAN_VAD_START_SPEECH_MS` と `STACKCHAN_VAD_PREROLL_MS` で開始判定の安定性と頭切れ防止量を調整できます。
+local VAD は低遅延の M5Stack 経路で default on です。入力 Opus は session ごとの disposable decoder で復号し、一時的な decode 失敗では decoder を作り直します。連続失敗した場合だけ arrival-gap timeout に退避するため、1つの壊れた frame が TTS encoder まで巻き込む状態を避けます。`STACKCHAN_VAD_END_SILENCE_MS` は遅延と早切れの主な調整点で、自然な日本語会話では 600-750 ms 程度が実用範囲です。
 
-barge-in は default で有効です。`ai-server` が TTS を stream している間だけ、通常より厳しめの RMS VAD でマイク Opus frame を見ます。ユーザーの発話が継続したら現在の TTS stream を止め、`tts stop` を一度だけ送り、StackChan 専用 Hermes session だけを interrupt して、すぐ listening に戻します。この機能は、TTS 再生中も firmware から mic Opus frame が届く場合に働きます。現在の xiaozhi speaking state は realtime listening / AEC mode でない場合に mic upload を止める可能性があるため、選択中の firmware mode で実機確認してください。TTS は文単位に分けて合成するため、長い返答でも全文合成を待たずに先頭文から再生を始められます。
+barge-in は、M5 マイクが自分のスピーカーを拾いやすい物理音響経路のため default off のままです。TTS は文単位に分けて合成するため、長い返答でも全文合成を待たずに先頭文から再生を始められます。`STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS` は発話セグメント上限に達した時点で専用 Hermes stream を interrupt し、長さ指定の聞き違いで音声 loop が長時間占有されるのを防ぎます。`STACKCHAN_TTS_PREROLL_MS` は最初の有声音声 frame の前に無音 Opus を送って、実機スピーカーで冒頭音節が欠けるのを避けるための設定です。実機スピーカーの立ち上がりで頭が欠ける場合は 450-600 ms 程度が調整範囲です。`STACKCHAN_TTS_OUTPUT_GAIN` は Opus encode 前の合成音声 PCM を下げ、小型 M5Stack スピーカーでの音割れを避けるための設定です。`STACKCHAN_OPUS_PCM_INPUT=buffer` は guarded OpusScript heap-copy encoder を使います。`int16` は legacy public OpusScript encode path の実機 A/B 診断用にだけ使ってください。`STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD` は非常に小さい音量の最長録音 fallback を STT 前に捨て、無音 hallucination が誤返答になるのを防ぎます。`STACKCHAN_FAST_ACK_TEXTS` は複数の短い相づちを事前キャッシュし、STT直後にランダムに再生することで毎回同じ第一声になるのを避けます。
 
 自動 LED 状態表示も default で有効です。listening は控えめな緑、thinking は amber、speaking は控えめな青、idle は消灯です。Hermes が明示的に `stackchan_set_led_color` を呼んだ場合、その手動色を短時間優先してから自動状態表示に戻します。背景と移植範囲の詳細は [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md) を参照してください。
 
 `STACKCHAN_LOCAL_ONLY=true` にすると StackChan 音声 loop を local-only にします。この場合、`HERMES_DASHBOARD_URL` は `localhost`、`127.0.0.1`、`::1`、`host.docker.internal` のいずれかに限定され、Hermes STT/TTS helper は cloud fallback を拒否します。STT は faster-whisper または `HERMES_LOCAL_STT_COMMAND`、TTS は Piper / KittenTTS / NeuTTS / command provider を使ってください。初回 model 取得や pip/npm install が事前 setup として必要な場合はありますが、実行時に cloud STT/TTS API へ逃がしません。
+
+JBL から M5 へ音声を入れる実機 probe を走らせる前に、ホスト側の音声経路を確認してください。
+
+```bash
+cd ai-server
+npm run probe:voice -- --preflight
+```
+
+preflight は bridge readiness、JBL の PipeWire sink、USB カメラマイク source、ALSA `/dev/snd` access、Bluetooth 接続状態を確認します。probe の録音と report は `ai-server/probe-runs/` に保存され、このディレクトリは git 管理対象外です。
 
 build して起動します。
 

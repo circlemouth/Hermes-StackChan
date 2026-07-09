@@ -3,10 +3,10 @@ import type WebSocket from 'ws'
 import { createInputOpusDecoder, decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, INPUT_SAMPLE_RATE, INPUT_FRAME_DURATION_MS, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS, type InputOpusDecoder } from './audio.js'
 import { HermesClient, type HermesPromptStreamEvent } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
-import { registerDeviceSession } from './device_control.js'
+import { registerDeviceSession, type StackChanBridgeStatus } from './device_control.js'
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
-import { LocalRmsVad, readLocalRmsVadConfig, type LocalRmsVadConfig } from './local_vad.js'
+import { LocalRmsVad, readLocalRmsVadConfig, rmsNormalized, type LocalRmsVadConfig } from './local_vad.js'
 
 type State = 'idle' | 'listening' | 'processing'
 export type StackChanEmotion = 'neutral' | 'happy' | 'laughing' | 'angry' | 'sad' | 'crying' | 'sleepy' | 'doubtful'
@@ -86,7 +86,7 @@ export function readTurnControlConfig(env: Record<string, string | undefined> = 
 
 export function readBargeInConfig(env: Record<string, string | undefined> = process.env): BargeInConfig {
     return {
-        enabled: readEnvBool('STACKCHAN_BARGE_IN_ENABLED', true, env),
+        enabled: readEnvBool('STACKCHAN_BARGE_IN_ENABLED', false, env),
         rmsThreshold: readEnvFloat('STACKCHAN_BARGE_IN_RMS_THRESHOLD', 0.03, 0.005, 1.0, env),
         startSpeechMs: readEnvInt('STACKCHAN_BARGE_IN_START_SPEECH_MS', 180, INPUT_FRAME_DURATION_MS, 2000, env),
         minSpeechMs: readEnvInt('STACKCHAN_BARGE_IN_MIN_SPEECH_MS', 180, INPUT_FRAME_DURATION_MS, 3000, env),
@@ -96,8 +96,8 @@ export function readBargeInConfig(env: Record<string, string | undefined> = proc
 
 export function readSpeechSegmentationConfig(env: Record<string, string | undefined> = process.env): SpeechSegmentationConfig {
     return {
-        maxSpeechChars: readEnvInt('STACKCHAN_MAX_SPEECH_CHARS', 800, 40, 4000, env),
-        segmentMaxChars: readEnvInt('STACKCHAN_TTS_SEGMENT_MAX_CHARS', 160, 40, 800, env),
+        maxSpeechChars: readEnvInt('STACKCHAN_MAX_SPEECH_CHARS', 800, 8, 4000, env),
+        segmentMaxChars: readEnvInt('STACKCHAN_TTS_SEGMENT_MAX_CHARS', 160, 8, 800, env),
         maxSegments: readEnvInt('STACKCHAN_TTS_MAX_SEGMENTS', 8, 1, 32, env),
     }
 }
@@ -223,8 +223,37 @@ const PROCESS_ERROR_SPEECH = '返答処理でエラーが起きました。設�
 const PROCESS_ERROR_ALERT_MAX_CHARS = 120
 const AUTO_RESUME_LISTENING = readEnvBool('STACKCHAN_AUTO_RESUME_LISTENING', true)
 const IGNORE_SHORT_TRANSCRIPTS = readEnvBool('STACKCHAN_IGNORE_SHORT_TRANSCRIPTS', true)
-const DEFAULT_IGNORED_SHORT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー'])
-const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー', 'お', 'おっ', 'うん', 'ん'])
+const TTS_PREROLL_MS = readEnvInt('STACKCHAN_TTS_PREROLL_MS', 0, 0, 600)
+const FAST_ACK_ENABLED = readEnvBool('STACKCHAN_FAST_ACK_ENABLED', false)
+const FAST_ACK_TEXT = (process.env.STACKCHAN_FAST_ACK_TEXT ?? 'はい。').trim() || 'はい。'
+const FAST_ACK_TEXTS = readFastAckTexts()
+const STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS = readEnvBool('STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS', true)
+const MAX_DURATION_STT_RMS_THRESHOLD = readEnvFloat('STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD', 0.006, 0, 0.2)
+const STREAMING_DECODE_FAILURE_LIMIT = readEnvInt('STACKCHAN_STREAMING_DECODE_FAILURE_LIMIT', 3, 1, 20)
+const BARGE_IN_DECODE_FAILURE_LIMIT = readEnvInt('STACKCHAN_BARGE_IN_DECODE_FAILURE_LIMIT', 3, 1, 20)
+const DEFAULT_IGNORED_SHORT_TRANSCRIPTS = new Set([
+    'あ', 'あっ', 'あー',
+    'え', 'えっ', 'えー',
+    'お', 'おっ',
+    'はい', 'うん', 'ん',
+    '了解', 'なるほど', 'わかった', 'OK', 'オーケー',
+    'はは', 'ハハ', 'ふふ', 'フフ',
+    'ちっ', 'チッ', 'ふっ', 'フッ', 'くっ', 'クッ',
+])
+const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー', 'お', 'おっ', 'うん', 'ん', 'はい', 'はは', 'ハハ', 'ふふ', 'フフ', 'ちっ', 'チッ', 'ふっ', 'フッ', 'くっ', 'クッ'])
+
+type FastAckCacheEntry = {
+    text: string
+    frames: Buffer[]
+}
+
+function readFastAckTexts(): string[] {
+    const raw = process.env.STACKCHAN_FAST_ACK_TEXTS?.trim()
+    const values = raw
+        ? raw.split(/[|\n]/g).map(item => item.trim()).filter(Boolean)
+        : [FAST_ACK_TEXT]
+    return [...new Set(values)].slice(0, 16)
+}
 
 function stackChanVoicePrompt(prompt: string): string {
     const prefix = process.env.STACKCHAN_REPLY_PROMPT_PREFIX?.trim()
@@ -297,6 +326,8 @@ type TtsPlayback = {
     streamedFrames: number
     segmentCount: number
     interrupted: boolean
+    firstFrameLogged: boolean
+    firstAudibleFrameLogged: boolean
 }
 
 type PrefetchedSegment = {
@@ -356,8 +387,10 @@ export class Session {
     private preRollPcmChunks: Buffer[] = []
     private streamingDecoder: InputOpusDecoder
     private streamingDecodeFailed = false
+    private streamingDecodeFailures = 0
     private bargeInDecoder: InputOpusDecoder
     private bargeInDecodeFailed = false
+    private bargeInDecodeFailures = 0
     private ttsStreaming = false
     private ttsStopSent = false
     private ttsGeneration = 0
@@ -369,6 +402,9 @@ export class Session {
     private currentSpeechMs = 0
     private followupQueue: string[] = []
     private followupRunning = false
+    private fastAckEntries?: FastAckCacheEntry[]
+    private fastAckFailed = false
+    private lastFastAckIndex = -1
     private closed = false
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
@@ -398,6 +434,7 @@ export class Session {
         this.streamingDecoder = this.createInputOpusDecoderFn()
         this.bargeInDecoder = this.createInputOpusDecoderFn()
         this.unregisterDeviceSession = (deps.registerDeviceSession ?? registerDeviceSession)(this)
+        if (FAST_ACK_ENABLED) void this.warmFastAck()
     }
 
     close(): void {
@@ -405,6 +442,8 @@ export class Session {
         this.followupQueue = []
         this.clearTimers()
         this.unregisterDeviceSession()
+        this.streamingDecoder.dispose()
+        this.bargeInDecoder.dispose()
         for (const [id, pending] of this.pendingMcp) {
             clearTimeout(pending.timer)
             pending.reject(new Error('StackChan WebSocket disconnected'))
@@ -465,12 +504,21 @@ export class Session {
         try {
             pcm = this.decodeOpusFrameFn ? this.decodeOpusFrameFn(payload) : this.streamingDecoder.decodeFrame(payload)
         } catch (error) {
-            this.streamingDecodeFailed = true
-            console.warn(`[session ${this.sessionId}] local VAD streaming decode failed, using arrival-gap timeout: ${String(error)}`)
-            this.resetVadBuffers()
+            this.streamingDecodeFailures += 1
+            this.recreateStreamingDecoder()
+            this.localVad.reset()
+            this.pcmChunks = []
+            this.currentSpeechMs = 0
+            if (this.streamingDecodeFailures >= STREAMING_DECODE_FAILURE_LIMIT) {
+                this.streamingDecodeFailed = true
+                console.warn(`[session ${this.sessionId}] local VAD streaming decode failed ${this.streamingDecodeFailures} times, using arrival-gap timeout: ${String(error)}`)
+            } else {
+                console.warn(`[session ${this.sessionId}] local VAD streaming decode skipped invalid frame ${this.streamingDecodeFailures}/${STREAMING_DECODE_FAILURE_LIMIT}: ${String(error)}`)
+            }
             this.resetSilenceTimer()
             return
         }
+        this.streamingDecodeFailures = 0
         if (pcm.length === 0) return
 
         const collectingBefore = this.pcmChunks.length > 0
@@ -485,13 +533,15 @@ export class Session {
 
         if (result.speechStarted && this.pcmChunks.length === 0) {
             this.pcmChunks = this.preRollPcmChunks.splice(0)
+            this.armMaxDurationTimer()
             console.log(`[session ${this.sessionId}] vad speech started rms=${result.rms.toFixed(4)}`)
         }
 
         if (result.ignoredShortSpeech) {
             console.log(`[session ${this.sessionId}] vad ignored short speech speechMs=${result.speechMs} silenceMs=${result.silenceMs}`)
-            this.opusFrames = []
-            this.resetVadBuffers()
+            this.preRollPcmChunks = this.pcmChunks.splice(0)
+            this.localVad.reset()
+            this.currentSpeechMs = 0
             return
         }
 
@@ -537,14 +587,26 @@ export class Session {
     private resetCapture(): void {
         this.opusFrames = []
         this.resetVadBuffers()
-        this.streamingDecoder = this.createInputOpusDecoderFn()
+        this.recreateStreamingDecoder()
         this.streamingDecodeFailed = false
+        this.streamingDecodeFailures = 0
     }
 
     private resetBargeInDetector(): void {
         this.bargeInVad.reset()
-        this.bargeInDecoder = this.createInputOpusDecoderFn()
+        this.recreateBargeInDecoder()
         this.bargeInDecodeFailed = false
+        this.bargeInDecodeFailures = 0
+    }
+
+    private recreateStreamingDecoder(): void {
+        this.streamingDecoder.dispose()
+        this.streamingDecoder = this.createInputOpusDecoderFn()
+    }
+
+    private recreateBargeInDecoder(): void {
+        this.bargeInDecoder.dispose()
+        this.bargeInDecoder = this.createInputOpusDecoderFn()
     }
 
     private tryHandleBargeIn(payload: Buffer): boolean {
@@ -556,10 +618,18 @@ export class Session {
         try {
             pcm = this.decodeOpusFrameFn ? this.decodeOpusFrameFn(payload) : this.bargeInDecoder.decodeFrame(payload)
         } catch (error) {
-            this.bargeInDecodeFailed = true
-            console.warn(`[session ${this.sessionId}] barge-in decode failed, disabled for current TTS: ${String(error)}`)
+            this.bargeInDecodeFailures += 1
+            this.bargeInVad.reset()
+            this.recreateBargeInDecoder()
+            if (this.bargeInDecodeFailures >= BARGE_IN_DECODE_FAILURE_LIMIT) {
+                this.bargeInDecodeFailed = true
+                console.warn(`[session ${this.sessionId}] barge-in decode failed ${this.bargeInDecodeFailures} times, disabled for current TTS: ${String(error)}`)
+            } else {
+                console.warn(`[session ${this.sessionId}] barge-in decode skipped invalid frame ${this.bargeInDecodeFailures}/${BARGE_IN_DECODE_FAILURE_LIMIT}: ${String(error)}`)
+            }
             return false
         }
+        this.bargeInDecodeFailures = 0
 
         const result = this.bargeInVad.processPcm(pcm)
         if (!result.inSpeech || result.speechMs < this.bargeInConfig.minSpeechMs) return false
@@ -648,7 +718,12 @@ export class Session {
         if (!this.localVadConfig.enabled) {
             console.log(`[session ${this.sessionId}] local vad disabled, using arrival-gap timeout`)
         }
-        // 最長録音タイマーをセット
+        this.armMaxDurationTimer()
+        console.log(`[session ${this.sessionId}] listening started (${source})`)
+    }
+
+    private armMaxDurationTimer(): void {
+        if (this.maxDurationTimer) clearTimeout(this.maxDurationTimer)
         this.maxDurationTimer = setTimeout(() => {
             if (this.shouldUseLocalVad() && this.pcmChunks.length === 0 && this.currentSpeechMs === 0) {
                 console.log(`[session ${this.sessionId}] max duration reached without VAD speech, restarting listen`)
@@ -659,7 +734,6 @@ export class Session {
             console.log(`[session ${this.sessionId}] max duration reached, triggering process`)
             this.triggerProcess('max-duration', true)
         }, MAX_RECORDING_MS)
-        console.log(`[session ${this.sessionId}] listening started (${source})`)
     }
 
     private delayListeningUntilCooldownEnds(source: string): void {
@@ -668,6 +742,7 @@ export class Session {
         const delayMs = Math.max(0, this.cooldownUntil - Date.now())
         this.delayedListenTimer = setTimeout(() => {
             this.delayedListenTimer = undefined
+            if (this.state !== 'idle') return
             this.startListening(source)
         }, delayMs)
         console.log(`[session ${this.sessionId}] listen start delayed ${delayMs}ms (post-TTS cooldown)`)
@@ -752,6 +827,13 @@ export class Session {
                 { frames: frames.length },
             )
         if (pcm.length === 0) return
+        if (source === 'max-duration' && vadPcm.length === 0 && MAX_DURATION_STT_RMS_THRESHOLD > 0) {
+            const rms = rmsNormalized(pcm)
+            if (rms < MAX_DURATION_STT_RMS_THRESHOLD) {
+                console.log(`[session ${this.sessionId}] ignored low-rms max-duration audio rms=${rms.toFixed(4)} threshold=${MAX_DURATION_STT_RMS_THRESHOLD.toFixed(4)}`)
+                return
+            }
+        }
 
         const wavForStt = pcmToWav(pcm, INPUT_SAMPLE_RATE)
         const text = await withTiming(
@@ -772,6 +854,7 @@ export class Session {
         }
 
         this.sendJson({ type: 'stt', text })
+        await this.trySpeakFastAck()
 
         // 2. Hermes LLM turn -> 3. Hermes TTS -> Opus -> device
         await this.speakHermesReply(text, 'llm', 'tts')
@@ -783,7 +866,48 @@ export class Session {
         const cleanPrompt = prompt.trim()
         if (!cleanPrompt || this.closed) return
         this.followupQueue.push(cleanPrompt)
+        if (this.state === 'listening') {
+            this.clearTimers()
+            this.resetCapture()
+            this.state = 'idle'
+            this.setAutoLedState('idle')
+        }
         this.drainFollowupQueue()
+    }
+
+    getBridgeStatus(): StackChanBridgeStatus {
+        const cooldownRemainingMs = Math.max(0, this.cooldownUntil - Date.now())
+        const readyForPrompt =
+            !this.closed &&
+            this.state === 'listening' &&
+            !this.ttsStreaming &&
+            cooldownRemainingMs === 0 &&
+            !this.followupRunning &&
+            this.followupQueue.length === 0 &&
+            this.delayedListenTimer === undefined
+
+        let reason = 'ready'
+        if (this.closed) reason = 'closed'
+        else if (this.state !== 'listening') reason = `state_${this.state}`
+        else if (this.ttsStreaming) reason = 'tts_streaming'
+        else if (cooldownRemainingMs > 0) reason = 'post_tts_cooldown'
+        else if (this.followupRunning) reason = 'followup_running'
+        else if (this.followupQueue.length > 0) reason = 'followup_queued'
+        else if (this.delayedListenTimer !== undefined) reason = 'listen_delayed'
+
+        return {
+            connected: !this.closed,
+            sessionId: this.sessionId,
+            state: this.state,
+            readyForPrompt,
+            reason,
+            ttsStreaming: this.ttsStreaming,
+            cooldownRemainingMs,
+            followupRunning: this.followupRunning,
+            followupQueued: this.followupQueue.length,
+            pendingMcp: this.pendingMcp.size,
+            lastListenMode: this.lastListenMode,
+        }
     }
 
     private drainFollowupQueue(): void {
@@ -809,6 +933,13 @@ export class Session {
             if (this.state === 'processing') {
                 this.state = 'idle'
                 this.setAutoLedState('idle')
+                if (this.shouldAutoResumeListening()) {
+                    if (Date.now() < this.cooldownUntil) {
+                        this.delayListeningUntilCooldownEnds('post-followup')
+                    } else {
+                        this.startListening('post-followup')
+                    }
+                }
             }
             this.drainFollowupQueue()
         })
@@ -888,6 +1019,16 @@ export class Session {
                     spokenSegments += 1
                     if (playback.interrupted) break
                 }
+                if (
+                    STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS &&
+                    spokenSegments >= this.speechSegmentationConfig.maxSegments
+                ) {
+                    console.log(`[session ${this.sessionId}] stopping LLM stream after spoken segment limit (${spokenSegments})`)
+                    void this.hermes.interrupt().catch((error) => {
+                        console.error(`[session ${this.sessionId}] Hermes interrupt after speech limit error:`, error)
+                    })
+                    break
+                }
             }
         } finally {
             clearInterval(processingKeepalive)
@@ -913,18 +1054,67 @@ export class Session {
         return reply
     }
 
-    private async synthesizeSegmentToOpus(speechText: string, label: string): Promise<Buffer[]> {
+    private async synthesizeSegmentToOpus(speechText: string, label: string, leadSilenceMs = 0): Promise<Buffer[]> {
         const wav = await withTiming(
             `session:${this.sessionId}:${label}.synthesize`,
             () => this.synthesizeTextFn(speechText),
             { textLength: speechText.length },
         )
+        if (leadSilenceMs > 0) {
+            console.log(`[session ${this.sessionId}] tts preroll ${leadSilenceMs}ms`)
+        }
         const opusFrames = await withTiming(
             `session:${this.sessionId}:${label}.encode`,
-            async () => this.encodeWavToOpusFramesFn(wav),
-            { wavBytes: wav.length },
+            async () => this.encodeWavToOpusFramesFn(wav, leadSilenceMs),
+            { wavBytes: wav.length, leadSilenceMs },
         )
         return opusFrames
+    }
+
+    private async warmFastAck(): Promise<void> {
+        if (this.fastAckEntries || this.fastAckFailed) return
+        try {
+            this.fastAckEntries = []
+            for (let index = 0; index < FAST_ACK_TEXTS.length; index++) {
+                const text = FAST_ACK_TEXTS[index]
+                const frames = await this.synthesizeSegmentToOpus(text, `tts.fast_ack.cache${index}`, TTS_PREROLL_MS)
+                this.fastAckEntries.push({ text, frames })
+            }
+            console.log(`[session ${this.sessionId}] fast ack cached variants=${this.fastAckEntries.length}`)
+        } catch (error) {
+            this.fastAckFailed = true
+            console.warn(`[session ${this.sessionId}] fast ack cache failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+    }
+
+    private pickFastAck(): FastAckCacheEntry | undefined {
+        if (!this.fastAckEntries || this.fastAckEntries.length === 0) return undefined
+        if (this.fastAckEntries.length === 1) return this.fastAckEntries[0]
+
+        let index = Math.floor(Math.random() * this.fastAckEntries.length)
+        if (index === this.lastFastAckIndex) {
+            index = (index + 1 + Math.floor(Math.random() * (this.fastAckEntries.length - 1))) % this.fastAckEntries.length
+        }
+        this.lastFastAckIndex = index
+        return this.fastAckEntries[index]
+    }
+
+    private async trySpeakFastAck(): Promise<void> {
+        if (!FAST_ACK_ENABLED || this.fastAckFailed) return
+        if (!this.fastAckEntries) {
+            void this.warmFastAck()
+            return
+        }
+
+        const ack = this.pickFastAck()
+        if (!ack) return
+        const playback = this.startTtsPlayback('tts.fast_ack')
+        try {
+            console.log(`[session ${this.sessionId}] fast ack selected: "${ack.text}"`)
+            await this.speakCachedSegmentInPlayback(playback, ack.text, ack.frames, 0)
+        } finally {
+            this.finishTtsPlayback(playback)
+        }
     }
 
     private async speakSegments(segments: string[], label: string): Promise<void> {
@@ -953,6 +1143,8 @@ export class Session {
             streamedFrames: 0,
             segmentCount: 0,
             interrupted: false,
+            firstFrameLogged: false,
+            firstAudibleFrameLogged: false,
         }
     }
 
@@ -1018,15 +1210,19 @@ export class Session {
         }
 
         this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
-        const opusFrames = framesPromise ? await framesPromise : await this.synthesizeSegmentToOpus(segment, label)
+        const leadSilenceMs = index === 0 && playback.streamedFrames === 0 ? TTS_PREROLL_MS : 0
+        const opusFrames = framesPromise ? await framesPromise : await this.synthesizeSegmentToOpus(segment, label, leadSilenceMs)
         onFramesReady?.()
-        for (const frame of opusFrames) {
+        const leadSilenceFrames = Math.ceil(leadSilenceMs / OUTPUT_FRAME_DURATION_MS)
+        for (let frameIndex = 0; frameIndex < opusFrames.length; frameIndex++) {
+            const frame = opusFrames[frameIndex]
             if (!this.isTtsPlaybackActive(playback)) {
                 playback.interrupted = true
                 break
             }
             this.sendBinary(wrapOpusPayload(frame, this.version))
             playback.streamedFrames += 1
+            this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
         if (!this.isTtsPlaybackActive(playback)) {
@@ -1035,6 +1231,51 @@ export class Session {
         }
         playback.segmentCount += 1
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private async speakCachedSegmentInPlayback(
+        playback: TtsPlayback,
+        segment: string,
+        opusFrames: Buffer[],
+        index: number,
+    ): Promise<void> {
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
+
+        this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
+        const leadSilenceFrames = index === 0 && playback.streamedFrames === 0
+            ? Math.ceil(TTS_PREROLL_MS / OUTPUT_FRAME_DURATION_MS)
+            : 0
+        for (let frameIndex = 0; frameIndex < opusFrames.length; frameIndex++) {
+            const frame = opusFrames[frameIndex]
+            if (!this.isTtsPlaybackActive(playback)) {
+                playback.interrupted = true
+                break
+            }
+            this.sendBinary(wrapOpusPayload(frame, this.version))
+            playback.streamedFrames += 1
+            this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
+            await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
+        }
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
+        playback.segmentCount += 1
+        this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private logTtsFrameMilestones(playback: TtsPlayback, audibleFrame: boolean): void {
+        if (!playback.firstFrameLogged) {
+            playback.firstFrameLogged = true
+            console.log(`[timing] mark session:${this.sessionId}:${playback.label}.first_frame_sent elapsed=${elapsedMs(playback.streamStartMs)} frames=${playback.streamedFrames}`)
+        }
+        if (audibleFrame && !playback.firstAudibleFrameLogged) {
+            playback.firstAudibleFrameLogged = true
+            console.log(`[timing] mark session:${this.sessionId}:${playback.label}.first_audible_frame_sent elapsed=${elapsedMs(playback.streamStartMs)} frames=${playback.streamedFrames}`)
+        }
     }
 
     private finishTtsPlayback(playback: TtsPlayback): void {

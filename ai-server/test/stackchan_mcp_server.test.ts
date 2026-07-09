@@ -7,6 +7,8 @@ test('tools list includes public StackChan reminder and power tools', () => {
 
     assert.deepEqual(toolNames, [
         'stackchan_get_status',
+        'stackchan_set_speaker_volume',
+        'stackchan_play_test_tone',
         'stackchan_get_head_angles',
         'stackchan_set_head_angles',
         'stackchan_set_led_color',
@@ -19,6 +21,17 @@ test('tools list includes public StackChan reminder and power tools', () => {
         'stackchan_get_reminders',
         'stackchan_stop_reminder',
     ])
+})
+
+test('audio diagnostic tone schema uses bounded safe defaults', () => {
+    const tone = tools.find(tool => tool.name === 'stackchan_play_test_tone')
+
+    assert.ok(tone)
+    assert.equal(tone.inputSchema['additionalProperties'], false)
+    assert.deepEqual(
+        Object.keys((tone.inputSchema['properties'] as Record<string, unknown>)),
+        ['frequency_hz', 'duration_ms', 'amplitude'],
+    )
 })
 
 test('reminder tool schemas require the expected arguments', () => {

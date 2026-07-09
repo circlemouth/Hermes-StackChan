@@ -32,6 +32,40 @@ export const tools: ToolDefinition[] = [
         },
     },
     {
+        name: 'stackchan_set_speaker_volume',
+        description: [
+            'Set the physical StackChan speaker volume from 0 to 100.',
+            'Use temporary low values such as 25-45 when diagnosing distorted or noisy M5 speaker output.',
+            'Set permanent only when the user explicitly asks to save the volume.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                volume: { type: 'integer', minimum: 0, maximum: 100 },
+                permanent: { type: 'boolean', default: false },
+            },
+            required: ['volume'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'stackchan_play_test_tone',
+        description: [
+            'Play a short diagnostic sine tone directly on the physical StackChan speaker.',
+            'This bypasses Hermes, TTS, and Opus streaming, so it is useful for isolating M5 speaker, codec, and firmware output issues.',
+            'Use low amplitude and short duration unless the user explicitly asks for a louder test.',
+        ].join(' '),
+        inputSchema: {
+            type: 'object',
+            properties: {
+                frequency_hz: { type: 'integer', minimum: 100, maximum: 2000, default: 440 },
+                duration_ms: { type: 'integer', minimum: 100, maximum: 3000, default: 800 },
+                amplitude: { type: 'integer', minimum: 500, maximum: 16000, default: 6000 },
+            },
+            additionalProperties: false,
+        },
+    },
+    {
         name: 'stackchan_get_head_angles',
         description: 'Get the current StackChan head yaw and pitch angles.',
         inputSchema: {

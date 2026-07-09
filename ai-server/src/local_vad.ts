@@ -62,7 +62,7 @@ export function readEnvBool(
 
 export function readLocalRmsVadConfig(env: Record<string, string | undefined> = process.env): LocalRmsVadConfig {
     return {
-        enabled: readEnvBool('STACKCHAN_LOCAL_VAD_ENABLED', true, env),
+        enabled: readEnvBool('STACKCHAN_LOCAL_VAD_ENABLED', false, env),
         rmsThreshold: readEnvFloat('STACKCHAN_VAD_RMS_THRESHOLD', 0.012, 0.001, 0.2, env),
         startSpeechMs: readEnvInt('STACKCHAN_VAD_START_SPEECH_MS', 120, LOCAL_VAD_FRAME_MS, 2000, env),
         endSilenceMs: readEnvInt('STACKCHAN_VAD_END_SILENCE_MS', 900, LOCAL_VAD_FRAME_MS, 5000, env),

@@ -7,8 +7,11 @@
 #include <algorithm>
 #include <cJSON.h>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
+#include <vector>
+#include <audio/audio_codec.h>
 #include <board.h>
 #include <esp_heap_caps.h>
 #include <jpg/jpeg_to_image.h>
@@ -21,6 +24,7 @@
 #include <freertos/task.h>
 #include "sdkconfig.h"
 #include "board/hal_bridge.h"
+#include "board/config.h"
 #include "board/stackchan_camera.h"
 #include "board/stackchan_display.h"
 
@@ -156,6 +160,73 @@ std::unique_ptr<LvglImage> download_preview_image(const std::string& url)
 
     return preview_image_from_bytes(reinterpret_cast<const uint8_t*>(body.data()), body.size());
 }
+
+cJSON* play_test_tone(int frequency_hz, int duration_ms, int amplitude)
+{
+    frequency_hz = std::clamp(frequency_hz, 100, 2000);
+    duration_ms  = std::clamp(duration_ms, 100, 3000);
+    amplitude    = std::clamp(amplitude, 500, 16000);
+
+    auto audio_codec = Board::GetInstance().GetAudioCodec();
+    if (audio_codec == nullptr) {
+        throw std::runtime_error("audio codec unavailable");
+    }
+    const bool was_output_enabled = audio_codec->output_enabled();
+    const bool input_was_enabled  = audio_codec->input_enabled();
+
+    constexpr int kSampleRate = AUDIO_OUTPUT_SAMPLE_RATE;
+    constexpr double kPi      = 3.14159265358979323846;
+    constexpr size_t kChunkFrames = 512;
+    const size_t total_frames = static_cast<size_t>(kSampleRate) * static_cast<size_t>(duration_ms) / 1000;
+    const size_t ramp_frames = std::min(total_frames / 2, static_cast<size_t>(kSampleRate / 100));
+    std::vector<int16_t> chunk;
+    chunk.reserve(kChunkFrames);
+
+    audio_codec->EnableOutput(true);
+    size_t written = 0;
+    while (written < total_frames) {
+        const size_t frames = std::min(kChunkFrames, total_frames - written);
+        chunk.resize(frames);
+        for (size_t i = 0; i < frames; ++i) {
+            const size_t sample_index = written + i;
+            double envelope = 1.0;
+            if (ramp_frames > 0 && sample_index < ramp_frames) {
+                envelope = static_cast<double>(sample_index) / static_cast<double>(ramp_frames);
+            } else if (ramp_frames > 0 && total_frames - sample_index <= ramp_frames) {
+                envelope = static_cast<double>(total_frames - sample_index) / static_cast<double>(ramp_frames);
+            }
+            const double phase = 2.0 * kPi * static_cast<double>(frequency_hz) *
+                static_cast<double>(sample_index) / static_cast<double>(kSampleRate);
+            chunk[i] = static_cast<int16_t>(std::sin(phase) * static_cast<double>(amplitude) * envelope);
+        }
+        audio_codec->OutputData(chunk);
+        written += frames;
+    }
+
+    std::vector<int16_t> silence(kChunkFrames, 0);
+    for (int i = 0; i < 3; ++i) {
+        audio_codec->OutputData(silence);
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    // Keep the speaker path open when the mic side is active. On CoreS3, closing
+    // output while the duplex input channel is running can leave the next speech
+    // playback raspy until the codec is reopened cleanly.
+    const bool kept_output_enabled = was_output_enabled || input_was_enabled;
+    if (!kept_output_enabled) {
+        audio_codec->EnableOutput(false);
+    }
+
+    cJSON* result = cJSON_CreateObject();
+    cJSON_AddNumberToObject(result, "frequency_hz", frequency_hz);
+    cJSON_AddNumberToObject(result, "duration_ms", duration_ms);
+    cJSON_AddNumberToObject(result, "amplitude", amplitude);
+    cJSON_AddNumberToObject(result, "sample_rate", kSampleRate);
+    cJSON_AddNumberToObject(result, "frames", static_cast<double>(total_frames));
+    cJSON_AddBoolToObject(result, "output_was_enabled", was_output_enabled);
+    cJSON_AddBoolToObject(result, "input_was_enabled", input_was_enabled);
+    cJSON_AddBoolToObject(result, "kept_output_enabled", kept_output_enabled);
+    return result;
+}
 }  // namespace
 
 void Hal::robot_mcp_init()
@@ -199,6 +270,44 @@ void Hal::robot_mcp_init()
                            return result;
                        });
 
+    mclog::tagInfo(_tag, "add robot.set_speaker_volume tool");
+    mcp_server.AddTool("self.robot.set_speaker_volume",
+                       "Set StackChan speaker volume. Use low values such as 25-45 when diagnosing distortion.",
+                       PropertyList({Property("volume", kPropertyTypeInteger, 40, 0, 100),
+                                     Property("permanent", kPropertyTypeBoolean, false)}),
+                       [this](const PropertyList& properties) -> ReturnValue {
+                           int volume    = properties["volume"].value<int>();
+                           bool permanent = properties["permanent"].value<bool>();
+                           if (volume < 0) {
+                               volume = 0;
+                           } else if (volume > 100) {
+                               volume = 100;
+                           }
+
+                           mclog::tagInfo(_tag, "set_speaker_volume: volume={}, permanent={}", volume, permanent);
+                           GetHAL().setSpeakerVolume(static_cast<uint8_t>(volume), permanent);
+
+                           cJSON* result = cJSON_CreateObject();
+                           cJSON_AddNumberToObject(result, "speaker_volume", GetHAL().getSpeakerVolume());
+                           cJSON_AddBoolToObject(result, "permanent", permanent);
+                           return result;
+                       });
+
+    mclog::tagInfo(_tag, "add audio.play_test_tone tool");
+    mcp_server.AddTool("self.audio.play_test_tone",
+                       "Play a short diagnostic sine tone directly on StackChan speaker, bypassing Hermes/TTS/Opus.",
+                       PropertyList({Property("frequency_hz", kPropertyTypeInteger, 440, 100, 2000),
+                                     Property("duration_ms", kPropertyTypeInteger, 800, 100, 3000),
+                                     Property("amplitude", kPropertyTypeInteger, 6000, 500, 16000)}),
+                       [](const PropertyList& properties) -> ReturnValue {
+                           int frequency_hz = properties["frequency_hz"].value<int>();
+                           int duration_ms  = properties["duration_ms"].value<int>();
+                           int amplitude    = properties["amplitude"].value<int>();
+                           mclog::tagInfo(_tag, "play_test_tone: frequency={}Hz duration={}ms amplitude={}",
+                                          frequency_hz, duration_ms, amplitude);
+                           return play_test_tone(frequency_hz, duration_ms, amplitude);
+                       });
+
     // System Prompt：
     // You can control the robot's head. Use get_yaw and get_pitch to sense current position. Use set_yaw for horizontal
     // movement and set_pitch for vertical movement. All angles are in degrees.
@@ -207,8 +316,6 @@ void Hal::robot_mcp_init()
     mcp_server.AddTool("self.robot.get_head_angles",
                        "Returns current yaw/pitch in degrees. Neutral position is {yaw:0, pitch:0}.",
                        std::vector<Property>{}, [this](const PropertyList& properties) -> ReturnValue {
-                           LvglLockGuard lock;  // StackChan motion update is under the lvgl lock
-
                            auto& motion      = GetStackChan().motion();
                            int current_yaw   = motion.yawServo().getCurrentAngle() / 10;
                            int current_pitch = motion.pitchServo().getCurrentAngle() / 10;
@@ -235,8 +342,6 @@ void Hal::robot_mcp_init()
 
                            mclog::tagInfo(_tag, "motion set_angles: yaw: {}, pitch: {}, speed: {}", yaw, pitch, speed);
 
-                           LvglLockGuard lock;
-
                            auto& motion = GetStackChan().motion();
                            if (!motion.tryAcquireModifyLock(motion::MotionLockOwner::McpCommand)) {
                                throw std::runtime_error("Head motion is temporarily locked by a higher priority action");
@@ -250,7 +355,6 @@ void Hal::robot_mcp_init()
                            BaseType_t release_task_ok = xTaskCreate(
                                [](void*) {
                                    vTaskDelay(pdMS_TO_TICKS(1000));
-                                   LvglLockGuard lock;
                                    GetStackChan().motion().releaseModifyLock(motion::MotionLockOwner::McpCommand);
                                    vTaskDelete(nullptr);
                                },

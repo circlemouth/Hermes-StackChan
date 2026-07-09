@@ -674,6 +674,18 @@ void hal_bridge::board_set_speaker_volume(uint8_t volume, bool permanent)
 
 uint8_t hal_bridge::board_get_speaker_volume()
 {
+    auto& board      = Board::GetInstance();
+    auto audio_codec = board.GetAudioCodec();
+    if (audio_codec) {
+        int volume = audio_codec->output_volume();
+        if (volume <= 0) {
+            volume = 10;
+        } else if (volume > 100) {
+            volume = 100;
+        }
+        return volume;
+    }
+
     int volume = 70;
     Settings settings("audio", false);
     volume = settings.GetInt("output_volume", volume);

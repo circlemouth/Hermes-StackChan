@@ -50,6 +50,8 @@ flowchart LR
 The v1 robot tools are:
 
 - `stackchan_get_status`: read safe device status without exposing the full bridge URL or secrets.
+- `stackchan_set_speaker_volume`: temporarily or permanently set the physical speaker volume.
+- `stackchan_play_test_tone`: play a short diagnostic tone directly on the M5 speaker, bypassing Hermes/TTS/Opus.
 - `stackchan_get_head_angles`: read current yaw and pitch.
 - `stackchan_set_head_angles`: move the head for deliberate gestures.
 - `stackchan_set_led_color`: set the onboard RGB LEDs as a subtle cue.
@@ -158,33 +160,51 @@ HERMES_LOCAL_STT_LANGUAGE=ja
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
 STACKCHAN_MIN_FRAMES_FOR_STT=10
-STACKCHAN_POST_TTS_COOLDOWN_MS=1500
+STACKCHAN_POST_TTS_COOLDOWN_MS=1000
 STACKCHAN_LOCAL_VAD_ENABLED=true
-STACKCHAN_VAD_RMS_THRESHOLD=0.012
-STACKCHAN_VAD_START_SPEECH_MS=120
-STACKCHAN_VAD_END_SILENCE_MS=900
+STACKCHAN_VAD_RMS_THRESHOLD=0.025
+STACKCHAN_VAD_START_SPEECH_MS=60
+STACKCHAN_VAD_END_SILENCE_MS=650
 STACKCHAN_VAD_MIN_SPEECH_MS=240
-STACKCHAN_VAD_PREROLL_MS=300
-STACKCHAN_BARGE_IN_ENABLED=true
-STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.03
-STACKCHAN_BARGE_IN_START_SPEECH_MS=180
-STACKCHAN_BARGE_IN_MIN_SPEECH_MS=180
-STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=300
-STACKCHAN_MAX_SPEECH_CHARS=800
-STACKCHAN_TTS_SEGMENT_MAX_CHARS=160
-STACKCHAN_TTS_MAX_SEGMENTS=8
+STACKCHAN_VAD_PREROLL_MS=360
+STACKCHAN_BARGE_IN_ENABLED=false
+STACKCHAN_BARGE_IN_RMS_THRESHOLD=0.75
+STACKCHAN_BARGE_IN_START_SPEECH_MS=360
+STACKCHAN_BARGE_IN_MIN_SPEECH_MS=420
+STACKCHAN_BARGE_IN_IGNORE_TTS_START_MS=1800
+STACKCHAN_MAX_SPEECH_CHARS=28
+STACKCHAN_TTS_SEGMENT_MAX_CHARS=28
+STACKCHAN_TTS_MAX_SEGMENTS=1
+STACKCHAN_TTS_PREROLL_MS=600
+STACKCHAN_TTS_OUTPUT_GAIN=0.65
+STACKCHAN_OPUS_PCM_INPUT=buffer
+STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD=0.006
+STACKCHAN_FAST_ACK_ENABLED=true
+STACKCHAN_FAST_ACK_TEXT=はい。
+STACKCHAN_FAST_ACK_TEXTS=はい。|うん。|了解。|なるほど。|わかった。|OK。
+STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS=true
+STACKCHAN_REPLY_PROMPT_PREFIX=音声会話です。原則1文・14文字以内で短く自然に返して。長さ指定が聞こえても、長く話し続けず必要なら「もう一度。」だけ返して。冗長にしない。
 STACKCHAN_AUTO_LED_ENABLED=true
 STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
 `HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
-Local VAD is enabled by default. It is a lightweight RMS-based detector that runs inside `ai-server` after Opus is decoded to 16 kHz mono PCM, so it can end a turn even when the device keeps sending silent Opus frames. For noisy rooms, raise `STACKCHAN_VAD_RMS_THRESHOLD`. If the end of speech is clipped, raise `STACKCHAN_VAD_END_SILENCE_MS`; if replies feel slow, lower it. `STACKCHAN_VAD_START_SPEECH_MS` and `STACKCHAN_VAD_PREROLL_MS` tune start stability and head padding.
+Local VAD is enabled for the low-latency M5Stack path. Incoming Opus frames are decoded with a disposable per-session decoder; transient decode failures recreate that decoder and only fall back to the arrival-gap timeout after repeated failures, so a single malformed frame no longer poisons the TTS encoder. `STACKCHAN_VAD_END_SILENCE_MS` is the main latency/false-cut tradeoff: 600-750 ms is a practical range for natural Japanese voice turns.
 
-Barge-in is enabled by default and uses a stricter RMS threshold only while `ai-server` is streaming TTS. It interrupts the dedicated StackChan Hermes session, sends one `tts stop`, and immediately returns to listening. It requires firmware that continues sending microphone Opus frames during TTS playback; the current xiaozhi speaking state may suppress mic upload unless realtime listening/AEC mode is active, so firmware behavior should be confirmed on hardware. TTS is synthesized sentence by sentence so longer replies can begin playing from the first sentence instead of waiting for the whole reply to be synthesized.
+Barge-in stays off by default until the physical acoustic path has been tuned, because the M5 microphone can otherwise hear its own speaker. TTS is synthesized sentence by sentence so longer replies can begin playing from the first sentence instead of waiting for the whole reply to be synthesized. `STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS` interrupts the dedicated Hermes stream once the configured spoken segment limit is reached, so a misheard long-duration request cannot monopolize the voice loop. `STACKCHAN_TTS_PREROLL_MS` sends a silent Opus preroll before the first audible frame to avoid clipping the first syllable on the device speaker; 450-600 ms is a practical range when the device speaker startup clips the beginning. `STACKCHAN_TTS_OUTPUT_GAIN` lowers synthesized PCM before Opus encoding to avoid speaker clipping on the small M5Stack driver. `STACKCHAN_OPUS_PCM_INPUT=buffer` uses the guarded OpusScript heap-copy encoder; `int16` is only intended for hardware A/B diagnosis of the legacy public OpusScript encode path. `STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD` skips very quiet max-duration fallback captures before STT, preventing silence hallucinations from becoming accidental replies. `STACKCHAN_FAST_ACK_TEXTS` pre-caches multiple short backchannels and randomly chooses one after STT, avoiding the same first word on every turn.
 
 Automatic LED state display is also enabled by default: soft green while listening, amber while thinking, soft blue while speaking, and off when idle. If Hermes explicitly calls `stackchan_set_led_color`, that manual color is held briefly before automatic state updates resume. More background and migration notes are in [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md).
 
 Set `STACKCHAN_LOCAL_ONLY=true` to keep the StackChan voice loop local-only. In that mode `HERMES_DASHBOARD_URL` must point to `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`, and the Hermes STT/TTS helpers refuse cloud fallback. Use faster-whisper or `HERMES_LOCAL_STT_COMMAND` for STT, and use Piper, KittenTTS, NeuTTS, or a command TTS provider for speech. First-time model downloads and package installs may still be part of setup, but runtime does not escape to cloud STT/TTS APIs.
+
+Before running the hardware JBL-to-M5 voice-loop probe, check the host audio path:
+
+```bash
+cd ai-server
+npm run probe:voice -- --preflight
+```
+
+The preflight verifies bridge readiness, the JBL PipeWire sink, the USB camera microphone source, ALSA `/dev/snd` access, and Bluetooth connection state. Probe recordings and reports are written under `ai-server/probe-runs/`, which is intentionally git-ignored.
 
 Build and run:
 

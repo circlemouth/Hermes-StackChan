@@ -181,6 +181,40 @@ test('Session speaks queued follow-up prompts when idle', async () => {
     session.close()
 })
 
+test('Session interrupts idle listening to speak a queued follow-up prompt', async () => {
+    const ws = new MockWebSocket()
+    let promptSeen = ''
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        hermes: {
+            submitPrompt: async (prompt) => {
+                promptSeen = prompt
+                return '確認できた。'
+            },
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async (text) => {
+            assert.equal(text, '確認できた。')
+            return Buffer.from('follow-up while listening wav')
+        },
+        encodeWavToOpusFrames: () => [Buffer.from([7])],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    session.handleMessage(Buffer.from([1]))
+    await session.enqueueFollowup('結果を短く伝えて')
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+
+    assert.equal(promptSeen, '結果を短く伝えて')
+    assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === '確認できた。'))
+    assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([7])])
+
+    session.close()
+})
+
 test('inferStackChanEmotion maps reply text to StackChan expressions', () => {
     assert.equal(inferStackChanEmotion('ありがとう、うまくできたよ'), 'happy')
     assert.equal(inferStackChanEmotion('ごめん、少し失敗しました'), 'sad')
@@ -192,15 +226,25 @@ test('inferStackChanEmotion maps reply text to StackChan expressions', () => {
 test('isIgnorableShortTranscript ignores only narrow filler fragments', () => {
     assert.equal(isIgnorableShortTranscript('えっ'), true)
     assert.equal(isIgnorableShortTranscript(' あ。 '), true)
-    assert.equal(isIgnorableShortTranscript('はい'), false)
-    assert.equal(isIgnorableShortTranscript('うん'), false)
+    assert.equal(isIgnorableShortTranscript('ハハ'), true)
+    assert.equal(isIgnorableShortTranscript('フフ。'), true)
+    assert.equal(isIgnorableShortTranscript('はい'), true)
+    assert.equal(isIgnorableShortTranscript('うん'), true)
+    assert.equal(isIgnorableShortTranscript('OK'), true)
+    assert.equal(isIgnorableShortTranscript('チッ'), true)
+    assert.equal(isIgnorableShortTranscript('フッ'), true)
+    assert.equal(isIgnorableShortTranscript('くっ'), true)
     assert.equal(isIgnorableShortTranscript('こんにちは'), false)
 })
 
 test('isIgnorableTimeoutTranscript ignores timeout-only backchannels', () => {
     assert.equal(isIgnorableTimeoutTranscript('お'), true)
     assert.equal(isIgnorableTimeoutTranscript('うん'), true)
-    assert.equal(isIgnorableTimeoutTranscript('はい'), false)
+    assert.equal(isIgnorableTimeoutTranscript('はい'), true)
+    assert.equal(isIgnorableTimeoutTranscript('ハハ'), true)
+    assert.equal(isIgnorableTimeoutTranscript('チッ'), true)
+    assert.equal(isIgnorableTimeoutTranscript('フッ'), true)
+    assert.equal(isIgnorableTimeoutTranscript('くっ'), true)
     assert.equal(isIgnorableTimeoutTranscript('短く返事して'), false)
 })
 
@@ -245,7 +289,7 @@ test('readBargeInConfig and readSpeechSegmentationConfig clamp environment value
         STACKCHAN_TTS_SEGMENT_MAX_CHARS: '9999',
         STACKCHAN_TTS_MAX_SEGMENTS: '0',
     }), {
-        maxSpeechChars: 40,
+        maxSpeechChars: 20,
         segmentMaxChars: 800,
         maxSegments: 1,
     })
@@ -735,6 +779,42 @@ test('Session local VAD processes a turn without listen stop', async () => {
     await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'stt' && msg['text'] === '発話'))
     assert.ok(transcribedBytes > 0)
     assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
+    session.close()
+})
+
+test('Session local VAD recovers after a transient streaming decode failure', async () => {
+    const ws = new MockWebSocket()
+    let decodeCalls = 0
+    let transcribeCount = 0
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: testVadConfig,
+        decodeOpusFrame: (frame) => {
+            decodeCalls += 1
+            if (decodeCalls === 1) throw new Error('bad opus frame')
+            return frame[0] === 1 ? pcm60ms(1600) : pcm60ms(0)
+        },
+        transcribeWav: async () => {
+            transcribeCount += 1
+            return '復帰'
+        },
+        hermes: {
+            submitPrompt: async () => '返答',
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('fake wav'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    session.handleMessage(Buffer.from([9]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([1]))
+    for (let i = 0; i < 3; i++) session.handleMessage(Buffer.from([0]))
+
+    await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'stt' && msg['text'] === '復帰'))
+    assert.equal(transcribeCount, 1)
     session.close()
 })
 
