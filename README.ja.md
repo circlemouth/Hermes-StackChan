@@ -154,9 +154,17 @@ STACKCHAN_LOCAL_ONLY=true
 
 HERMES_CONNECT_MODE=dashboard_ws
 HERMES_DASHBOARD_URL=http://127.0.0.1:9119
+STACKCHAN_HERMES_WARMUP_ENABLED=false
+STACKCHAN_HERMES_WARMUP_TIMEOUT_MS=20000
 HERMES_ROOT=../hermes-agent
 HERMES_PYTHON=python3
 HERMES_LOCAL_STT_LANGUAGE=ja
+STACKCHAN_LOCAL_TTS_URL=http://127.0.0.1:18002/?language=ja
+STACKCHAN_LOCAL_TTS_TIMEOUT_MS=15000
+STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=false
+STACKCHAN_LOCAL_TTS_OUTPUT_TARGET_NAME=JBL Flip 3
+STACKCHAN_LOCAL_TTS_OUTPUT_VOLUME=0.35
+STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME=62
 
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
@@ -189,14 +197,16 @@ STACKCHAN_AUTO_LED_ENABLED=true
 STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
-`HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。
+`HERMES_ROOT` は、STT/TTS helper が import する HermesAgent の source tree または module root を指すようにします。`STACKCHAN_LOCAL_TTS_URL` を設定すると、`ai-server` はUTF-8テキストを常駐ローカルendpointへ直接POSTし、WAV応答を受け取ります。segmentごとのHermes/Python helper起動がなくなります。Piper Plusの `piper.http_server` はこの経路と互換です。
+`STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=true` にすると、`ai-server` は TTS turn ごとに指定名の PipeWire sink を探します。接続中ならホスト側スピーカーから発話し、その間だけM5スピーカーをmuteします。M5には同期用のOpus frameを送り続けるため、顔と発話状態は連動します。sinkが見つからない、または初期化に失敗した場合は `STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME` のM5内蔵スピーカーへ自動フォールバックします。BluetoothスピーカーをStackChan背後に置く構成で有効です。
+常時稼働の低スペック端末では `STACKCHAN_HERMES_WARMUP_ENABLED=true` にすると、device WebSocket listenerを開く前に最小限の非表示プロンプトを1回送ります。providerのcold start待ちをservice起動時へ移せます。待機は `STACKCHAN_HERMES_WARMUP_TIMEOUT_MS` で上限を設け、失敗しても `ai-server` 自体は起動します。
 local VAD は低遅延の M5Stack 経路で default on です。入力 Opus は session ごとの disposable decoder で復号し、一時的な decode 失敗では decoder を作り直します。連続失敗した場合だけ arrival-gap timeout に退避するため、1つの壊れた frame が TTS encoder まで巻き込む状態を避けます。`STACKCHAN_VAD_END_SILENCE_MS` は遅延と早切れの主な調整点で、自然な日本語会話では 600-750 ms 程度が実用範囲です。
 
 barge-in は、M5 マイクが自分のスピーカーを拾いやすい物理音響経路のため default off のままです。TTS は文単位に分けて合成するため、長い返答でも全文合成を待たずに先頭文から再生を始められます。`STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS` は発話セグメント上限に達した時点で専用 Hermes stream を interrupt し、長さ指定の聞き違いで音声 loop が長時間占有されるのを防ぎます。`STACKCHAN_TTS_PREROLL_MS` は最初の有声音声 frame の前に無音 Opus を送って、実機スピーカーで冒頭音節が欠けるのを避けるための設定です。実機スピーカーの立ち上がりで頭が欠ける場合は 450-600 ms 程度が調整範囲です。`STACKCHAN_TTS_OUTPUT_GAIN` は Opus encode 前の合成音声 PCM を下げ、小型 M5Stack スピーカーでの音割れを避けるための設定です。`STACKCHAN_OPUS_PCM_INPUT=buffer` は guarded OpusScript heap-copy encoder を使います。`int16` は legacy public OpusScript encode path の実機 A/B 診断用にだけ使ってください。`STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD` は非常に小さい音量の最長録音 fallback を STT 前に捨て、無音 hallucination が誤返答になるのを防ぎます。`STACKCHAN_FAST_ACK_TEXTS` は複数の短い相づちを事前キャッシュし、STT直後にランダムに再生することで毎回同じ第一声になるのを避けます。
 
 自動 LED 状態表示も default で有効です。listening は控えめな緑、thinking は amber、speaking は控えめな青、idle は消灯です。Hermes が明示的に `stackchan_set_led_color` を呼んだ場合、その手動色を短時間優先してから自動状態表示に戻します。背景と移植範囲の詳細は [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md) を参照してください。
 
-`STACKCHAN_LOCAL_ONLY=true` にすると StackChan 音声 loop を local-only にします。この場合、`HERMES_DASHBOARD_URL` は `localhost`、`127.0.0.1`、`::1`、`host.docker.internal` のいずれかに限定され、Hermes STT/TTS helper は cloud fallback を拒否します。STT は faster-whisper または `HERMES_LOCAL_STT_COMMAND`、TTS は Piper / KittenTTS / NeuTTS / command provider を使ってください。初回 model 取得や pip/npm install が事前 setup として必要な場合はありますが、実行時に cloud STT/TTS API へ逃がしません。
+`STACKCHAN_LOCAL_ONLY=true` にすると StackChan 音声 loop を local-only にします。この場合、`HERMES_DASHBOARD_URL` は `localhost`、`127.0.0.1`、`::1`、`host.docker.internal` のいずれかに限定され、Hermes STT/TTS helper は cloud fallback を拒否します。STT は `HERMES_STT_URL` を ReazonSpeech などのローカルOpenAI互換endpointへ向けるか、faster-whisper / `HERMES_LOCAL_STT_COMMAND` を使います。TTS は `STACKCHAN_LOCAL_TTS_URL` を Piper Plus などのローカルWAV endpointへ向けてください。初回 model 取得や pip/npm install が事前 setup として必要な場合はありますが、実行時に cloud STT/TTS API へ逃がしません。
 
 JBL から M5 へ音声を入れる実機 probe を走らせる前に、ホスト側の音声経路を確認してください。
 
@@ -282,6 +292,8 @@ Mooncake app と HERMES 未準備画面では、画面下端から上へスワ�
 - `Hermes bridge ready`: `ai-server` 経由で接続できています。
 - `Check websocket_url and bridge host`: bridge host に到達できません。
 
+HERMES を手動で開いた後に WebSocket が予期せず切れた場合、firmware は 1、2、4、…、最大30秒の指数バックオフで自動再接続します。意図的な切断、Launcher への復帰、protocol reset では再試行を解除します。これにより `ai-server` の再起動後も、本体再起動やHERMESの開き直しなしで復帰できます。
+
 BLE Wi-Fi provisioning は残っていますが、アカウント紐づけではなくネットワーク設定として扱います。画面には Device ID が表示され、provisioning client から Wi-Fi credentials を受け取るのを待ちます。
 
 ## 実行時の動作
@@ -290,11 +302,11 @@ BLE Wi-Fi provisioning は残っていますが、アカウント紐づけでは
 
 1. StackChan がマイク音声を Opus frame として `ai-server` に送ります。
 2. `ai-server` が受信 Opus を PCM に decode し、local RMS VAD で音声内容から発話終了を検出します。
-3. `ai-server` が収集済み PCM を WAV として Hermes の STT helper module に渡します。
+3. `ai-server` が収集済み PCM を WAV として、設定済みの OpenAI互換ローカルSTT endpointへ直接送ります。endpoint未設定時は Hermes のPython helperへフォールバックします。
 4. `ai-server` が transcript を Hermes Dashboard `/api/ws` の StackChan 専用 session に送ります。
 5. Hermes がその session の最終応答 text を返します。
-6. `ai-server` が発話 text を文単位の TTS segment に分け、segment ごとに Hermes の TTS helper module を Python subprocess で呼びます。
-7. `ai-server` が各 segment の合成音声を Opus stream として順番に StackChan に返します。
+6. `ai-server` が発話 text を文単位の TTS segment に分け、設定済みの常駐ローカルTTS endpointへ各segmentを直接POSTします。endpoint未設定時は Hermes のPython helperへフォールバックします。
+7. `ai-server` が各 segment の合成音声を Opus stream として順番に StackChan に返します。local TTS outputを有効にした場合、可聴音声は指定PipeWireスピーカーから出し、同じ時間軸のstreamでM5 avatarを同期します。local sinkが使えなければM5スピーカーへ戻ります。
 
 interrupt の扱い:
 
@@ -365,6 +377,8 @@ Dashboard HTML から session token を取得できない場合、利用中の H
 - firewall が inbound TCP port `8765` を許可している。
 - URL が `/ws` で終わっている。
 
+起動済みHERMESがbridgeを失った場合は、そのまま待ってください。firmwareが指数バックオフで自動再接続します。`ai-server` を再起動した場合、最初の再試行なら通常1〜2秒程度で復帰し、失敗が続くと最大30秒まで間隔を広げます。
+
 ### Hermes は応答するが robot tools が失敗する
 
 確認点:
@@ -382,7 +396,7 @@ Dashboard HTML から session token を取得できない場合、利用中の H
 - `HERMES_PYTHON` が Hermes tool module を import できる Python interpreter を指している。
 - `ffmpeg` が install 済みで `PATH` から実行できる。
 - `~/.hermes/config.yaml` の provider/audio tool 設定が有効。
-- `STACKCHAN_LOCAL_ONLY=true` の場合、STT は faster-whisper または `local_command`、TTS は Piper / KittenTTS / NeuTTS / command provider にしてください。Edge TTS、OpenAI、Groq、ElevenLabs、MiniMax、xAI、Mistral、Gemini などへ fallback しません。
+- `STACKCHAN_LOCAL_ONLY=true` の場合、STT はローカル `HERMES_STT_URL`、faster-whisper、または `local_command`、TTS は `STACKCHAN_LOCAL_TTS_URL`、Piper、KittenTTS、NeuTTS、または command provider にしてください。Edge TTS、OpenAI、Groq、ElevenLabs、MiniMax、xAI、Mistral、Gemini などへ fallback しません。
 
 ## 開発時の確認
 

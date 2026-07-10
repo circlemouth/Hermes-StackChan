@@ -382,7 +382,9 @@ void Hal::handleBootSdConfigAutoload()
 {
 #if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN || CONFIG_BOARD_TYPE_M5STACK_CORE_S3
     {
-        // 旧実装の予約フラグ、および Setup > Load SD Config の手動要求を消費する。
+        // Setup > Load SD Config の手動要求がある場合だけ SD に触る。
+        // 通常起動で pending/skip のどちらも無い場合は、共有SPI保護のため
+        // probe すら行わず NVS の既存設定をそのまま使う。
         Settings settings(SD_BOOT_IMPORT_NS, true);
         if (settings.GetInt(SD_BOOT_IMPORT_PENDING_KEY, 0) == 1) {
             mclog::tagInfo(TAG, "manual SD config reload flag consumed");
@@ -393,6 +395,9 @@ void Hal::handleBootSdConfigAutoload()
             // このbootではSDを再度触らず通常起動へ進む。
             mclog::tagInfo(TAG, "skip SD config autoload once due to protected boot marker");
             settings.SetInt(SD_BOOT_SKIP_NEXT_AUTOLOAD_KEY, 0);
+            return;
+        } else {
+            mclog::tagInfo(TAG, "skip SD config autoload: no manual request");
             return;
         }
     }

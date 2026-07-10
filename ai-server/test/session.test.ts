@@ -199,6 +199,7 @@ test('Session interrupts idle listening to speak a queued follow-up prompt', asy
             return Buffer.from('follow-up while listening wav')
         },
         encodeWavToOpusFrames: () => [Buffer.from([7])],
+        postTtsCooldownMs: 20,
     })
 
     session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
@@ -211,6 +212,8 @@ test('Session interrupts idle listening to speak a queued follow-up prompt', asy
     assert.equal(promptSeen, '結果を短く伝えて')
     assert.ok(jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'sentence_start' && msg['text'] === '確認できた。'))
     assert.deepEqual(ws.sent.filter(Buffer.isBuffer), [Buffer.from([7])])
+    await waitFor(() => session.getBridgeStatus().readyForPrompt)
+    assert.equal(session.getBridgeStatus().state, 'listening')
 
     session.close()
 })
@@ -246,6 +249,37 @@ test('isIgnorableTimeoutTranscript ignores timeout-only backchannels', () => {
     assert.equal(isIgnorableTimeoutTranscript('フッ'), true)
     assert.equal(isIgnorableTimeoutTranscript('くっ'), true)
     assert.equal(isIgnorableTimeoutTranscript('短く返事して'), false)
+})
+
+test('Session resumes listening after an ignored short transcript', async () => {
+    const ws = new MockWebSocket()
+    let llmCalled = false
+    const session = new Session(ws as never, {
+        registerDeviceSession: () => () => undefined,
+        localVadConfig: { ...testVadConfig, enabled: false },
+        decodeOpusFrames: async () => Buffer.alloc(320),
+        transcribeWav: async () => 'うん',
+        hermes: {
+            submitPrompt: async () => {
+                llmCalled = true
+                return 'unused'
+            },
+            interrupt: async () => undefined,
+            dispose: async () => undefined,
+        },
+        synthesizeText: async () => Buffer.from('unused'),
+        encodeWavToOpusFrames: () => [],
+    })
+
+    session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
+    for (let i = 0; i < 10; i++) session.handleMessage(Buffer.from([i]))
+    session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+
+    await waitFor(() => session.getBridgeStatus().readyForPrompt)
+    assert.equal(session.getBridgeStatus().state, 'listening')
+    assert.equal(llmCalled, false)
+    session.close()
 })
 
 test('readEnvInt uses fallback, parsed values, and clamping', () => {

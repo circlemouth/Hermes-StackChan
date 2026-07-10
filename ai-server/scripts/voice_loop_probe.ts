@@ -313,7 +313,11 @@ async function runAudioPreflight(): Promise<AudioPreflightReport> {
     const devices = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Devices') : []
     const sinks = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Sinks') : []
     const sources = wpctl.ok ? parseWpctlSectionEntries(wpctlStatus, 'Sources') : []
-    const playTarget = wpctl.ok ? parseWpctlTarget(wpctlStatus, PLAY_TARGET_NAME) : null
+    const playTarget = wpctl.ok
+        ? (PLAY_TARGET
+            ? sinks.find(sink => sink.id === PLAY_TARGET || sink.name.toLowerCase().includes(PLAY_TARGET.toLowerCase())) ?? null
+            : parseWpctlTarget(wpctlStatus, PLAY_TARGET_NAME))
+        : null
     const recordTarget = wpctl.ok ? parseWpctlSectionTarget(wpctlStatus, 'Sources', RECORD_TARGET || RECORD_TARGET_NAME) : null
     const arecord = await runOptional('arecord', ['-l'], { timeoutMs: 3000 })
     const aplay = await runOptional('aplay', ['-l'], { timeoutMs: 3000 })
@@ -328,7 +332,7 @@ async function runAudioPreflight(): Promise<AudioPreflightReport> {
     lines.push(`- PipeWire audio devices: ${devices.length}`)
     lines.push(`- PipeWire sinks: ${sinks.length ? sinks.map(s => `${s.id}:${s.name}`).join(' | ') : 'none'}`)
     lines.push(`- PipeWire sources: ${sources.length ? sources.map(s => `${s.id}:${s.name}`).join(' | ') : 'none'}`)
-    lines.push(`- Requested JBL sink name: ${JSON.stringify(PLAY_TARGET_NAME)} -> ${playTarget ? `${playTarget.id}:${playTarget.name}` : 'not found'}`)
+    lines.push(`- Requested playback target: ${JSON.stringify(PLAY_TARGET || PLAY_TARGET_NAME)} -> ${playTarget ? `${playTarget.id}:${playTarget.name}` : 'not found'}`)
     lines.push(`- Requested recording target: ${RECORD_TARGET || RECORD_TARGET_NAME || '(default)'} -> ${recordTarget ? `${recordTarget.id}:${recordTarget.name}` : 'not found'}`)
 
     const alsaCards = readProcFile('/proc/asound/cards')
@@ -343,9 +347,9 @@ async function runAudioPreflight(): Promise<AudioPreflightReport> {
 
     if (!wpctl.ok) failures.push('PipeWire status cannot be read.')
     if (devices.length === 0) failures.push('PipeWire sees no audio devices.')
-    if (!PLAY_TARGET && !playTarget) failures.push(`JBL playback sink "${PLAY_TARGET_NAME}" is not available in PipeWire.`)
+    if (!playTarget) failures.push(`Playback target "${PLAY_TARGET || PLAY_TARGET_NAME}" is not available in PipeWire.`)
     if (!recordTarget) failures.push(`Recording target "${RECORD_TARGET || RECORD_TARGET_NAME}" is not available in PipeWire sources.`)
-    if (!bluetoothIsConnected(bluetoothInfo)) failures.push(`Bluetooth speaker "${BLUETOOTH_DEVICE_NAME}" is not connected.`)
+    if (!PLAY_TARGET && !bluetoothIsConnected(bluetoothInfo)) failures.push(`Bluetooth speaker "${BLUETOOTH_DEVICE_NAME}" is not connected.`)
     if (!arecord.ok || /no soundcards|サウンドカードが見つかりません/i.test(`${arecord.stdout}${arecord.stderr}`)) {
         failures.push('arecord cannot see a capture device.')
     }

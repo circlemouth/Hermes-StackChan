@@ -153,9 +153,17 @@ STACKCHAN_LOCAL_ONLY=true
 
 HERMES_CONNECT_MODE=dashboard_ws
 HERMES_DASHBOARD_URL=http://127.0.0.1:9119
+STACKCHAN_HERMES_WARMUP_ENABLED=false
+STACKCHAN_HERMES_WARMUP_TIMEOUT_MS=20000
 HERMES_ROOT=../hermes-agent
 HERMES_PYTHON=python3
 HERMES_LOCAL_STT_LANGUAGE=ja
+STACKCHAN_LOCAL_TTS_URL=http://127.0.0.1:18002/?language=ja
+STACKCHAN_LOCAL_TTS_TIMEOUT_MS=15000
+STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=false
+STACKCHAN_LOCAL_TTS_OUTPUT_TARGET_NAME=JBL Flip 3
+STACKCHAN_LOCAL_TTS_OUTPUT_VOLUME=0.35
+STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME=62
 
 STACKCHAN_SILENCE_TIMEOUT_MS=1200
 STACKCHAN_MAX_RECORDING_MS=15000
@@ -188,14 +196,16 @@ STACKCHAN_AUTO_LED_ENABLED=true
 STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
-`HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers.
+`HERMES_ROOT` must point to the HermesAgent source tree or installed module root that contains the Python tools used by the STT/TTS helpers. When `STACKCHAN_LOCAL_TTS_URL` is set, `ai-server` posts UTF-8 text directly to that persistent local endpoint and expects a WAV response. This removes the per-segment Hermes/Python helper startup overhead. Piper Plus `piper.http_server` is compatible with this route.
+When `STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=true`, `ai-server` looks up the named PipeWire sink for every TTS turn. If it is available, speech is played on that host speaker while the M5 speaker is temporarily muted; timed Opus frames still reach the M5 for avatar synchronization. If the sink is absent or setup fails, output automatically falls back to the M5 at `STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME`. This is useful when a Bluetooth speaker is placed directly behind StackChan.
+On an always-on low-spec host, set `STACKCHAN_HERMES_WARMUP_ENABLED=true` to send one minimal private prompt before the device WebSocket listener opens. This moves the provider cold-start delay to service startup. The wait is bounded by `STACKCHAN_HERMES_WARMUP_TIMEOUT_MS`, and a warmup failure does not prevent `ai-server` from starting.
 Local VAD is enabled for the low-latency M5Stack path. Incoming Opus frames are decoded with a disposable per-session decoder; transient decode failures recreate that decoder and only fall back to the arrival-gap timeout after repeated failures, so a single malformed frame no longer poisons the TTS encoder. `STACKCHAN_VAD_END_SILENCE_MS` is the main latency/false-cut tradeoff: 600-750 ms is a practical range for natural Japanese voice turns.
 
 Barge-in stays off by default until the physical acoustic path has been tuned, because the M5 microphone can otherwise hear its own speaker. TTS is synthesized sentence by sentence so longer replies can begin playing from the first sentence instead of waiting for the whole reply to be synthesized. `STACKCHAN_STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS` interrupts the dedicated Hermes stream once the configured spoken segment limit is reached, so a misheard long-duration request cannot monopolize the voice loop. `STACKCHAN_TTS_PREROLL_MS` sends a silent Opus preroll before the first audible frame to avoid clipping the first syllable on the device speaker; 450-600 ms is a practical range when the device speaker startup clips the beginning. `STACKCHAN_TTS_OUTPUT_GAIN` lowers synthesized PCM before Opus encoding to avoid speaker clipping on the small M5Stack driver. `STACKCHAN_OPUS_PCM_INPUT=buffer` uses the guarded OpusScript heap-copy encoder; `int16` is only intended for hardware A/B diagnosis of the legacy public OpusScript encode path. `STACKCHAN_MAX_DURATION_STT_RMS_THRESHOLD` skips very quiet max-duration fallback captures before STT, preventing silence hallucinations from becoming accidental replies. `STACKCHAN_FAST_ACK_TEXTS` pre-caches multiple short backchannels and randomly chooses one after STT, avoiding the same first word on every turn.
 
 Automatic LED state display is also enabled by default: soft green while listening, amber while thinking, soft blue while speaking, and off when idle. If Hermes explicitly calls `stackchan_set_led_color`, that manual color is held briefly before automatic state updates resume. More background and migration notes are in [docs/robot-bridge-migration.md](./docs/robot-bridge-migration.md).
 
-Set `STACKCHAN_LOCAL_ONLY=true` to keep the StackChan voice loop local-only. In that mode `HERMES_DASHBOARD_URL` must point to `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`, and the Hermes STT/TTS helpers refuse cloud fallback. Use faster-whisper or `HERMES_LOCAL_STT_COMMAND` for STT, and use Piper, KittenTTS, NeuTTS, or a command TTS provider for speech. First-time model downloads and package installs may still be part of setup, but runtime does not escape to cloud STT/TTS APIs.
+Set `STACKCHAN_LOCAL_ONLY=true` to keep the StackChan voice loop local-only. In that mode `HERMES_DASHBOARD_URL` must point to `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`, and the Hermes STT/TTS helpers refuse cloud fallback. Point `HERMES_STT_URL` at a local OpenAI-compatible endpoint such as ReazonSpeech, or use faster-whisper / `HERMES_LOCAL_STT_COMMAND`; use `STACKCHAN_LOCAL_TTS_URL` for Piper Plus or another local WAV endpoint. First-time model downloads and package installs may still be part of setup, but runtime does not escape to cloud STT/TTS APIs.
 
 Before running the hardware JBL-to-M5 voice-loop probe, check the host audio path:
 
@@ -281,6 +291,8 @@ Expected setup states:
 - `Hermes bridge ready`: StackChan is connected through `ai-server`.
 - `Check websocket_url and bridge host`: StackChan could not reach the bridge host.
 
+After HERMES has been opened manually, an unexpected WebSocket disconnect is retried automatically with a 1, 2, 4, ... 30 second capped backoff. An intentional close, returning to Launcher, or resetting the protocol cancels the retry. This lets StackChan recover after an `ai-server` restart without rebooting the device or reopening HERMES.
+
 BLE Wi-Fi provisioning remains available, but it is presented as network setup rather than account binding. The setup screen shows the device ID and waits for Wi-Fi credentials from a provisioning client.
 
 ## Runtime Behavior
@@ -289,11 +301,11 @@ Audio flow:
 
 1. StackChan streams microphone Opus frames to `ai-server`.
 2. `ai-server` decodes incoming Opus to PCM and uses local RMS VAD to detect utterance end from audio content.
-3. `ai-server` sends the captured PCM as WAV to Hermes STT through Python helper modules.
+3. `ai-server` sends the captured PCM as WAV directly to the configured OpenAI-compatible local STT endpoint. If no endpoint is configured, it falls back to the Hermes Python helper.
 4. `ai-server` submits the transcript to Hermes Dashboard `/api/ws` using a dedicated StackChan session.
 5. Hermes returns the final assistant message from that session.
-6. `ai-server` splits the speech text into sentence-sized TTS segments and calls Hermes TTS through Python helper modules for each segment.
-7. `ai-server` streams each synthesized Opus segment back to StackChan in order.
+6. `ai-server` splits the speech text into sentence-sized TTS segments and posts each segment directly to the configured persistent local TTS endpoint. If no endpoint is configured, it falls back to the Hermes Python helper.
+7. `ai-server` streams each synthesized Opus segment back to StackChan in order. With optional local TTS output enabled, the named PipeWire speaker carries the audible voice while the same timed stream keeps the M5 avatar synchronized; an unavailable local sink falls back to the M5 speaker.
 
 Interrupt behavior:
 
@@ -364,6 +376,8 @@ Check these points:
 - Firewall rules allow inbound TCP port `8765`.
 - The URL ends with `/ws`.
 
+If an already-running HERMES session loses the bridge, leave it open: firmware retries automatically with exponential backoff. Restarting `ai-server` should reconnect within about 1-2 seconds on the first retry; repeated failures back off to at most 30 seconds.
+
 ### Hermes replies but the robot tools fail
 
 Check these points:
@@ -381,7 +395,7 @@ Check these points:
 - `HERMES_PYTHON` points to the Python interpreter that can import Hermes tool modules.
 - `ffmpeg` is installed and available on `PATH`.
 - Hermes provider and audio tool configuration are valid in `~/.hermes/config.yaml`.
-- With `STACKCHAN_LOCAL_ONLY=true`, STT must be faster-whisper or `local_command`, and TTS must be Piper, KittenTTS, NeuTTS, or a command provider. Edge TTS, OpenAI, Groq, ElevenLabs, MiniMax, xAI, Mistral, and Gemini are not used as fallback.
+- With `STACKCHAN_LOCAL_ONLY=true`, STT must use a local `HERMES_STT_URL`, faster-whisper, or `local_command`, and TTS must use `STACKCHAN_LOCAL_TTS_URL`, Piper, KittenTTS, NeuTTS, or a command provider. Edge TTS, OpenAI, Groq, ElevenLabs, MiniMax, xAI, Mistral, and Gemini are not used as fallback.
 
 ## Development Checks
 

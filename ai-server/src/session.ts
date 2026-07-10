@@ -7,6 +7,12 @@ import { registerDeviceSession, type StackChanBridgeStatus } from './device_cont
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
 import { LocalRmsVad, readLocalRmsVadConfig, rmsNormalized, type LocalRmsVadConfig } from './local_vad.js'
+import {
+    playWavOnLocalTarget,
+    readLocalTtsOutputConfig,
+    resolveLocalTtsOutputTarget,
+    type LocalTtsOutputConfig,
+} from './local_audio_output.js'
 
 type State = 'idle' | 'listening' | 'processing'
 export type StackChanEmotion = 'neutral' | 'happy' | 'laughing' | 'angry' | 'sad' | 'crying' | 'sleepy' | 'doubtful'
@@ -244,6 +250,7 @@ const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 
 
 type FastAckCacheEntry = {
     text: string
+    wav: Buffer
     frames: Buffer[]
 }
 
@@ -328,11 +335,19 @@ type TtsPlayback = {
     interrupted: boolean
     firstFrameLogged: boolean
     firstAudibleFrameLogged: boolean
+    localOutputChecked: boolean
+    localOutputTarget?: string
+    m5SpeakerMutedForLocalOutput: boolean
+}
+
+type SynthesizedSegment = {
+    wav: Buffer
+    opusFrames: Buffer[]
 }
 
 type PrefetchedSegment = {
     index: number
-    promise: Promise<Buffer[]>
+    promise: Promise<SynthesizedSegment>
 }
 
 type SessionDeps = {
@@ -376,6 +391,7 @@ export class Session {
     private readonly bargeInVad: LocalRmsVad
     private readonly speechSegmentationConfig: SpeechSegmentationConfig
     private readonly autoLedConfig: AutoLedConfig
+    private readonly localTtsOutputConfig: LocalTtsOutputConfig
     private readonly pendingMcp = new Map<number, PendingMcpRequest>()
     private nextMcpId = 1
     private silenceTimer?: ReturnType<typeof setTimeout>
@@ -430,6 +446,7 @@ export class Session {
         })
         this.speechSegmentationConfig = deps.speechSegmentationConfig ?? SPEECH_SEGMENTATION_CONFIG
         this.autoLedConfig = { ...(deps.autoLedConfig ?? AUTO_LED_CONFIG) }
+        this.localTtsOutputConfig = readLocalTtsOutputConfig()
         if (typeof deps.autoLedEnabled === 'boolean') this.autoLedConfig.enabled = deps.autoLedEnabled
         this.streamingDecoder = this.createInputOpusDecoderFn()
         this.bargeInDecoder = this.createInputOpusDecoderFn()
@@ -707,7 +724,9 @@ export class Session {
     }
 
     private shouldAutoResumeListening(): boolean {
-        return AUTO_RESUME_LISTENING && this.lastListenMode === 'realtime' && !this.closed
+        return AUTO_RESUME_LISTENING &&
+            (this.lastListenMode === 'realtime' || this.lastListenMode === 'auto') &&
+            !this.closed
     }
 
     private startListening(source: string): void {
@@ -816,7 +835,10 @@ export class Session {
         this.preRollPcmChunks = []
         const source = this.processingSource
         console.log(`[session ${this.sessionId}] processing source=${source} frames=${frames.length} pcmBytes=${vadPcm.reduce((sum, chunk) => sum + chunk.length, 0)}`)
-        if (frames.length === 0 && vadPcm.length === 0) return
+        if (frames.length === 0 && vadPcm.length === 0) {
+            this.resumeListeningAfterIgnoredInput('empty-capture')
+            return
+        }
 
         // 1. Opus -> PCM -> Hermes STT
         const pcm = vadPcm.length > 0
@@ -826,11 +848,15 @@ export class Session {
                 async () => this.decodeOpusFramesFn(frames),
                 { frames: frames.length },
             )
-        if (pcm.length === 0) return
+        if (pcm.length === 0) {
+            this.resumeListeningAfterIgnoredInput('empty-pcm')
+            return
+        }
         if (source === 'max-duration' && vadPcm.length === 0 && MAX_DURATION_STT_RMS_THRESHOLD > 0) {
             const rms = rmsNormalized(pcm)
             if (rms < MAX_DURATION_STT_RMS_THRESHOLD) {
                 console.log(`[session ${this.sessionId}] ignored low-rms max-duration audio rms=${rms.toFixed(4)} threshold=${MAX_DURATION_STT_RMS_THRESHOLD.toFixed(4)}`)
+                this.resumeListeningAfterIgnoredInput('low-rms-timeout')
                 return
             }
         }
@@ -843,13 +869,18 @@ export class Session {
         )
         console.log(`[session ${this.sessionId}] STT: "${text}"`)
 
-        if (!text.trim()) return
+        if (!text.trim()) {
+            this.resumeListeningAfterIgnoredInput('empty-transcript')
+            return
+        }
         if (isIgnorableShortTranscript(text)) {
             console.log(`[session ${this.sessionId}] ignored short transcript: "${text}"`)
+            this.resumeListeningAfterIgnoredInput('ignored-short-transcript')
             return
         }
         if (source === 'max-duration' && vadPcm.length === 0 && isIgnorableTimeoutTranscript(text)) {
             console.log(`[session ${this.sessionId}] ignored timeout transcript: "${text}"`)
+            this.resumeListeningAfterIgnoredInput('ignored-timeout-transcript')
             return
         }
 
@@ -860,6 +891,11 @@ export class Session {
         await this.speakHermesReply(text, 'llm', 'tts')
         if (this.state === 'processing') this.setAutoLedState('idle')
         console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
+    }
+
+    private resumeListeningAfterIgnoredInput(source: string): void {
+        if (this.state !== 'processing' || this.closed) return
+        this.startListening(source)
     }
 
     async enqueueFollowup(prompt: string): Promise<void> {
@@ -1049,12 +1085,12 @@ export class Session {
             const remainingSegments = finalSegments.slice(spokenSegments)
             await this.speakSegmentsInPlayback(playback, remainingSegments, ttsLabel, spokenSegments)
         } finally {
-            this.finishTtsPlayback(playback)
+            await this.finishTtsPlayback(playback)
         }
         return reply
     }
 
-    private async synthesizeSegmentToOpus(speechText: string, label: string, leadSilenceMs = 0): Promise<Buffer[]> {
+    private async synthesizeSegment(speechText: string, label: string, leadSilenceMs = 0): Promise<SynthesizedSegment> {
         const wav = await withTiming(
             `session:${this.sessionId}:${label}.synthesize`,
             () => this.synthesizeTextFn(speechText),
@@ -1068,7 +1104,7 @@ export class Session {
             async () => this.encodeWavToOpusFramesFn(wav, leadSilenceMs),
             { wavBytes: wav.length, leadSilenceMs },
         )
-        return opusFrames
+        return { wav, opusFrames }
     }
 
     private async warmFastAck(): Promise<void> {
@@ -1077,8 +1113,8 @@ export class Session {
             this.fastAckEntries = []
             for (let index = 0; index < FAST_ACK_TEXTS.length; index++) {
                 const text = FAST_ACK_TEXTS[index]
-                const frames = await this.synthesizeSegmentToOpus(text, `tts.fast_ack.cache${index}`, TTS_PREROLL_MS)
-                this.fastAckEntries.push({ text, frames })
+                const audio = await this.synthesizeSegment(text, `tts.fast_ack.cache${index}`, TTS_PREROLL_MS)
+                this.fastAckEntries.push({ text, wav: audio.wav, frames: audio.opusFrames })
             }
             console.log(`[session ${this.sessionId}] fast ack cached variants=${this.fastAckEntries.length}`)
         } catch (error) {
@@ -1111,9 +1147,9 @@ export class Session {
         const playback = this.startTtsPlayback('tts.fast_ack')
         try {
             console.log(`[session ${this.sessionId}] fast ack selected: "${ack.text}"`)
-            await this.speakCachedSegmentInPlayback(playback, ack.text, ack.frames, 0)
+            await this.speakCachedSegmentInPlayback(playback, ack.text, ack.wav, ack.frames, 0)
         } finally {
-            this.finishTtsPlayback(playback)
+            await this.finishTtsPlayback(playback)
         }
     }
 
@@ -1123,7 +1159,7 @@ export class Session {
         try {
             await this.speakSegmentsInPlayback(playback, segments, label, 0)
         } finally {
-            this.finishTtsPlayback(playback)
+            await this.finishTtsPlayback(playback)
         }
     }
 
@@ -1145,6 +1181,8 @@ export class Session {
             interrupted: false,
             firstFrameLogged: false,
             firstAudibleFrameLogged: false,
+            localOutputChecked: false,
+            m5SpeakerMutedForLocalOutput: false,
         }
     }
 
@@ -1153,7 +1191,7 @@ export class Session {
     }
 
     private prefetchSegment(segment: string, label: string, index: number): PrefetchedSegment {
-        const promise = this.synthesizeSegmentToOpus(segment, `${label}.segment${index}`)
+        const promise = this.synthesizeSegment(segment, `${label}.segment${index}`)
         promise.catch(() => undefined)
         return { index, promise }
     }
@@ -1201,7 +1239,7 @@ export class Session {
         segment: string,
         label: string,
         index: number,
-        framesPromise?: Promise<Buffer[]>,
+        framesPromise?: Promise<SynthesizedSegment>,
         onFramesReady?: () => void,
     ): Promise<void> {
         if (!this.isTtsPlaybackActive(playback)) {
@@ -1210,12 +1248,16 @@ export class Session {
         }
 
         this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
-        const leadSilenceMs = index === 0 && playback.streamedFrames === 0 ? TTS_PREROLL_MS : 0
-        const opusFrames = framesPromise ? await framesPromise : await this.synthesizeSegmentToOpus(segment, label, leadSilenceMs)
+        await this.prepareLocalTtsOutput(playback)
+        const leadSilenceMs = playback.localOutputTarget
+            ? 0
+            : (index === 0 && playback.streamedFrames === 0 ? TTS_PREROLL_MS : 0)
+        const audio = framesPromise ? await framesPromise : await this.synthesizeSegment(segment, label, leadSilenceMs)
         onFramesReady?.()
+        const localPlayback = this.startLocalSegmentPlayback(playback, audio.wav)
         const leadSilenceFrames = Math.ceil(leadSilenceMs / OUTPUT_FRAME_DURATION_MS)
-        for (let frameIndex = 0; frameIndex < opusFrames.length; frameIndex++) {
-            const frame = opusFrames[frameIndex]
+        for (let frameIndex = 0; frameIndex < audio.opusFrames.length; frameIndex++) {
+            const frame = audio.opusFrames[frameIndex]
             if (!this.isTtsPlaybackActive(playback)) {
                 playback.interrupted = true
                 break
@@ -1225,6 +1267,7 @@ export class Session {
             this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
+        await localPlayback
         if (!this.isTtsPlaybackActive(playback)) {
             playback.interrupted = true
             return
@@ -1236,6 +1279,7 @@ export class Session {
     private async speakCachedSegmentInPlayback(
         playback: TtsPlayback,
         segment: string,
+        wav: Buffer,
         opusFrames: Buffer[],
         index: number,
     ): Promise<void> {
@@ -1245,7 +1289,9 @@ export class Session {
         }
 
         this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
-        const leadSilenceFrames = index === 0 && playback.streamedFrames === 0
+        await this.prepareLocalTtsOutput(playback)
+        const localPlayback = this.startLocalSegmentPlayback(playback, wav)
+        const leadSilenceFrames = !playback.localOutputTarget && index === 0 && playback.streamedFrames === 0
             ? Math.ceil(TTS_PREROLL_MS / OUTPUT_FRAME_DURATION_MS)
             : 0
         for (let frameIndex = 0; frameIndex < opusFrames.length; frameIndex++) {
@@ -1259,12 +1305,60 @@ export class Session {
             this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
+        await localPlayback
         if (!this.isTtsPlaybackActive(playback)) {
             playback.interrupted = true
             return
         }
         playback.segmentCount += 1
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private async prepareLocalTtsOutput(playback: TtsPlayback): Promise<void> {
+        if (playback.localOutputChecked) return
+        playback.localOutputChecked = true
+        if (!this.localTtsOutputConfig.enabled) return
+
+        try {
+            const target = await resolveLocalTtsOutputTarget(this.localTtsOutputConfig)
+            if (!target) {
+                console.log(`[session ${this.sessionId}] local TTS output unavailable; using M5 speaker`)
+                return
+            }
+            await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                volume: 0,
+                permanent: false,
+            }, { automatic: true, waitForResponse: true })
+            playback.localOutputTarget = target
+            playback.m5SpeakerMutedForLocalOutput = true
+            console.log(`[session ${this.sessionId}] local TTS output active target=${target}; M5 speaker muted temporarily`)
+        } catch (error) {
+            console.warn(`[session ${this.sessionId}] local TTS output setup failed; using M5 speaker: ${error instanceof Error ? error.message : String(error)}`)
+        }
+    }
+
+    private startLocalSegmentPlayback(playback: TtsPlayback, wav: Buffer): Promise<void> {
+        const target = playback.localOutputTarget
+        if (!target) return Promise.resolve()
+        return playWavOnLocalTarget(target, wav).catch(async (error) => {
+            console.warn(`[session ${this.sessionId}] local TTS playback failed; restoring M5 speaker: ${error instanceof Error ? error.message : String(error)}`)
+            playback.localOutputTarget = undefined
+            await this.restoreM5SpeakerAfterLocalOutput(playback)
+        })
+    }
+
+    private async restoreM5SpeakerAfterLocalOutput(playback: TtsPlayback): Promise<void> {
+        if (!playback.m5SpeakerMutedForLocalOutput) return
+        playback.m5SpeakerMutedForLocalOutput = false
+        try {
+            await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                volume: this.localTtsOutputConfig.fallbackM5Volume,
+                permanent: false,
+            }, { automatic: true, waitForResponse: true })
+            console.log(`[session ${this.sessionId}] M5 speaker restored volume=${this.localTtsOutputConfig.fallbackM5Volume}`)
+        } catch (error) {
+            console.error(`[session ${this.sessionId}] failed to restore M5 speaker after local TTS:`, error)
+        }
     }
 
     private logTtsFrameMilestones(playback: TtsPlayback, audibleFrame: boolean): void {
@@ -1278,7 +1372,7 @@ export class Session {
         }
     }
 
-    private finishTtsPlayback(playback: TtsPlayback): void {
+    private async finishTtsPlayback(playback: TtsPlayback): Promise<void> {
         this.sendTtsStopOnce(playback.generation)
         if (this.ttsGeneration === playback.generation) {
             this.ttsStreaming = false
@@ -1290,6 +1384,7 @@ export class Session {
             // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
             this.cooldownUntil = Date.now() + this.postTtsCooldownMs
         }
+        await this.restoreM5SpeakerAfterLocalOutput(playback)
     }
 
     private sendTtsStopOnce(generation: number): void {

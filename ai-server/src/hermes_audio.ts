@@ -70,6 +70,16 @@ function configuredSttUrl(): string {
     return process.env.HERMES_STT_URL ?? process.env.STACKCHAN_STT_URL ?? ''
 }
 
+function configuredLocalTtsUrl(): string {
+    return process.env.STACKCHAN_LOCAL_TTS_URL ?? ''
+}
+
+function readTimeoutMs(name: string, fallback: number): number {
+    const value = Number(process.env[name] ?? fallback)
+    if (!Number.isFinite(value)) return fallback
+    return Math.max(500, Math.min(120_000, Math.round(value)))
+}
+
 async function transcribeWithOpenAiCompatibleStt(wav: Buffer, url: string): Promise<string> {
     const form = new FormData()
     form.append('model', process.env.HERMES_STT_MODEL ?? process.env.STACKCHAN_STT_MODEL ?? 'whisper-1')
@@ -127,7 +137,29 @@ export async function transcribeWithHermes(wav: Buffer): Promise<string> {
     })
 }
 
+async function synthesizeWithLocalHttpTts(text: string, url: string): Promise<Buffer> {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+        body: text,
+        signal: AbortSignal.timeout(readTimeoutMs('STACKCHAN_LOCAL_TTS_TIMEOUT_MS', 15_000)),
+    })
+    if (!response.ok) {
+        const detail = await response.text()
+        throw new Error(`Local TTS endpoint failed: HTTP ${response.status}: ${detail}`)
+    }
+
+    const wav = Buffer.from(await response.arrayBuffer())
+    if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
+        throw new Error('Local TTS endpoint did not return a valid WAV file')
+    }
+    return wav
+}
+
 export async function synthesizeWithHermes(text: string): Promise<Buffer> {
+    const localTtsUrl = configuredLocalTtsUrl()
+    if (localTtsUrl) return await synthesizeWithLocalHttpTts(text, localTtsUrl)
+
     return await withTempDir(async (dir) => {
         const outputPath = path.join(dir, 'speech.wav')
         const script = [
