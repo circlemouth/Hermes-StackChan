@@ -9,6 +9,7 @@
 #include <lvgl.h>
 #include <driver/i2c_master.h>
 #include <string_view>
+#include <functional>
 
 namespace hal_bridge {
 
@@ -28,6 +29,7 @@ struct HermesRuntimeConfig_t {
     uint32_t idleShutdownTimeSeconds = 600;
     bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
+    bool useHermesTts                = false;
 };
 
 void lock();
@@ -38,6 +40,8 @@ void set_touch_point(int num, int x, int y);
 TouchPoint_t get_touch_point();
 
 bool is_hermes_mode();
+// Acquire-read readiness, release-published after Initialize returns and before Run.
+bool is_hermes_runtime_initialized();
 void set_hermes_mode(bool mode);
 void toggle_hermes_chat_state();
 
@@ -47,6 +51,7 @@ lv_disp_t* display_get_lvgl_display();
 
 void hermes_board_init();
 void start_hermes_app();
+void schedule_hermes_reboot(std::function<void()> before_reboot);
 bool is_hermes_ready();
 bool is_hermes_idle();
 HermesRuntimeConfig_t get_hermes_config();

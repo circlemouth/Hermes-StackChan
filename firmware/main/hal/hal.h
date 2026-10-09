@@ -65,6 +65,7 @@ struct HermesBridgeConfig_t {
     uint32_t idleShutdownTimeSeconds = 600;
     bool allowShutdownWhenCharging   = false;
     uint8_t idleRandomMovementLevel  = 2;
+    bool useHermesTts                = false;
 };
 
 /**
@@ -149,6 +150,7 @@ public:
     void setBackLightBrightness(uint8_t brightness, bool permanent = false);
     uint8_t getBackLightBrightness();
     const char* getBootLogoMessage() const;
+    bool shouldSuppressHermesAutostart() const { return _launcher_return_boot_marker; }
 
     /* ----------------------------- Hermes Bridge ----------------------------- */
     void requestHermesStart()

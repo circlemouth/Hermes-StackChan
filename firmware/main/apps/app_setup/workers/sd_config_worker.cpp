@@ -43,6 +43,7 @@ void SdConfigWorker::reset_result_ui()
     _retry_clicked = false;
     _back_clicked = false;
     _restart_required = false;
+    _insertion_prompt_active = false;
 }
 
 void SdConfigWorker::setup_start_ui()
@@ -78,7 +79,7 @@ void SdConfigWorker::setup_start_ui()
     _label_detail->setTextAlign(LV_TEXT_ALIGN_CENTER);
     _label_detail->setWidth(280);
     _label_detail->align(LV_ALIGN_TOP_MID, 0, 100);
-    _label_detail->setText("SD config is auto-loaded on boot.\nUse this to restart and reload now.");
+    _label_detail->setText("Confirm card insertion, then Read.\nImport restarts before LCD starts.");
 
     _btn_back = std::make_unique<Button>(_panel->get());
     apply_button_common_style(*_btn_back);
@@ -94,6 +95,7 @@ void SdConfigWorker::setup_start_ui()
     apply_button_common_style(*_btn_retry);
     _btn_retry->align(LV_ALIGN_BOTTOM_MID, 72, -18);
     _btn_retry->setSize(120, 48);
+    _insertion_prompt_active = true;
     _btn_retry->label().setText("Read");
     _btn_retry->label().setTextFont(&lv_font_montserrat_20);
     _btn_retry->onClick().connect([this]() { _retry_clicked = true; });

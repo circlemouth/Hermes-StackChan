@@ -1,8 +1,8 @@
 services:
   ai-server:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: ai-server/Dockerfile
     ports:
       - "8765:8765"
       - "8766:8766"

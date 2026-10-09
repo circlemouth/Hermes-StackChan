@@ -677,22 +677,13 @@ uint8_t hal_bridge::board_get_speaker_volume()
     auto& board      = Board::GetInstance();
     auto audio_codec = board.GetAudioCodec();
     if (audio_codec) {
-        int volume = audio_codec->output_volume();
-        if (volume <= 0) {
-            volume = 10;
-        } else if (volume > 100) {
-            volume = 100;
-        }
-        return volume;
+        // Zero is a valid temporary mute. Report the actual codec value so a
+        // volume ACK/readback can verify mute before host-speaker playback.
+        return static_cast<uint8_t>(std::clamp(audio_codec->output_volume(), 0, 100));
     }
 
-    int volume = 70;
     Settings settings("audio", false);
-    volume = settings.GetInt("output_volume", volume);
-    if (volume <= 0) {
-        volume = 10;
-    }
-    return volume;
+    return static_cast<uint8_t>(std::clamp<int32_t>(settings.GetInt("output_volume", 70), 0, 100));
 }
 
 void hal_bridge::board_power_off()

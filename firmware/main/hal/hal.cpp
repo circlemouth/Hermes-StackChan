@@ -6,7 +6,10 @@
 #include "hal.h"
 #include <memory>
 #include <atomic>
+#include <utility>
+#include <esp_system.h>
 #include <mooncake_log.h>
+#include <esp_log.h>
 #include <nvs_flash.h>
 #include <settings.h>
 #include <driver/gpio.h>
@@ -51,14 +54,16 @@ Hal& GetHAL()
 void Hal::init()
 {
     mclog::tagInfo(_tag, "init");
+    ESP_LOGI(_tag.data(), "boot_hal_enter; reset_reason=%d", static_cast<int>(esp_reset_reason()));
 
     prepareSharedSpiPinsBeforeBoardInit();
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    if (ret != ESP_OK) {
+        // Boot/recovery must not silently erase Wi-Fi and bridge configuration.
+        // A deliberate factory reset remains a separate, explicit operation.
+        ESP_LOGE(_tag.data(), "NVS init failed (%s); preserving stored settings", esp_err_to_name(ret));
     }
     ESP_ERROR_CHECK(ret);
 
@@ -66,6 +71,7 @@ void Hal::init()
     handleBootSdConfigAutoload();
 
     hermes_board_init();
+    ESP_LOGI(_tag.data(), "boot_board_ready");
     robot_mcp_init();
     head_touch_init();
     io_expander_init();
@@ -73,6 +79,7 @@ void Hal::init()
     imu_init();
     servo_init();
     lvgl_init();
+    ESP_LOGI(_tag.data(), "boot_hal_ready");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -82,7 +89,6 @@ void Hal::init()
 #include <freertos/task.h>
 #include <system_info.h>
 #include <esp_ota_ops.h>
-#include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_mac.h>
 
@@ -203,7 +209,7 @@ void Hal::hermes_board_init()
 static void _stackchan_update_task(void* param)
 {
     bool is_setup_done = false;
-    bool launcher_reboot_requested = false;
+    std::atomic<bool> launcher_reboot_requested{false};
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -238,79 +244,11 @@ static void _stackchan_update_task(void* param)
             view::update_status_bar();
         }
 
-        if (launcher_reboot_requested) {
+        if (launcher_reboot_requested.exchange(false)) {
             ESP_LOGI("HAL", "HERMES home indicator requested Launcher return reboot");
-            launcher_reboot_requested = false;
             GetHAL().requestLauncherReturnReboot();
         }
     }
-}
-
-static void show_launcher_return_reboot_overlay_locked()
-{
-    view::destroy_home_indicator();
-    view::destroy_status_bar();
-    GetHAL().bootLogo.reset();
-
-    lv_disp_t* display = hal_bridge::display_get_lvgl_display();
-    if (display == nullptr) {
-        display = lv_display_get_default();
-    }
-    if (display == nullptr) {
-        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: LVGL display is null");
-        return;
-    }
-
-    lv_display_set_default(display);
-
-    lv_obj_t* top_layer = lv_display_get_layer_top(display);
-    if (top_layer != nullptr) {
-        lv_obj_clean(top_layer);
-    }
-
-    lv_obj_t* sys_layer = lv_display_get_layer_sys(display);
-    if (sys_layer != nullptr) {
-        lv_obj_clean(sys_layer);
-    }
-
-    lv_obj_t* parent = top_layer;
-    if (parent == nullptr) {
-        parent = lv_display_get_screen_active(display);
-    }
-    if (parent == nullptr) {
-        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: LVGL parent is null");
-        return;
-    }
-
-    lv_obj_t* overlay = lv_obj_create(parent);
-    if (overlay == nullptr) {
-        ESP_LOGW(_tag.data(), "cannot show Launcher return overlay: create failed");
-        return;
-    }
-
-    lv_obj_remove_style_all(overlay);
-    lv_obj_set_size(overlay, 320, 240);
-    lv_obj_align(overlay, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(overlay, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(overlay, LV_OBJ_FLAG_FLOATING);
-
-    lv_obj_t* title = lv_label_create(overlay);
-    lv_label_set_text(title, "STACKCHAN");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
-
-    lv_obj_t* message = lv_label_create(overlay);
-    lv_label_set_text(message, _boot_logo_launcher_return_message);
-    lv_obj_set_style_text_font(message, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(message, lv_color_hex(0xBFBFBF), LV_PART_MAIN);
-    lv_obj_align(message, LV_ALIGN_CENTER, 0, 18);
-
-    lv_obj_invalidate(overlay);
-    lv_refr_now(display);
 }
 
 void Hal::requestLauncherReturnReboot()
@@ -320,20 +258,26 @@ void Hal::requestLauncherReturnReboot()
         return;
     }
 
-    ESP_LOGI(_tag.data(), "Launcher return reboot requested from HERMES home indicator");
+    ESP_LOGI(_tag.data(), "Launcher return requested; source_core=%d", xPortGetCoreID());
 
-    tools::on_reminder_triggered().clear();
-    mark_launcher_return_reboot_marker();
+    auto prepare_return = [this]() {
+        ESP_LOGI(_tag.data(), "Launcher return prepare; core=%d; stack_low_water_bytes=%u",
+                 xPortGetCoreID(), static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+        mark_launcher_return_reboot_marker();
+        // Persist markers only: never touch SD while the shared-SPI LCD is live.
+        requestSkipNextBootSdConfigAutoload();
+        ESP_LOGI(_tag.data(), "Launcher return markers committed");
+    };
 
-    // This only writes an NVS marker. It intentionally does not touch SD while
-    // the LCD is active on the shared CoreS3 / StackChan SPI3 bus.
-    requestSkipNextBootSdConfigAutoload();
-
-    {
-        LvglLockGuard lock;
-        show_launcher_return_reboot_overlay_locked();
+    if (hal_bridge::is_hermes_mode()) {
+        // Runtime owns sockets/audio. Use its existing graceful reboot path on
+        // app_main rather than resetting from the USB/stackchan control task.
+        // No LVGL cleanup or synchronous rendering is performed here.
+        hal_bridge::schedule_hermes_reboot(std::move(prepare_return));
+        return;
     }
 
+    prepare_return();
     delay(150);
     esp_restart();
 }
@@ -366,7 +310,8 @@ void Hal::startHermes()
     });
 
     // Start stackchan update task
-    xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
+    BaseType_t task_created = xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 8192, NULL, 3, NULL, 1);
+    ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     ESP_LOGI(_tag.data(), "Calling hal_bridge::start_hermes_app; this is expected not to return");
     hal_bridge::start_hermes_app();
@@ -381,6 +326,7 @@ HermesBridgeConfig_t Hal::getHermesBridgeConfig()
         .idleShutdownTimeSeconds   = bridge_config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = bridge_config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = bridge_config.idleRandomMovementLevel,
+        .useHermesTts              = bridge_config.useHermesTts,
     };
 }
 
@@ -390,6 +336,7 @@ void Hal::setHermesBridgeConfig(HermesBridgeConfig_t config)
         .idleShutdownTimeSeconds   = config.idleShutdownTimeSeconds,
         .allowShutdownWhenCharging = config.allowShutdownWhenCharging,
         .idleRandomMovementLevel   = config.idleRandomMovementLevel,
+        .useHermesTts              = config.useHermesTts,
     });
 }
 

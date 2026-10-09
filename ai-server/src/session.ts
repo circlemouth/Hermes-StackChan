@@ -3,6 +3,8 @@ import type WebSocket from 'ws'
 import { createInputOpusDecoder, decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, INPUT_SAMPLE_RATE, INPUT_FRAME_DURATION_MS, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS, type InputOpusDecoder } from './audio.js'
 import { HermesClient, type HermesPromptStreamEvent } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
+import { synthesizeWithSanoTts } from './sanotts_audio.js'
+import { readSpeakerVolumeAck } from './speaker_volume_ack.js'
 import { registerDeviceSession, type StackChanBridgeStatus } from './device_control.js'
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
@@ -16,6 +18,16 @@ import {
 
 type State = 'idle' | 'listening' | 'processing'
 export type StackChanEmotion = 'neutral' | 'happy' | 'laughing' | 'angry' | 'sad' | 'crying' | 'sleepy' | 'doubtful'
+export type TtsProvider = 'sanotts' | 'hermes'
+
+export function readTtsProvider(value: unknown): TtsProvider {
+    return typeof value === 'string' && value.trim().toLowerCase() === 'hermes' ? 'hermes' : 'sanotts'
+}
+
+export function formatConversationLogText(text: string, mode = process.env['HERMES_CONNECT_MODE'], quote = true): string {
+    if (mode?.trim().toLowerCase() === 'children_http') return `length=${text.length}`
+    return quote ? `"${text}"` : text
+}
 
 export type TurnControlConfig = {
     silenceTimeoutMs: number
@@ -252,6 +264,7 @@ type FastAckCacheEntry = {
     text: string
     wav: Buffer
     frames: Buffer[]
+    localFrames?: Buffer[]
 }
 
 function readFastAckTexts(): string[] {
@@ -327,6 +340,8 @@ type HermesSessionClient = {
 }
 
 type TtsPlayback = {
+    turn: AbortController
+    controller: AbortController
     generation: number
     label: string
     streamStartMs: number
@@ -359,6 +374,8 @@ type SessionDeps = {
     encodeWavToOpusFrames?: typeof encodeWavToOpusFrames
     transcribeWav?: typeof transcribeWithHermes
     synthesizeText?: typeof synthesizeWithHermes
+    synthesizeSanoText?: typeof synthesizeWithSanoTts
+    synthesizeHermesText?: typeof synthesizeWithHermes
     postTtsCooldownMs?: number
     localVadConfig?: LocalRmsVadConfig
     bargeInConfig?: BargeInConfig
@@ -374,6 +391,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export class Session {
     private readonly sessionId = randomUUID()
+    // Immutable for this connection: changing the environment affects only new sessions.
+    private readonly diagnosticVoicePaused = readEnvBool('STACKCHAN_DIAGNOSTIC_VOICE_PAUSED', false)
+    private helloReceived = false
     private state: State = 'idle'
     private version = 3
     private opusFrames: Buffer[] = []
@@ -384,7 +404,8 @@ export class Session {
     private readonly decodeOpusFrameFn?: (opus: Buffer) => Buffer
     private readonly encodeWavToOpusFramesFn: typeof encodeWavToOpusFrames
     private readonly transcribeWavFn: typeof transcribeWithHermes
-    private readonly synthesizeTextFn: typeof synthesizeWithHermes
+    private readonly synthesizeSanoTextFn: typeof synthesizeWithSanoTts
+    private readonly synthesizeHermesTextFn: typeof synthesizeWithHermes
     private readonly localVadConfig: LocalRmsVadConfig
     private readonly localVad: LocalRmsVad
     private readonly bargeInConfig: BargeInConfig
@@ -407,6 +428,11 @@ export class Session {
     private bargeInDecoder: InputOpusDecoder
     private bargeInDecodeFailed = false
     private bargeInDecodeFailures = 0
+    private processingTurn?: AbortController
+    private activeTtsPlayback?: TtsPlayback
+    private localSpeakerOwner?: TtsPlayback
+    private localSpeakerOperations: Promise<void> = Promise.resolve()
+    private fastAckWarmup?: AbortController
     private ttsStreaming = false
     private ttsStopSent = false
     private ttsGeneration = 0
@@ -421,6 +447,7 @@ export class Session {
     private fastAckEntries?: FastAckCacheEntry[]
     private fastAckFailed = false
     private lastFastAckIndex = -1
+    private ttsProvider: TtsProvider = 'sanotts'
     private closed = false
 
     constructor(private readonly ws: WebSocket, deps: SessionDeps = {}) {
@@ -430,7 +457,8 @@ export class Session {
         this.decodeOpusFrameFn = deps.decodeOpusFrame
         this.encodeWavToOpusFramesFn = deps.encodeWavToOpusFrames ?? encodeWavToOpusFrames
         this.transcribeWavFn = deps.transcribeWav ?? transcribeWithHermes
-        this.synthesizeTextFn = deps.synthesizeText ?? synthesizeWithHermes
+        this.synthesizeSanoTextFn = deps.synthesizeSanoText ?? deps.synthesizeText ?? synthesizeWithSanoTts
+        this.synthesizeHermesTextFn = deps.synthesizeHermesText ?? deps.synthesizeText ?? synthesizeWithHermes
         this.postTtsCooldownMs = deps.postTtsCooldownMs ?? POST_TTS_COOLDOWN_MS
         this.localVadConfig = deps.localVadConfig ?? readLocalRmsVadConfig()
         this.localVad = new LocalRmsVad(this.localVadConfig)
@@ -451,11 +479,13 @@ export class Session {
         this.streamingDecoder = this.createInputOpusDecoderFn()
         this.bargeInDecoder = this.createInputOpusDecoderFn()
         this.unregisterDeviceSession = (deps.registerDeviceSession ?? registerDeviceSession)(this)
-        if (FAST_ACK_ENABLED) void this.warmFastAck()
     }
 
     close(): void {
+        if (this.closed) return
         this.closed = true
+        this.cancelProcessingTurn()
+        this.cancelFastAckWarmup()
         this.followupQueue = []
         this.clearTimers()
         this.unregisterDeviceSession()
@@ -470,6 +500,7 @@ export class Session {
     }
 
     handleMessage(data: Buffer | string): void {
+        if (this.closed) return
         if (typeof data === 'string') {
             try {
                 this.handleJson(JSON.parse(data) as Record<string, unknown>)
@@ -491,6 +522,7 @@ export class Session {
     }
 
     private handleBinary(data: Buffer): void {
+        if (this.diagnosticVoicePaused) return
         const payload = extractOpusPayload(data, this.version)
         if (!payload) return
 
@@ -656,7 +688,46 @@ export class Session {
         return true
     }
 
+    private beginProcessingTurn(): AbortController {
+        this.cancelProcessingTurn()
+        const turn = new AbortController()
+        this.processingTurn = turn
+        return turn
+    }
+
+    private isProcessingTurnActive(turn: AbortController): boolean {
+        return !this.closed && this.state === 'processing' && this.processingTurn === turn && !turn.signal.aborted
+    }
+
+    private cancelProcessingTurn(): void {
+        const turn = this.processingTurn
+        this.processingTurn = undefined
+        this.followupRunning = false
+        turn?.abort()
+        this.cancelTtsPlayback()
+    }
+
+    private cancelTtsPlayback(): void {
+        const playback = this.activeTtsPlayback
+        if (!playback) return
+        this.activeTtsPlayback = undefined
+        playback.interrupted = true
+        playback.controller.abort()
+        this.sendTtsStopOnce(playback.generation)
+        this.ttsStreaming = false
+        // Restore independently of a cancelled synthesis/local process settling.
+        void this.restoreM5SpeakerAfterLocalOutput(playback)
+    }
+
+    private cancelFastAckWarmup(): void {
+        const warmup = this.fastAckWarmup
+        this.fastAckWarmup = undefined
+        warmup?.abort()
+    }
+
     private handleBargeIn(firstPayload: Buffer): void {
+        this.cancelProcessingTurn()
+        this.cancelFastAckWarmup()
         const interruptedGeneration = this.ttsGeneration
         this.sendTtsStopOnce(interruptedGeneration)
         this.ttsGeneration += 1
@@ -677,6 +748,16 @@ export class Session {
         if (this.state !== 'listening') return
         this.clearTimers()
         const hasVadPcm = this.pcmChunks.length > 0
+        // An explicit stop ends healthy-VAD capture; buffered Opus alone is not
+        // speech evidence (including after an ignored short utterance was reset).
+        // Preserve forced processing when VAD is disabled or decoding is uncertain.
+        if (reason === 'listen-stop' && this.shouldUseLocalVad() && this.streamingDecodeFailures === 0 &&
+            !hasVadPcm && this.currentSpeechMs === 0) {
+            this.resetCapture()
+            this.state = 'idle'
+            this.setAutoLedState('idle')
+            return
+        }
         const pcmBytes = this.pcmChunks.reduce((sum, chunk) => sum + chunk.length, 0)
         const minPcmBytes = Math.ceil((this.localVadConfig.minSpeechMs / 1000) * INPUT_SAMPLE_RATE) * 2
         if (!force && hasVadPcm && (this.currentSpeechMs < this.localVadConfig.minSpeechMs || pcmBytes < minPcmBytes)) {
@@ -691,20 +772,23 @@ export class Session {
             this.startListening('too-few-frames')
             return
         }
+        const turn = this.beginProcessingTurn()
         this.processingSource = reason
         this.state = 'processing'
         this.setAutoLedState('thinking')
-        this.process().catch(async (err) => {
+        this.process(turn).catch(async (err) => {
+            if (!this.isProcessingTurnActive(turn)) return
             console.error(`[session ${this.sessionId}] process error:`, err)
             this.setAutoLedState('error')
             this.sendProcessingErrorAlert(err)
             if (this.state === 'processing') {
-                await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.error').catch((error) => {
-                    console.error(`[session ${this.sessionId}] error speech failed:`, error)
+                await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.error', turn).catch((error) => {
+                    if (this.isProcessingTurnActive(turn)) console.error(`[session ${this.sessionId}] error speech failed:`, error)
                 })
-                this.sendProcessingErrorAlert(err)
+                if (this.isProcessingTurnActive(turn)) this.sendProcessingErrorAlert(err)
             }
         }).finally(() => {
+            if (this.processingTurn !== turn || turn.signal.aborted || this.closed) return
             if (this.state === 'processing') {
                 if (this.shouldAutoResumeListening()) {
                     this.state = 'idle'
@@ -719,6 +803,8 @@ export class Session {
                     this.setAutoLedState('idle')
                 }
             }
+            if (this.processingTurn === turn) this.processingTurn = undefined
+            turn.abort()
             this.drainFollowupQueue()
         })
     }
@@ -730,6 +816,7 @@ export class Session {
     }
 
     private startListening(source: string): void {
+        this.cancelProcessingTurn()
         this.clearTimers()
         this.state = 'listening'
         this.resetCapture()
@@ -771,26 +858,34 @@ export class Session {
         const type = msg['type'] as string | undefined
 
         if (type === 'hello') {
+            this.cancelFastAckWarmup()
             this.version = (msg['version'] as number | undefined) ?? 3
+            this.ttsProvider = readTtsProvider(msg['tts_provider'])
+            this.fastAckEntries = undefined
+            this.fastAckFailed = false
             this.sendJson({
                 type: 'hello',
                 transport: 'websocket',
                 session_id: this.sessionId,
+                tts_provider: this.ttsProvider,
                 audio_params: {
                     sample_rate: OUTPUT_SAMPLE_RATE,
                     frame_duration: OUTPUT_FRAME_DURATION_MS,
                 },
             })
-            console.log(`[session ${this.sessionId}] hello, protocol version=${this.version}`)
+            this.helloReceived = true
+            console.log(`[session ${this.sessionId}] hello, protocol version=${this.version}, tts=${this.ttsProvider}`)
+            if (FAST_ACK_ENABLED && !this.diagnosticVoicePaused) void this.warmFastAck()
             return
         }
 
         if (type === 'listen') {
+            if (this.diagnosticVoicePaused) return
             const listenState = msg['state'] as string | undefined
             if (listenState === 'start' || listenState === 'detect') {
                 const isWakeWordStart = listenState === 'detect'
                 const mode = String(msg['mode'] ?? '')
-                const source = isWakeWordStart ? `wake_word=${String(msg['text'] ?? '')}` : `mode=${mode}`
+                const source = isWakeWordStart ? `wake_word=${formatConversationLogText(String(msg['text'] ?? ''), undefined, false)}` : `mode=${mode}`
                 if (!isWakeWordStart) this.lastListenMode = mode
                 if (!isWakeWordStart && Date.now() < this.cooldownUntil) {
                     if (this.state === 'listening') {
@@ -807,6 +902,8 @@ export class Session {
         }
 
         if (type === 'abort') {
+            this.cancelProcessingTurn()
+            this.cancelFastAckWarmup()
             this.clearTimers()
             this.sendTtsStopOnce(this.ttsGeneration)
             this.ttsGeneration += 1
@@ -828,7 +925,7 @@ export class Session {
         }
     }
 
-    private async process(): Promise<void> {
+    private async process(turn: AbortController): Promise<void> {
         const processStartMs = nowMs()
         const frames = this.opusFrames.splice(0)
         const vadPcm = this.pcmChunks.splice(0)
@@ -848,6 +945,7 @@ export class Session {
                 async () => this.decodeOpusFramesFn(frames),
                 { frames: frames.length },
             )
+        if (!this.isProcessingTurnActive(turn)) return
         if (pcm.length === 0) {
             this.resumeListeningAfterIgnoredInput('empty-pcm')
             return
@@ -867,29 +965,31 @@ export class Session {
             () => this.transcribeWavFn(wavForStt),
             { pcmBytes: pcm.length },
         )
-        console.log(`[session ${this.sessionId}] STT: "${text}"`)
+        if (!this.isProcessingTurnActive(turn)) return
+        console.log(`[session ${this.sessionId}] STT: ${formatConversationLogText(text)}`)
 
         if (!text.trim()) {
             this.resumeListeningAfterIgnoredInput('empty-transcript')
             return
         }
         if (isIgnorableShortTranscript(text)) {
-            console.log(`[session ${this.sessionId}] ignored short transcript: "${text}"`)
+            console.log(`[session ${this.sessionId}] ignored short transcript: ${formatConversationLogText(text)}`)
             this.resumeListeningAfterIgnoredInput('ignored-short-transcript')
             return
         }
         if (source === 'max-duration' && vadPcm.length === 0 && isIgnorableTimeoutTranscript(text)) {
-            console.log(`[session ${this.sessionId}] ignored timeout transcript: "${text}"`)
+            console.log(`[session ${this.sessionId}] ignored timeout transcript: ${formatConversationLogText(text)}`)
             this.resumeListeningAfterIgnoredInput('ignored-timeout-transcript')
             return
         }
 
         this.sendJson({ type: 'stt', text })
-        await this.trySpeakFastAck()
+        await this.trySpeakFastAck(turn)
+        if (!this.isProcessingTurnActive(turn)) return
 
-        // 2. Hermes LLM turn -> 3. Hermes TTS -> Opus -> device
-        await this.speakHermesReply(text, 'llm', 'tts')
-        if (this.state === 'processing') this.setAutoLedState('idle')
+        // 2. Hermes LLM turn -> 3. selected TTS -> Opus -> device
+        await this.speakHermesReply(text, 'llm', 'tts', turn)
+        if (this.isProcessingTurnActive(turn)) this.setAutoLedState('idle')
         console.log(`[timing] done session:${this.sessionId}:process elapsed=${elapsedMs(processStartMs)}`)
     }
 
@@ -899,6 +999,7 @@ export class Session {
     }
 
     async enqueueFollowup(prompt: string): Promise<void> {
+        if (this.diagnosticVoicePaused) throw new Error('StackChan diagnostic voice pause is enabled')
         const cleanPrompt = prompt.trim()
         if (!cleanPrompt || this.closed) return
         this.followupQueue.push(cleanPrompt)
@@ -911,10 +1012,11 @@ export class Session {
         this.drainFollowupQueue()
     }
 
-    getBridgeStatus(): StackChanBridgeStatus {
+    getBridgeStatus(): StackChanBridgeStatus & { diagnosticVoicePaused: boolean } {
         const cooldownRemainingMs = Math.max(0, this.cooldownUntil - Date.now())
         const readyForPrompt =
             !this.closed &&
+            !this.diagnosticVoicePaused &&
             this.state === 'listening' &&
             !this.ttsStreaming &&
             cooldownRemainingMs === 0 &&
@@ -924,6 +1026,7 @@ export class Session {
 
         let reason = 'ready'
         if (this.closed) reason = 'closed'
+        else if (this.diagnosticVoicePaused && this.helloReceived) reason = 'diagnostic_voice_paused'
         else if (this.state !== 'listening') reason = `state_${this.state}`
         else if (this.ttsStreaming) reason = 'tts_streaming'
         else if (cooldownRemainingMs > 0) reason = 'post_tts_cooldown'
@@ -933,10 +1036,12 @@ export class Session {
 
         return {
             connected: !this.closed,
+            diagnosticVoicePaused: this.diagnosticVoicePaused,
             sessionId: this.sessionId,
             state: this.state,
             readyForPrompt,
             reason,
+            ttsProvider: this.ttsProvider,
             ttsStreaming: this.ttsStreaming,
             cooldownRemainingMs,
             followupRunning: this.followupRunning,
@@ -947,24 +1052,27 @@ export class Session {
     }
 
     private drainFollowupQueue(): void {
-        if (this.closed || this.followupRunning || this.state !== 'idle') return
+        if (this.diagnosticVoicePaused || this.closed || this.followupRunning || this.state !== 'idle') return
         const prompt = this.followupQueue.shift()
         if (!prompt) return
 
+        const turn = this.beginProcessingTurn()
         this.followupRunning = true
         this.state = 'processing'
         this.setAutoLedState('thinking')
-        this.processFollowup(prompt).catch(async (err) => {
+        this.processFollowup(prompt, turn).catch(async (err) => {
+            if (!this.isProcessingTurnActive(turn)) return
             console.error(`[session ${this.sessionId}] follow-up error:`, err)
             this.setAutoLedState('error')
             this.sendProcessingErrorAlert(err)
             if (this.state === 'processing') {
-                await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.followup.error').catch((error) => {
-                    console.error(`[session ${this.sessionId}] follow-up error speech failed:`, error)
+                await this.speakSegments([PROCESS_ERROR_SPEECH], 'tts.followup.error', turn).catch((error) => {
+                    if (this.isProcessingTurnActive(turn)) console.error(`[session ${this.sessionId}] follow-up error speech failed:`, error)
                 })
-                this.sendProcessingErrorAlert(err)
+                if (this.isProcessingTurnActive(turn)) this.sendProcessingErrorAlert(err)
             }
         }).finally(() => {
+            if (this.processingTurn !== turn || turn.signal.aborted || this.closed) return
             this.followupRunning = false
             if (this.state === 'processing') {
                 this.state = 'idle'
@@ -977,29 +1085,41 @@ export class Session {
                     }
                 }
             }
+            if (this.processingTurn === turn) this.processingTurn = undefined
+            turn.abort()
             this.drainFollowupQueue()
         })
     }
 
-    private async processFollowup(prompt: string): Promise<void> {
+    private async processFollowup(prompt: string, turn: AbortController): Promise<void> {
         const followupStartMs = nowMs()
         console.log(`[session ${this.sessionId}] follow-up prompt queued length=${prompt.length}`)
-        await this.speakHermesReply(prompt, 'followup.llm', 'tts.followup')
+        await this.speakHermesReply(prompt, 'followup.llm', 'tts.followup', turn)
         console.log(`[timing] done session:${this.sessionId}:followup elapsed=${elapsedMs(followupStartMs)}`)
     }
 
-    private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
-        const hermesPrompt = stackChanVoicePrompt(prompt)
-        if (this.hermes.streamPrompt && readEnvBool('STACKCHAN_STREAM_LLM_TTS', true)) {
-            return await this.speakHermesReplyStreaming(hermesPrompt, llmLabel, ttsLabel)
+    private startProcessingKeepalive(turn: AbortController): () => void {
+        const timer = setInterval(() => {
+            if (this.isProcessingTurnActive(turn)) this.sendJson({ type: 'llm', emotion: 'doubtful' })
+        }, PROCESSING_KEEPALIVE_MS)
+        const stop = () => clearInterval(timer)
+        turn.signal.addEventListener('abort', stop, { once: true })
+        return () => {
+            stop()
+            turn.signal.removeEventListener('abort', stop)
         }
-        return await this.speakHermesReplyBuffered(hermesPrompt, llmLabel, ttsLabel)
     }
 
-    private async speakHermesReplyBuffered(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
-        const processingKeepalive = setInterval(() => {
-            this.sendJson({ type: 'llm', emotion: 'doubtful' })
-        }, PROCESSING_KEEPALIVE_MS)
+    private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string, turn: AbortController): Promise<string> {
+        const hermesPrompt = stackChanVoicePrompt(prompt)
+        if (this.hermes.streamPrompt && readEnvBool('STACKCHAN_STREAM_LLM_TTS', true)) {
+            return await this.speakHermesReplyStreaming(hermesPrompt, llmLabel, ttsLabel, turn)
+        }
+        return await this.speakHermesReplyBuffered(hermesPrompt, llmLabel, ttsLabel, turn)
+    }
+
+    private async speakHermesReplyBuffered(prompt: string, llmLabel: string, ttsLabel: string, turn: AbortController): Promise<string> {
+        const stopKeepalive = this.startProcessingKeepalive(turn)
         this.sendJson({ type: 'llm', emotion: 'doubtful' })
         let reply: string
         try {
@@ -1009,30 +1129,30 @@ export class Session {
                 { textLength: prompt.length },
             )
         } finally {
-            clearInterval(processingKeepalive)
+            stopKeepalive()
         }
-        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): "${reply}"`)
+        if (!this.isProcessingTurnActive(turn)) return reply
+        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): ${formatConversationLogText(reply)}`)
         this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
         void this.displayFirstImageFromReply(reply)
 
         const speechSegments = splitStackChanSpeechText(reply, this.speechSegmentationConfig)
-        await this.speakSegments(speechSegments, ttsLabel)
+        await this.speakSegments(speechSegments, ttsLabel, turn)
         return reply
     }
 
-    private async speakHermesReplyStreaming(prompt: string, llmLabel: string, ttsLabel: string): Promise<string> {
+    private async speakHermesReplyStreaming(prompt: string, llmLabel: string, ttsLabel: string, turn: AbortController): Promise<string> {
         const streamPrompt = this.hermes.streamPrompt
-        if (!streamPrompt) return await this.speakHermesReplyBuffered(prompt, llmLabel, ttsLabel)
+        if (!streamPrompt) return await this.speakHermesReplyBuffered(prompt, llmLabel, ttsLabel, turn)
 
-        const processingKeepalive = setInterval(() => {
-            this.sendJson({ type: 'llm', emotion: 'doubtful' })
-        }, PROCESSING_KEEPALIVE_MS)
+        const stopKeepalive = this.startProcessingKeepalive(turn)
         this.sendJson({ type: 'llm', emotion: 'doubtful' })
 
         const llmStartMs = nowMs()
         let reply = ''
         let spokenSegments = 0
         let playback: TtsPlayback | undefined
+        let streamCompleted = false
 
         try {
             for await (const event of streamPrompt.call(this.hermes, prompt)) {
@@ -1042,10 +1162,10 @@ export class Session {
                     reply = event.text
                 }
 
-                if (this.state !== 'processing') break
+                if (!this.isProcessingTurnActive(turn)) break
                 const stableSegments = stableSpeechSegmentsFromPartialReply(reply, this.speechSegmentationConfig)
-                while (spokenSegments < stableSegments.length && this.state === 'processing') {
-                    playback ??= this.startTtsPlayback(ttsLabel)
+                while (spokenSegments < stableSegments.length && this.isProcessingTurnActive(turn)) {
+                    playback ??= this.startTtsPlayback(ttsLabel, turn)
                     await this.speakSegmentInPlayback(
                         playback,
                         stableSegments[spokenSegments],
@@ -1055,6 +1175,7 @@ export class Session {
                     spokenSegments += 1
                     if (playback.interrupted) break
                 }
+                if (playback?.interrupted || !this.isProcessingTurnActive(turn)) break
                 if (
                     STOP_LLM_AFTER_MAX_SPOKEN_SEGMENTS &&
                     spokenSegments >= this.speechSegmentationConfig.maxSegments
@@ -1066,18 +1187,23 @@ export class Session {
                     break
                 }
             }
+            streamCompleted = true
         } finally {
-            clearInterval(processingKeepalive)
+            stopKeepalive()
+            if (playback && (!streamCompleted || !this.isProcessingTurnActive(turn))) {
+                await this.finishTtsPlayback(playback)
+            }
         }
 
         console.log(`[timing] done session:${this.sessionId}:${llmLabel}.stream elapsed=${elapsedMs(llmStartMs)}`)
-        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): "${reply}"`)
+        if (!this.isProcessingTurnActive(turn)) return reply
+        console.log(`[session ${this.sessionId}] LLM(${llmLabel}): ${formatConversationLogText(reply)}`)
         this.sendJson({ type: 'llm', emotion: inferStackChanEmotion(reply) })
         void this.displayFirstImageFromReply(reply)
 
         const finalSegments = splitStackChanSpeechText(reply, this.speechSegmentationConfig)
         if (!playback) {
-            await this.speakSegments(finalSegments, ttsLabel)
+            await this.speakSegments(finalSegments, ttsLabel, turn)
             return reply
         }
 
@@ -1090,12 +1216,22 @@ export class Session {
         return reply
     }
 
-    private async synthesizeSegment(speechText: string, label: string, leadSilenceMs = 0): Promise<SynthesizedSegment> {
-        const wav = await withTiming(
-            `session:${this.sessionId}:${label}.synthesize`,
-            () => this.synthesizeTextFn(speechText),
-            { textLength: speechText.length },
-        )
+    private async synthesizeSegment(speechText: string, label: string, signal: AbortSignal, leadSilenceMs = 0): Promise<SynthesizedSegment> {
+        signal.throwIfAborted()
+        const synthesisLabel = `session:${this.sessionId}:${label}.synthesize`
+        const synthesisStartMs = nowMs()
+        console.log(`[timing] start ${synthesisLabel} ${JSON.stringify({ textLength: speechText.length, provider: this.ttsProvider })}`)
+        let wav: Buffer
+        try {
+            wav = this.ttsProvider === 'hermes'
+                ? await this.synthesizeHermesTextFn(speechText)
+                : await this.synthesizeSanoTextFn(speechText, { signal })
+            signal.throwIfAborted()
+            console.log(`[timing] done ${synthesisLabel} elapsed=${elapsedMs(synthesisStartMs)}`)
+        } catch (error) {
+            console.log(`[timing] ${signal.aborted ? 'cancelled' : 'error'} ${synthesisLabel} elapsed=${elapsedMs(synthesisStartMs)}`)
+            throw error
+        }
         if (leadSilenceMs > 0) {
             console.log(`[session ${this.sessionId}] tts preroll ${leadSilenceMs}ms`)
         }
@@ -1104,22 +1240,38 @@ export class Session {
             async () => this.encodeWavToOpusFramesFn(wav, leadSilenceMs),
             { wavBytes: wav.length, leadSilenceMs },
         )
+        signal.throwIfAborted()
         return { wav, opusFrames }
     }
 
     private async warmFastAck(): Promise<void> {
-        if (this.fastAckEntries || this.fastAckFailed) return
+        if (this.closed || this.fastAckEntries || this.fastAckFailed || this.fastAckWarmup) return
+        const warmup = new AbortController()
+        this.fastAckWarmup = warmup
+        // Publish only a complete cache. An old warmup cannot overwrite a new hello.
+        const entries: FastAckCacheEntry[] = []
         try {
-            this.fastAckEntries = []
             for (let index = 0; index < FAST_ACK_TEXTS.length; index++) {
                 const text = FAST_ACK_TEXTS[index]
-                const audio = await this.synthesizeSegment(text, `tts.fast_ack.cache${index}`, TTS_PREROLL_MS)
-                this.fastAckEntries.push({ text, wav: audio.wav, frames: audio.opusFrames })
+                const audio = await this.synthesizeSegment(text, `tts.fast_ack.cache${index}`, warmup.signal, TTS_PREROLL_MS)
+                // Native WAV has no M5 preroll. Cache a matching avatar stream so
+                // a muted M5 silence prefix does not delay the subsequent LLM request.
+                const localFrames = this.localTtsOutputConfig.enabled && TTS_PREROLL_MS > 0
+                    ? await withTiming(`session:${this.sessionId}:tts.fast_ack.cache${index}.encode.local`,
+                        async () => this.encodeWavToOpusFramesFn(audio.wav, 0))
+                    : audio.opusFrames
+                warmup.signal.throwIfAborted()
+                entries.push({ text, wav: audio.wav, frames: audio.opusFrames, localFrames })
             }
-            console.log(`[session ${this.sessionId}] fast ack cached variants=${this.fastAckEntries.length}`)
+            if (this.fastAckWarmup !== warmup || warmup.signal.aborted || this.closed) return
+            this.fastAckEntries = entries
+            console.log(`[session ${this.sessionId}] fast ack cached variants=${entries.length}`)
         } catch (error) {
+            if (this.fastAckWarmup !== warmup || warmup.signal.aborted || this.closed) return
             this.fastAckFailed = true
             console.warn(`[session ${this.sessionId}] fast ack cache failed: ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+            if (this.fastAckWarmup === warmup) this.fastAckWarmup = undefined
         }
     }
 
@@ -1135,8 +1287,8 @@ export class Session {
         return this.fastAckEntries[index]
     }
 
-    private async trySpeakFastAck(): Promise<void> {
-        if (!FAST_ACK_ENABLED || this.fastAckFailed) return
+    private async trySpeakFastAck(turn: AbortController): Promise<void> {
+        if (!this.isProcessingTurnActive(turn) || !FAST_ACK_ENABLED || this.fastAckFailed) return
         if (!this.fastAckEntries) {
             void this.warmFastAck()
             return
@@ -1144,18 +1296,18 @@ export class Session {
 
         const ack = this.pickFastAck()
         if (!ack) return
-        const playback = this.startTtsPlayback('tts.fast_ack')
+        const playback = this.startTtsPlayback('tts.fast_ack', turn)
         try {
-            console.log(`[session ${this.sessionId}] fast ack selected: "${ack.text}"`)
-            await this.speakCachedSegmentInPlayback(playback, ack.text, ack.wav, ack.frames, 0)
+            console.log(`[session ${this.sessionId}] fast ack selected: ${formatConversationLogText(ack.text)}`)
+            await this.speakCachedSegmentInPlayback(playback, ack.text, ack.wav, ack.frames, 0, ack.localFrames)
         } finally {
             await this.finishTtsPlayback(playback)
         }
     }
 
-    private async speakSegments(segments: string[], label: string): Promise<void> {
-        if (segments.length === 0) return
-        const playback = this.startTtsPlayback(label)
+    private async speakSegments(segments: string[], label: string, turn: AbortController): Promise<void> {
+        if (segments.length === 0 || !this.isProcessingTurnActive(turn)) return
+        const playback = this.startTtsPlayback(label, turn)
         try {
             await this.speakSegmentsInPlayback(playback, segments, label, 0)
         } finally {
@@ -1163,7 +1315,8 @@ export class Session {
         }
     }
 
-    private startTtsPlayback(label: string): TtsPlayback {
+    private startTtsPlayback(label: string, turn: AbortController): TtsPlayback {
+        this.cancelTtsPlayback()
         const generation = this.ttsGeneration + 1
         this.ttsGeneration = generation
         this.ttsStopSent = false
@@ -1172,7 +1325,9 @@ export class Session {
         this.resetBargeInDetector()
         this.sendJson({ type: 'tts', state: 'start' })
         this.setAutoLedState('speaking')
-        return {
+        const playback: TtsPlayback = {
+            turn,
+            controller: new AbortController(),
             generation,
             label,
             streamStartMs: nowMs(),
@@ -1184,14 +1339,17 @@ export class Session {
             localOutputChecked: false,
             m5SpeakerMutedForLocalOutput: false,
         }
+        this.activeTtsPlayback = playback
+        return playback
     }
 
     private isTtsPlaybackActive(playback: TtsPlayback): boolean {
-        return this.state === 'processing' && this.ttsGeneration === playback.generation
+        return this.isProcessingTurnActive(playback.turn) && this.activeTtsPlayback === playback &&
+            !playback.controller.signal.aborted && this.ttsGeneration === playback.generation
     }
 
-    private prefetchSegment(segment: string, label: string, index: number): PrefetchedSegment {
-        const promise = this.synthesizeSegment(segment, `${label}.segment${index}`)
+    private prefetchSegment(playback: TtsPlayback, segment: string, label: string, index: number): PrefetchedSegment {
+        const promise = this.synthesizeSegment(segment, `${label}.segment${index}`, playback.controller.signal)
         promise.catch(() => undefined)
         return { index, promise }
     }
@@ -1223,7 +1381,7 @@ export class Session {
                     framesPromise,
                     () => {
                         if (nextSegment && this.isTtsPlaybackActive(playback)) {
-                            prefetched = this.prefetchSegment(nextSegment, label, index + 1)
+                            prefetched = this.prefetchSegment(playback, nextSegment, label, index + 1)
                         }
                     },
                 )
@@ -1249,10 +1407,18 @@ export class Session {
 
         this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
         await this.prepareLocalTtsOutput(playback)
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
         const leadSilenceMs = playback.localOutputTarget
             ? 0
             : (index === 0 && playback.streamedFrames === 0 ? TTS_PREROLL_MS : 0)
-        const audio = framesPromise ? await framesPromise : await this.synthesizeSegment(segment, label, leadSilenceMs)
+        const audio = framesPromise ? await framesPromise : await this.synthesizeSegment(segment, label, playback.controller.signal, leadSilenceMs)
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
         onFramesReady?.()
         const localPlayback = this.startLocalSegmentPlayback(playback, audio.wav)
         const leadSilenceFrames = Math.ceil(leadSilenceMs / OUTPUT_FRAME_DURATION_MS)
@@ -1282,6 +1448,7 @@ export class Session {
         wav: Buffer,
         opusFrames: Buffer[],
         index: number,
+        localOpusFrames?: Buffer[],
     ): Promise<void> {
         if (!this.isTtsPlaybackActive(playback)) {
             playback.interrupted = true
@@ -1290,12 +1457,17 @@ export class Session {
 
         this.sendJson({ type: 'tts', state: 'sentence_start', text: segment, index })
         await this.prepareLocalTtsOutput(playback)
+        if (!this.isTtsPlaybackActive(playback)) {
+            playback.interrupted = true
+            return
+        }
         const localPlayback = this.startLocalSegmentPlayback(playback, wav)
+        const frames = playback.localOutputTarget && localOpusFrames ? localOpusFrames : opusFrames
         const leadSilenceFrames = !playback.localOutputTarget && index === 0 && playback.streamedFrames === 0
             ? Math.ceil(TTS_PREROLL_MS / OUTPUT_FRAME_DURATION_MS)
             : 0
-        for (let frameIndex = 0; frameIndex < opusFrames.length; frameIndex++) {
-            const frame = opusFrames[frameIndex]
+        for (let frameIndex = 0; frameIndex < frames.length; frameIndex++) {
+            const frame = frames[frameIndex]
             if (!this.isTtsPlaybackActive(playback)) {
                 playback.interrupted = true
                 break
@@ -1314,51 +1486,82 @@ export class Session {
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
     }
 
+    private queueLocalSpeakerOperation(operation: () => Promise<void>): Promise<void> {
+        const queued = this.localSpeakerOperations.then(operation)
+        // A failed ACK must not permanently poison the queue.
+        this.localSpeakerOperations = queued.catch(() => undefined)
+        return queued
+    }
+
     private async prepareLocalTtsOutput(playback: TtsPlayback): Promise<void> {
-        if (playback.localOutputChecked) return
+        if (playback.localOutputChecked || !this.isTtsPlaybackActive(playback)) return
         playback.localOutputChecked = true
-        if (!this.localTtsOutputConfig.enabled) return
+        if (!this.localTtsOutputConfig.enabled) {
+            await this.localSpeakerOperations
+            return
+        }
 
         try {
-            const target = await resolveLocalTtsOutputTarget(this.localTtsOutputConfig)
+            const target = await resolveLocalTtsOutputTarget(this.localTtsOutputConfig, { signal: playback.controller.signal })
+            if (!this.isTtsPlaybackActive(playback)) return
             if (!target) {
-                console.log(`[session ${this.sessionId}] local TTS output unavailable; using M5 speaker`)
+                // A newer M5 fallback must wait for any previous mute/restore ACK.
+                await this.localSpeakerOperations
+                if (this.isTtsPlaybackActive(playback)) console.log(`[session ${this.sessionId}] local TTS output unavailable; using M5 speaker`)
                 return
             }
-            await this.callRobotToolInternal('self.robot.set_speaker_volume', {
-                volume: 0,
-                permanent: false,
-            }, { automatic: true, waitForResponse: true })
+            await this.queueLocalSpeakerOperation(async () => {
+                if (!this.isTtsPlaybackActive(playback)) return
+                this.localSpeakerOwner = playback
+                // The device may have applied mute even if its ACK fails/is late.
+                playback.m5SpeakerMutedForLocalOutput = true
+                const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                    volume: 0,
+                    permanent: false,
+                }, { automatic: true, waitForResponse: true })
+                if (readSpeakerVolumeAck(result) !== 0) throw new Error('M5 mute acknowledgement unverified')
+            })
+            if (!this.isTtsPlaybackActive(playback)) return
             playback.localOutputTarget = target
-            playback.m5SpeakerMutedForLocalOutput = true
             console.log(`[session ${this.sessionId}] local TTS output active target=${target}; M5 speaker muted temporarily`)
-        } catch (error) {
-            console.warn(`[session ${this.sessionId}] local TTS output setup failed; using M5 speaker: ${error instanceof Error ? error.message : String(error)}`)
+        } catch {
+            if (!this.isTtsPlaybackActive(playback)) return
+            console.warn(`[session ${this.sessionId}] local TTS output setup failed; using M5 speaker`)
+            await this.restoreM5SpeakerAfterLocalOutput(playback)
+            await this.localSpeakerOperations
         }
     }
 
     private startLocalSegmentPlayback(playback: TtsPlayback, wav: Buffer): Promise<void> {
         const target = playback.localOutputTarget
-        if (!target) return Promise.resolve()
-        return playWavOnLocalTarget(target, wav).catch(async (error) => {
-            console.warn(`[session ${this.sessionId}] local TTS playback failed; restoring M5 speaker: ${error instanceof Error ? error.message : String(error)}`)
+        if (!target || !this.isTtsPlaybackActive(playback)) return Promise.resolve()
+        return playWavOnLocalTarget(target, wav, { signal: playback.controller.signal }).catch(async () => {
+            if (!this.isTtsPlaybackActive(playback)) return
+            console.warn(`[session ${this.sessionId}] local TTS playback failed; restoring M5 speaker`)
             playback.localOutputTarget = undefined
             await this.restoreM5SpeakerAfterLocalOutput(playback)
         })
     }
 
     private async restoreM5SpeakerAfterLocalOutput(playback: TtsPlayback): Promise<void> {
-        if (!playback.m5SpeakerMutedForLocalOutput) return
-        playback.m5SpeakerMutedForLocalOutput = false
-        try {
-            await this.callRobotToolInternal('self.robot.set_speaker_volume', {
-                volume: this.localTtsOutputConfig.fallbackM5Volume,
-                permanent: false,
-            }, { automatic: true, waitForResponse: true })
-            console.log(`[session ${this.sessionId}] M5 speaker restored volume=${this.localTtsOutputConfig.fallbackM5Volume}`)
-        } catch (error) {
-            console.error(`[session ${this.sessionId}] failed to restore M5 speaker after local TTS:`, error)
-        }
+        if (!playback.m5SpeakerMutedForLocalOutput || this.localSpeakerOwner !== playback) return
+        await this.queueLocalSpeakerOperation(async () => {
+            if (!playback.m5SpeakerMutedForLocalOutput || this.localSpeakerOwner !== playback) return
+            playback.m5SpeakerMutedForLocalOutput = false
+            this.localSpeakerOwner = undefined
+            if (this.closed) return
+            try {
+                const volume = this.localTtsOutputConfig.fallbackM5Volume
+                const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                    volume,
+                    permanent: false,
+                }, { automatic: true, waitForResponse: true })
+                if (readSpeakerVolumeAck(result) !== volume) throw new Error('M5 restore acknowledgement unverified')
+                console.log(`[session ${this.sessionId}] M5 speaker restored volume=${volume}`)
+            } catch {
+                if (!this.closed) console.warn(`[session ${this.sessionId}] failed to restore M5 speaker after local TTS`)
+            }
+        })
     }
 
     private logTtsFrameMilestones(playback: TtsPlayback, audibleFrame: boolean): void {
@@ -1373,14 +1576,18 @@ export class Session {
     }
 
     private async finishTtsPlayback(playback: TtsPlayback): Promise<void> {
-        this.sendTtsStopOnce(playback.generation)
-        if (this.ttsGeneration === playback.generation) {
+        const wasActive = this.isTtsPlaybackActive(playback)
+        if (this.activeTtsPlayback === playback) {
+            this.sendTtsStopOnce(playback.generation)
+            this.activeTtsPlayback = undefined
             this.ttsStreaming = false
             this.resetBargeInDetector()
         }
+        // Reap any unconsumed prefetch without touching a later playback's signal.
+        playback.controller.abort()
         console.log(`[timing] done session:${this.sessionId}:${playback.label}.stream elapsed=${elapsedMs(playback.streamStartMs)} frames=${playback.streamedFrames} segments=${playback.segmentCount}`)
 
-        if (!playback.interrupted && this.state === 'processing' && this.ttsGeneration === playback.generation) {
+        if (wasActive && !playback.interrupted) {
             // TTS 再生後のエコー誤検知を防ぐためクールダウンを設定
             this.cooldownUntil = Date.now() + this.postTtsCooldownMs
         }
@@ -1492,6 +1699,7 @@ export class Session {
     }
 
     private sendJson(obj: Record<string, unknown>): void {
+        if (this.closed) return
         try {
             this.ws.send(JSON.stringify(obj))
         } catch {
@@ -1500,6 +1708,7 @@ export class Session {
     }
 
     private sendBinary(data: Buffer): void {
+        if (this.closed) return
         try {
             this.ws.send(data)
         } catch {

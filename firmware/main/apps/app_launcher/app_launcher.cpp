@@ -125,10 +125,28 @@ void AppLauncher::screensaver_update()
     }
 }
 
+bool AppLauncher::diagnosticsOpenApp(const char* name)
+{
+    // Opening must follow AppLauncherBase's close -> sleeping -> open sequence.
+    if (isAppRunning() || _going_to_open_app_id >= 0) return false;
+    for (const auto& app : getAppProps()) {
+        if (app.info.name == name) {
+            {
+                LvglLockGuard lock;
+                _startup_worker.reset(); // Explicit local command replaces startup guidance.
+                _screensaver.reset();
+                _startup_checked = true;
+            }
+            return openApp(app.appID);
+        }
+    }
+    return false;
+}
+
 bool AppLauncher::try_auto_open_hermes()
 {
 #if CONFIG_HERMES_AUTOSTART
-    if (!_view || _hermes_auto_open_attempted || !GetHAL().isAppConfiged() ||
+    if (!_view || _hermes_auto_open_attempted || GetHAL().shouldSuppressHermesAutostart() || !GetHAL().isAppConfiged() ||
         GetHAL().hasSdConfigError() || !GetHAL().hasHermesBridgeUrl()) {
         return false;
     }

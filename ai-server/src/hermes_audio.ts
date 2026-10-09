@@ -3,6 +3,28 @@ import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import path from 'path'
 import { randomUUID } from 'crypto'
+import { ChildrenHttpHermesClient, normalizeChildrenHermesUrl } from './children_hermes'
+
+// Owner-only client: TTS/STT permission probes never create a chat session.
+let childrenAudioClient: { key: string; client: ChildrenHttpHermesClient } | undefined
+function childAudioClient(): ChildrenHttpHermesClient {
+    const key = JSON.stringify([process.env.HERMES_CHILDREN_URL, process.env.HERMES_CHILDREN_PROFILE_ID])
+    if (!childrenAudioClient || childrenAudioClient.key !== key) {
+        childrenAudioClient = { key, client: new ChildrenHttpHermesClient() }
+    }
+    return childrenAudioClient.client
+}
+
+function childSttUrl(value: string): string {
+    try {
+        const url = new URL(value)
+        const authority = value.match(/^(https?:\/\/[^/]+)\/v1\/audio\/transcriptions$/i)?.[1]
+        if (!authority || url.pathname !== '/v1/audio/transcriptions') throw new Error()
+        return `${normalizeChildrenHermesUrl(authority)}/v1/audio/transcriptions`
+    } catch {
+        throw new Error('Children Hermes STT requires an HTTP loopback transcription endpoint')
+    }
+}
 
 type CommandResult = {
     stdout: string
@@ -80,22 +102,57 @@ function readTimeoutMs(name: string, fallback: number): number {
     return Math.max(500, Math.min(120_000, Math.round(value)))
 }
 
-async function transcribeWithOpenAiCompatibleStt(wav: Buffer, url: string): Promise<string> {
+async function readChildSttText(response: Response): Promise<string> {
+    if (!response.body) throw new Error('Invalid children Hermes STT response')
+    const reader = response.body.getReader()
+    const chunks: Buffer[] = []
+    let bytes = 0
+    try {
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            bytes += value.byteLength
+            if (bytes > 1_048_576) throw new Error('Children Hermes STT response is too large')
+            chunks.push(Buffer.from(value))
+        }
+        return Buffer.concat(chunks).toString('utf8')
+    } finally {
+        await reader.cancel().catch(() => undefined)
+        reader.releaseLock()
+    }
+}
+
+async function transcribeWithOpenAiCompatibleStt(wav: Buffer, url: string, childrenOnly = false): Promise<string> {
     const form = new FormData()
     form.append('model', process.env.HERMES_STT_MODEL ?? process.env.STACKCHAN_STT_MODEL ?? 'whisper-1')
     form.append('language', process.env.HERMES_STT_LANGUAGE ?? process.env.HERMES_LOCAL_STT_LANGUAGE ?? 'ja')
     form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'input.wav')
 
-    const apiKey = process.env.HERMES_STT_API_KEY ?? process.env.WHISPER_API_KEY ?? ''
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: apiKey ? { authorization: `Bearer ${apiKey}` } : undefined,
-        body: form,
-    })
-    const text = await response.text()
-    if (!response.ok) throw new Error(`STT endpoint failed: HTTP ${response.status}: ${text}`)
-    const result = JSON.parse(text) as TranscriptionResult
-    return String(result.text ?? result.transcript ?? result.result ?? '').trim()
+    const apiKey = childrenOnly ? '' : process.env.HERMES_STT_API_KEY ?? process.env.WHISPER_API_KEY ?? ''
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: apiKey ? { authorization: `Bearer ${apiKey}` } : undefined,
+            body: form,
+            ...(childrenOnly ? {
+                redirect: 'error' as const, credentials: 'omit' as const,
+                signal: AbortSignal.timeout(readTimeoutMs('HERMES_STT_TIMEOUT_MS', 30_000)),
+            } : {}),
+        })
+        if (childrenOnly && !response.ok) {
+            await response.body?.cancel().catch(() => undefined)
+            throw new Error('Children Hermes STT request rejected')
+        }
+        const text = childrenOnly ? await readChildSttText(response) : await response.text()
+        if (!response.ok) throw new Error(`STT endpoint failed: HTTP ${response.status}: ${text}`)
+        const result = JSON.parse(text) as TranscriptionResult
+        const transcript = result.text ?? result.transcript ?? result.result ?? ''
+        if (childrenOnly && typeof transcript !== 'string') throw new Error('Invalid children Hermes STT response')
+        return String(transcript).trim()
+    } catch (error) {
+        if (childrenOnly) throw new Error('Children Hermes STT request failed')
+        throw error
+    }
 }
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -117,6 +174,11 @@ function parseJson<T>(stdout: string, label: string): T {
 
 export async function transcribeWithHermes(wav: Buffer): Promise<string> {
     const sttUrl = configuredSttUrl()
+    if (process.env.HERMES_CONNECT_MODE === 'children_http') {
+        const url = childSttUrl(sttUrl)
+        await childAudioClient().ensureVoiceEnabled()
+        return await transcribeWithOpenAiCompatibleStt(wav, url, true)
+    }
     if (sttUrl) return await transcribeWithOpenAiCompatibleStt(wav, sttUrl)
 
     return await withTempDir(async (dir) => {
@@ -157,6 +219,9 @@ async function synthesizeWithLocalHttpTts(text: string, url: string): Promise<Bu
 }
 
 export async function synthesizeWithHermes(text: string): Promise<Buffer> {
+    if (process.env.HERMES_CONNECT_MODE === 'children_http') {
+        return await childAudioClient().synthesize(text)
+    }
     const localTtsUrl = configuredLocalTtsUrl()
     if (localTtsUrl) return await synthesizeWithLocalHttpTts(text, localTtsUrl)
 

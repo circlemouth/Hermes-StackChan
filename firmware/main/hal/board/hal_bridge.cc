@@ -15,6 +15,8 @@
 #include <board.h>
 #include <display.h>
 #include <mutex>
+#include <atomic>
+#include <utility>
 #include <assets.h>
 #include <settings.h>
 
@@ -24,6 +26,7 @@ static constexpr std::string_view _hermes_config_nvs_ns                         
 static constexpr std::string_view _hermes_config_idle_shutdown_time_key           = "idle_sec";
 static constexpr std::string_view _hermes_config_allow_shutdown_when_charging_key = "ext_pwr";
 static constexpr std::string_view _hermes_config_idle_random_movement_key         = "idle_lv";
+static constexpr std::string_view _hermes_config_use_hermes_tts_key               = "tts_hermes";
 
 namespace hal_bridge {
 
@@ -33,6 +36,7 @@ namespace hal_bridge {
 
 static std::mutex _mutex;
 static Data_t _data;
+static std::atomic<bool> _hermes_runtime_initialized{false};
 
 void lock()
 {
@@ -69,9 +73,15 @@ bool is_hermes_mode()
     return _data.isHermesMode;
 }
 
+bool is_hermes_runtime_initialized()
+{
+    return _hermes_runtime_initialized.load(std::memory_order_acquire);
+}
+
 void set_hermes_mode(bool mode)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    if (!mode) _hermes_runtime_initialized.store(false, std::memory_order_release);
     _data.isHermesMode = mode;
 }
 
@@ -130,12 +140,15 @@ void hermes_board_init()
 void start_hermes_app()
 {
     ESP_LOGI(_tag, "hal_bridge::start_hermes_app entered");
+    _hermes_runtime_initialized.store(false, std::memory_order_release);
     set_hermes_mode(true);
 
     // Initialize and run the application
     auto& app = Application::GetInstance();
     ESP_LOGI(_tag, "Application::Initialize start");
     app.Initialize();
+    // Publish initialized Application state before USB may inspect/schedule it.
+    _hermes_runtime_initialized.store(true, std::memory_order_release);
     ESP_LOGI(_tag, "Application::Run start");
     app.Run();  // This function runs the main event loop and never returns
     ESP_LOGE(_tag, "Application::Run returned unexpectedly");
@@ -152,6 +165,7 @@ HermesRuntimeConfig_t get_hermes_config()
         settings.GetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
     config.idleRandomMovementLevel =
         settings.GetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
+    config.useHermesTts = settings.GetBool(_hermes_config_use_hermes_tts_key.data(), config.useHermesTts);
 
     return config;
 }
@@ -162,6 +176,17 @@ void set_hermes_config(const HermesRuntimeConfig_t& config)
     settings.SetInt(_hermes_config_idle_shutdown_time_key.data(), config.idleShutdownTimeSeconds);
     settings.SetBool(_hermes_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
     settings.SetInt(_hermes_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
+    settings.SetBool(_hermes_config_use_hermes_tts_key.data(), config.useHermesTts);
+}
+
+void schedule_hermes_reboot(std::function<void()> before_reboot)
+{
+    // Own runtime teardown on the Application main queue, never from a USB or
+    // LVGL callback. The upstream path closes the protocol and stops audio first.
+    Application::GetInstance().Schedule([before_reboot = std::move(before_reboot)]() {
+        before_reboot();
+        Application::GetInstance().Reboot();
+    });
 }
 
 void app_play_sound(const std::string_view& sound)

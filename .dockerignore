@@ -1,0 +1,17 @@
+.git
+.github
+.codex
+.idea
+app
+artifacts
+firmware
+hermes-agent
+remote
+review-bundles
+server
+ai-server/.env
+ai-server/.sanotts
+ai-server/dist
+ai-server/node_modules
+ai-server/probe-runs
+sanoTTS-jp/.git

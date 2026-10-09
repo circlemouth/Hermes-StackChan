@@ -22,6 +22,7 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
 
+include("${CMAKE_SOURCE_DIR}/cmake/apply_managed_component_patch.cmake")
 set(ESP_ML307_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-ml307-tcp-shutdown.patch")
 set(ESP_ML307_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/78__esp-ml307")
 set(ESP_LVGL_PORT_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-lvgl-port-rgb565-swap-buffer.patch")
@@ -31,95 +32,9 @@ set(ESP_WIFI_CONNECT_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/78__e
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_ML307_PATCH}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_LVGL_PORT_PATCH}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_WIFI_CONNECT_PATCH}")
-if(EXISTS "${ESP_ML307_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_ML307_PATCH}")
-    execute_process(
-        COMMAND git apply --check "${ESP_ML307_PATCH}"
-        WORKING_DIRECTORY "${ESP_ML307_COMPONENT_DIR}"
-        RESULT_VARIABLE ESP_ML307_PATCH_CHECK
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(ESP_ML307_PATCH_CHECK EQUAL 0)
-        execute_process(
-            COMMAND git apply "${ESP_ML307_PATCH}"
-            WORKING_DIRECTORY "${ESP_ML307_COMPONENT_DIR}"
-            COMMAND_ERROR_IS_FATAL ANY
-        )
-        message(STATUS "Applied esp-ml307 TCP shutdown patch")
-    else()
-        execute_process(
-            COMMAND git apply --reverse --check "${ESP_ML307_PATCH}"
-            WORKING_DIRECTORY "${ESP_ML307_COMPONENT_DIR}"
-            RESULT_VARIABLE ESP_ML307_PATCH_REVERSE_CHECK
-            OUTPUT_QUIET
-            ERROR_QUIET
-        )
-        if(ESP_ML307_PATCH_REVERSE_CHECK EQUAL 0)
-            message(STATUS "esp-ml307 TCP shutdown patch already applied")
-        else()
-            message(FATAL_ERROR "esp-ml307 TCP shutdown patch cannot be applied")
-        endif()
-    endif()
-endif()
-
-if(EXISTS "${ESP_WIFI_CONNECT_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_WIFI_CONNECT_PATCH}")
-    execute_process(
-        COMMAND git apply --check "${ESP_WIFI_CONNECT_PATCH}"
-        WORKING_DIRECTORY "${ESP_WIFI_CONNECT_COMPONENT_DIR}"
-        RESULT_VARIABLE ESP_WIFI_CONNECT_PATCH_CHECK
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(ESP_WIFI_CONNECT_PATCH_CHECK EQUAL 0)
-        execute_process(
-            COMMAND git apply "${ESP_WIFI_CONNECT_PATCH}"
-            WORKING_DIRECTORY "${ESP_WIFI_CONNECT_COMPONENT_DIR}"
-            COMMAND_ERROR_IS_FATAL ANY
-        )
-        message(STATUS "Applied esp-wifi-connect station stability patch")
-    else()
-        execute_process(
-            COMMAND git apply --reverse --check "${ESP_WIFI_CONNECT_PATCH}"
-            WORKING_DIRECTORY "${ESP_WIFI_CONNECT_COMPONENT_DIR}"
-            RESULT_VARIABLE ESP_WIFI_CONNECT_PATCH_REVERSE_CHECK
-            OUTPUT_QUIET
-            ERROR_QUIET
-        )
-        if(ESP_WIFI_CONNECT_PATCH_REVERSE_CHECK EQUAL 0)
-            message(STATUS "esp-wifi-connect station stability patch already applied")
-        else()
-            message(FATAL_ERROR "esp-wifi-connect station stability patch cannot be applied")
-        endif()
-    endif()
-endif()
-
-if(EXISTS "${ESP_LVGL_PORT_COMPONENT_DIR}/CMakeLists.txt" AND EXISTS "${ESP_LVGL_PORT_PATCH}")
-    execute_process(
-        COMMAND git apply --check "${ESP_LVGL_PORT_PATCH}"
-        WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
-        RESULT_VARIABLE ESP_LVGL_PORT_PATCH_CHECK
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(ESP_LVGL_PORT_PATCH_CHECK EQUAL 0)
-        execute_process(
-            COMMAND git apply "${ESP_LVGL_PORT_PATCH}"
-            WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
-            COMMAND_ERROR_IS_FATAL ANY
-        )
-        message(STATUS "Applied esp_lvgl_port RGB565 swap buffer patch")
-    else()
-        execute_process(
-            COMMAND git apply --reverse --check "${ESP_LVGL_PORT_PATCH}"
-            WORKING_DIRECTORY "${ESP_LVGL_PORT_COMPONENT_DIR}"
-            RESULT_VARIABLE ESP_LVGL_PORT_PATCH_REVERSE_CHECK
-            OUTPUT_QUIET
-            ERROR_QUIET
-        )
-        if(ESP_LVGL_PORT_PATCH_REVERSE_CHECK EQUAL 0)
-            message(STATUS "esp_lvgl_port RGB565 swap buffer patch already applied")
-        else()
-            message(FATAL_ERROR "esp_lvgl_port RGB565 swap buffer patch cannot be applied")
-        endif()
-    endif()
-endif()
+stackchan_apply_managed_component_patch(
+    "${ESP_ML307_COMPONENT_DIR}" "${ESP_ML307_PATCH}" "esp-ml307 TCP shutdown")
+stackchan_apply_managed_component_patch(
+    "${ESP_WIFI_CONNECT_COMPONENT_DIR}" "${ESP_WIFI_CONNECT_PATCH}" "esp-wifi-connect station stability")
+stackchan_apply_managed_component_patch(
+    "${ESP_LVGL_PORT_COMPONENT_DIR}" "${ESP_LVGL_PORT_PATCH}" "esp_lvgl_port RGB565 swap buffer")

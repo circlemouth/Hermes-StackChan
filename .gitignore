@@ -4,6 +4,7 @@
 .codex/
 ai-server/node_modules
 ai-server/probe-runs/
+ai-server/.sanotts/
 .env
 ai-server/dist
 .mcp.json
@@ -23,6 +24,7 @@ firmware/managed_components/
 firmware/components/
 firmware/sdkconfig
 firmware/sdkconfig.old
+firmware/sdcard/config.json
 firmware/tools/ui_sim/build*/
 firmware/tools/ui_sim/.deps/
 firmware/tools/ui_sim/out/
@@ -33,3 +35,5 @@ remote/code/StackChan-RemoteControl-ESPNow*_0x0.bin
 server/*.sqlite
 server/*.sqlite-*
 *.ppm
+__pycache__/
+*.py[cod]

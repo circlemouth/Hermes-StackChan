@@ -39,6 +39,8 @@ void AppSetup::onOpen()
     mclog::tagInfo(getAppInfo().name, "on open");
 
     // Reset state
+    _diagnostics_open = true;
+    _sd_config_worker = nullptr;
     _destroy_menu    = false;
     _need_warm_reset = false;
     _magic_count     = 0;
@@ -110,7 +112,9 @@ void AppSetup::onOpen()
              {"Load SD Config",
               [&]() {
                   _destroy_menu = true;
-                  _worker       = std::make_unique<SdConfigWorker>();
+                  auto worker = std::make_unique<SdConfigWorker>();
+                   _sd_config_worker = worker.get();
+                   _worker = std::move(worker);
               }},
              {server_label, nullptr}},
         },
@@ -177,6 +181,7 @@ void AppSetup::onRunning()
     if (_worker) {
         _worker->update();
         if (_worker->isDone()) {
+            _sd_config_worker = nullptr;
             _worker.reset();
             _menu_page = std::make_unique<view::SelectMenuPage>(_menu_sections);
         }
@@ -188,12 +193,46 @@ void AppSetup::onRunning()
     view::update_status_bar();
 }
 
+bool AppSetup::diagnosticsShowSdPrompt()
+{
+    LvglLockGuard lock;
+    if (!_diagnostics_open) return false;
+    if (_sd_config_worker) return _sd_config_worker->isInsertionPromptActive();
+    if (_worker) return false; // Do not replace active provisioning/calibration workers.
+    _menu_page.reset();
+    _destroy_menu = false;
+    auto worker = std::make_unique<SdConfigWorker>(); // UI only: never probes SD.
+    _sd_config_worker = worker.get();
+    _worker = std::move(worker);
+    return true;
+}
+
+bool AppSetup::diagnosticsSdPromptActive() const
+{
+    LvglLockGuard lock;
+    return _diagnostics_open && _sd_config_worker && _sd_config_worker->isInsertionPromptActive();
+}
+
+bool AppSetup::diagnosticsRequestSdRead()
+{
+    LvglLockGuard lock;
+    return _diagnostics_open && _sd_config_worker && _sd_config_worker->requestConfirmedRead();
+}
+
+void AppSetup::diagnosticsCancelSdRead()
+{
+    LvglLockGuard lock;
+    if (_diagnostics_open && _sd_config_worker) _sd_config_worker->cancelDiagnosticRead();
+}
+
 void AppSetup::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
 
+    _diagnostics_open = false;
+    _sd_config_worker = nullptr;
     _menu_sections.clear();
     _menu_page.reset();
     _worker.reset();

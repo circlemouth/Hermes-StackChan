@@ -19,6 +19,9 @@ public:
     void onLauncherClose() override;
     void onLauncherDestroy() override;
 
+    // app_main only; use Launcher sequencing rather than opening overlapping Mooncake apps.
+    bool diagnosticsOpenApp(const char* name);
+
 private:
     std::unique_ptr<view::LauncherView> _view;
     std::unique_ptr<view::Screensaver> _screensaver;

@@ -352,9 +352,13 @@ private:
 
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel_general;
+    std::unique_ptr<uitk::lvgl_cpp::Container> _panel_tts;
     std::unique_ptr<uitk::lvgl_cpp::Label> _label_idle_motion_title;
     std::unique_ptr<uitk::lvgl_cpp::Label> _label_idle_motion_value;
     std::unique_ptr<uitk::lvgl_cpp::Slider> _slider_idle_motion;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_tts_title;
+    std::unique_ptr<uitk::lvgl_cpp::Label> _label_tts_hint;
+    std::unique_ptr<uitk::lvgl_cpp::Switch> _switch_hermes_tts;
     std::unique_ptr<uitk::lvgl_cpp::Button> _btn_confirm;
 
     HermesBridgeConfig_t _config;
@@ -414,6 +418,18 @@ public:
     SdConfigWorker();
     ~SdConfigWorker() = default;
     void update() override;
+    // Mainloop/LVGL-lock only: same flag as the visible Read button, no SD I/O here.
+    bool requestConfirmedRead()
+    {
+        if (!isInsertionPromptActive()) return false;
+        _retry_clicked = true;
+        return true;
+    }
+    void cancelDiagnosticRead() { _retry_clicked = false; }
+    bool isInsertionPromptActive() const
+    {
+        return _insertion_prompt_active && _panel && _btn_retry && !_loading_panel && !_is_done && !_back_clicked && !_retry_clicked;
+    }
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
@@ -429,6 +445,7 @@ private:
     bool _retry_clicked = false;
     bool _back_clicked = false;
     bool _restart_required = false;
+    bool _insertion_prompt_active = false;
 
     void setup_start_ui();
     void load_config();

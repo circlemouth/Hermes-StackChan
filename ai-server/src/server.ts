@@ -2,8 +2,9 @@ import http from 'http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { Session } from './session.js'
 import { serveMediaRequest, setObservedMediaBaseUrl } from './media.js'
+import { readWebSocketKeepaliveInterval, startWebSocketKeepalive } from './websocket_keepalive.js'
 
-const DEVICE_KEEPALIVE_INTERVAL_MS = Math.max(1000, Number(process.env.STACKCHAN_WS_KEEPALIVE_MS ?? '3000') || 3000)
+const DEVICE_KEEPALIVE_INTERVAL_MS = readWebSocketKeepaliveInterval(process.env.STACKCHAN_WS_KEEPALIVE_MS)
 
 export function startServer(port: number): void {
     const server = http.createServer((req, res) => {
@@ -14,39 +15,32 @@ export function startServer(port: number): void {
     const wss = new WebSocketServer({ server, path: '/ws' })
 
     server.on('listening', () => {
-        console.log(`[server] WebSocket server listening on ws://0.0.0.0:${port}/ws`)
-        console.log(`[server] Media server listening on http://0.0.0.0:${port}/media/...`)
+        console.log('[server] WebSocket server listening')
+        console.log('[server] Media server listening')
     })
 
     wss.on('connection', (ws: WebSocket, req) => {
-        const ip = req.socket.remoteAddress ?? 'unknown'
         if (req.headers.host) {
             setObservedMediaBaseUrl(`http://${req.headers.host}`)
         }
-        console.log(`[server] connected: ${ip}`)
+        console.log('[server] connected')
 
         const session = new Session(ws)
-        const keepaliveTimer = setInterval(() => {
-            if (ws.readyState !== WebSocket.OPEN) return
-            try {
-                ws.ping()
-            } catch {
-                // The close handler will clean up the session.
-            }
-        }, DEVICE_KEEPALIVE_INTERVAL_MS)
-
         ws.on('message', (data: Buffer | string) => {
             session.handleMessage(data)
         })
 
-        ws.on('close', () => {
-            clearInterval(keepaliveTimer)
-            console.log(`[server] disconnected: ${ip}`)
+        ws.on('close', (code: number) => {
+            console.log(`[server] disconnected: ${code}`)
             session.close()
         })
 
-        ws.on('error', (err) => {
-            console.error(`[server] error from ${ip}:`, err.message)
+        // Keep consuming errors after keepalive cleanup; diagnostics below report
+        // only a fixed reason, never the error object or connection metadata.
+        ws.on('error', () => {})
+
+        startWebSocketKeepalive(ws, DEVICE_KEEPALIVE_INTERVAL_MS, (reason) => {
+            console.error(`[server] transport terminated: ${reason}`)
         })
     })
 

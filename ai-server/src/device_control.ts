@@ -28,6 +28,7 @@ export type StackChanBridgeStatus = {
     state?: string
     readyForPrompt: boolean
     reason: string
+    ttsProvider?: 'sanotts' | 'hermes'
     ttsStreaming?: boolean
     cooldownRemainingMs?: number
     followupRunning?: boolean

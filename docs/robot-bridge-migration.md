@@ -5,7 +5,7 @@ This note records what was adapted from the local `robot-bridge` reference and w
 ## Adopted Ideas
 
 - Barge-in: while StackChan is receiving TTS audio, `ai-server` can decode incoming microphone Opus frames with a stricter local RMS VAD. Sustained user speech stops the current TTS stream, sends one `tts stop`, interrupts only the dedicated StackChan Hermes session, and returns to listening.
-- Sentence-level TTS: Hermes replies remain final text from Dashboard `/api/ws`, but speech text is split into sentence-sized segments before calling the existing Hermes TTS helper. The first sentence can be synthesized and streamed before later sentences are processed.
+- Sentence-level TTS: Hermes replies remain final text from Dashboard `/api/ws`, but speech text is split into sentence-sized segments before calling the selected TTS engine. `sanoTTS-jp` is the default, and a device setting can select the existing Hermes TTS helper. The first sentence can be synthesized and streamed before later sentences are processed.
 - LED state display: `ai-server` sends subtle automatic LED colors for listening, thinking, speaking, and idle. Explicit `stackchan_set_led_color` calls from Hermes are treated as manual intent and temporarily suppress automatic LED updates.
 
 ## Not Migrated
@@ -16,7 +16,7 @@ This note records what was adapted from the local `robot-bridge` reference and w
 - Face registration, face recognition, and per-person memory.
 - Continuous camera monitoring.
 
-Hermes-StackChan continues to use Hermes Dashboard/TUI `/api/ws`, Hermes STT/TTS helper modules, and the existing TypeScript WebSocket bridge.
+Hermes-StackChan continues to use Hermes Dashboard/TUI `/api/ws`, the Hermes STT helper, the selected local TTS path, and the existing TypeScript WebSocket bridge.
 
 ## Firmware Note
 

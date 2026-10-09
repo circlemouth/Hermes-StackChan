@@ -3,6 +3,7 @@ import { createInterface } from 'readline'
 import path from 'path'
 import { existsSync } from 'fs'
 import WebSocket from 'ws'
+import { ChildrenHttpHermesClient } from './children_hermes'
 
 type JsonRpcId = number
 
@@ -510,12 +511,14 @@ export class DashboardWsHermesClient extends RpcHermesClient {
 }
 
 export class HermesClient {
-    private readonly client: RpcHermesClient
+    private readonly client: RpcHermesClient | ChildrenHttpHermesClient
 
     constructor() {
-        this.client = process.env.HERMES_CONNECT_MODE === 'dashboard_ws'
-            ? new DashboardWsHermesClient()
-            : new StdioHermesClient()
+        const mode = process.env.HERMES_CONNECT_MODE ?? 'stdio'
+        if (mode === 'children_http') this.client = new ChildrenHttpHermesClient()
+        else if (mode === 'dashboard_ws') this.client = new DashboardWsHermesClient()
+        else if (mode === 'stdio') this.client = new StdioHermesClient()
+        else throw new Error('Invalid HERMES_CONNECT_MODE; refusing transport fallback')
     }
 
     async submitPrompt(prompt: string): Promise<string> {

@@ -207,9 +207,42 @@ HermesGeneralWorker::HermesGeneralWorker()
     _slider_idle_motion->setValue(current_index);
     _slider_idle_motion->onValueChanged().connect([this](int32_t value) { _pending_idle_motion_index = value; });
 
+    _panel_tts = std::make_unique<Container>(_panel->get());
+    _panel_tts->setSize(296, 120);
+    _panel_tts->align(LV_ALIGN_TOP_MID, 0, 188);
+    _panel_tts->setBgColor(lv_color_hex(0xD2E3FF));
+    _panel_tts->setBorderWidth(0);
+    _panel_tts->setRadius(18);
+    _panel_tts->setPadding(0, 0, 0, 0);
+    _panel_tts->removeFlag(LV_OBJ_FLAG_SCROLLABLE);
+
+    _label_tts_title = std::make_unique<Label>(_panel_tts->get());
+    _label_tts_title->setText("TTS provider:");
+    _label_tts_title->setTextFont(&lv_font_montserrat_16);
+    _label_tts_title->setTextColor(lv_color_hex(0x26206A));
+    _label_tts_title->setWidth(260);
+    _label_tts_title->setTextAlign(LV_TEXT_ALIGN_CENTER);
+    _label_tts_title->align(LV_ALIGN_TOP_MID, 0, 16);
+
+    _label_tts_hint = std::make_unique<Label>(_panel_tts->get());
+    _label_tts_hint->setText("Use Hermes TTS");
+    _label_tts_hint->setTextFont(&lv_font_montserrat_16);
+    _label_tts_hint->setTextColor(lv_color_hex(0x26206A));
+    _label_tts_hint->align(LV_ALIGN_LEFT_MID, 24, 20);
+
+    _switch_hermes_tts = std::make_unique<Switch>(_panel_tts->get());
+    _switch_hermes_tts->setSize(64, 36);
+    _switch_hermes_tts->align(LV_ALIGN_RIGHT_MID, -24, 20);
+    _switch_hermes_tts->setBgColor(lv_color_hex(0xB8D3FD), LV_PART_MAIN);
+    _switch_hermes_tts->setBgColor(lv_color_hex(0x615B9E), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    _switch_hermes_tts->setBgColor(lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    if (_config.useHermesTts) {
+        _switch_hermes_tts->addState(LV_STATE_CHECKED);
+    }
+
     _btn_confirm = std::make_unique<Button>(_panel->get());
     apply_button_common_style(*_btn_confirm);
-    _btn_confirm->align(LV_ALIGN_TOP_MID, 0, 196);
+    _btn_confirm->align(LV_ALIGN_TOP_MID, 0, 326);
     _btn_confirm->setSize(290, 50);
     _btn_confirm->label().setText("Confirm");
     _btn_confirm->onClick().connect([this]() { _confirm_flag = true; });
@@ -226,10 +259,12 @@ void HermesGeneralWorker::update()
     }
 
     if (_confirm_flag) {
-        _confirm_flag = false;
+        _confirm_flag        = false;
+        _config.useHermesTts = _switch_hermes_tts->getValue();
         GetHAL().setHermesBridgeConfig(_config);
-        mclog::tagInfo(_tag, "Hermes bridge config updated: idleRandomMovementLevel={} ({})", _config.idleRandomMovementLevel,
-                       _idle_motion_level_labels[_config.idleRandomMovementLevel]);
+        mclog::tagInfo(_tag, "Hermes bridge config updated: idleRandomMovementLevel={} ({}), ttsProvider={}",
+                       _config.idleRandomMovementLevel, _idle_motion_level_labels[_config.idleRandomMovementLevel],
+                       _config.useHermesTts ? "hermes" : "sanotts");
         _is_done = true;
     }
 }

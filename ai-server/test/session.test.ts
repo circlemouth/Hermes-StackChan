@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
-import { inferStackChanEmotion, isIgnorableShortTranscript, isIgnorableTimeoutTranscript, readBargeInConfig, readEnvInt, readSpeechSegmentationConfig, readTurnControlConfig, Session, splitStackChanSpeechText } from '../src/session.ts'
+import { formatConversationLogText, inferStackChanEmotion, isIgnorableShortTranscript, isIgnorableTimeoutTranscript, readBargeInConfig, readEnvInt, readSpeechSegmentationConfig, readTtsProvider, readTurnControlConfig, Session, splitStackChanSpeechText } from '../src/session.ts'
 import type { LocalRmsVadConfig } from '../src/local_vad.ts'
 
 class MockWebSocket {
@@ -62,6 +62,55 @@ function pcm60ms(amplitude: number): Buffer {
 function dataBytesFromWav(wav: Buffer): number {
     return wav.length - 44
 }
+
+test('Children conversation logs contain only text length while other modes keep their format', () => {
+    const text = '非公開の会話\n住所や名前は保存しない'
+    assert.equal(formatConversationLogText(text, 'children_http'), `length=${text.length}`)
+    assert.equal(formatConversationLogText(text, ' CHILDREN_HTTP ', false), `length=${text.length}`)
+    assert.equal(formatConversationLogText(text, 'dashboard_ws'), `"${text}"`)
+    assert.equal(formatConversationLogText(text, 'stdio'), `"${text}"`)
+    assert.equal(formatConversationLogText(text, 'dashboard_ws', false), text)
+})
+
+test('readTtsProvider defaults to sanoTTS-jp and accepts explicit Hermes selection', () => {
+    assert.equal(readTtsProvider(undefined), 'sanotts')
+    assert.equal(readTtsProvider('sanotts'), 'sanotts')
+    assert.equal(readTtsProvider('unknown'), 'sanotts')
+    assert.equal(readTtsProvider(' HERMES '), 'hermes')
+})
+
+test('Session selects the TTS provider from device hello', async () => {
+    for (const [requested, expected] of [[undefined, 'sanotts'], ['hermes', 'hermes']] as const) {
+        const ws = new MockWebSocket()
+        const calls: string[] = []
+        const session = new Session(ws as never, {
+            registerDeviceSession: () => () => undefined,
+            hermes: {
+                submitPrompt: async () => '音声です。',
+                interrupt: async () => undefined,
+                dispose: async () => undefined,
+            },
+            synthesizeSanoText: async () => {
+                calls.push('sanotts')
+                return Buffer.from('sano wav')
+            },
+            synthesizeHermesText: async () => {
+                calls.push('hermes')
+                return Buffer.from('hermes wav')
+            },
+            encodeWavToOpusFrames: () => [],
+        })
+
+        session.handleMessage(JSON.stringify({ type: 'hello', version: 1, tts_provider: requested }))
+        await session.enqueueFollowup('話して')
+        await waitFor(() => calls.length === 1)
+
+        assert.deepEqual(calls, [expected])
+        assert.equal(jsonMessages(ws).find((message) => message['type'] === 'hello')?.['tts_provider'], expected)
+        assert.equal(session.getBridgeStatus().ttsProvider, expected)
+        session.close()
+    }
+})
 
 test('Session bridges audio turn through Hermes STT, LLM, TTS, and streams Opus back', async () => {
     const ws = new MockWebSocket()

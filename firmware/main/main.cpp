@@ -10,6 +10,7 @@
 #include <apps/apps.h>
 #include <apps/common/common.h>
 #include <hal/hal.h>
+#include <hal/diagnostics.h>
 #include <esp_log.h>
 #include <lvgl.h>
 
@@ -40,12 +41,19 @@ extern "C" void app_main(void)
     ui_hal::on_get_tick([]() { return GetHAL().millis(); });
 
     // Install apps
-    GetMooncake().installApp(std::make_unique<AppLauncher>());
+    auto launcher = std::make_unique<AppLauncher>();
+    auto* launcher_diagnostics = launcher.get();
+    GetMooncake().installApp(std::move(launcher));
     GetMooncake().installApp(std::make_unique<AppAiAgent>());
     GetMooncake().installApp(std::make_unique<AppAvatar>());
     GetMooncake().installApp(std::make_unique<AppEspnowControl>());
     GetMooncake().installApp(std::make_unique<AppDance>());
-    GetMooncake().installApp(std::make_unique<AppSetup>());
+    auto setup = std::make_unique<AppSetup>();
+    auto* setup_diagnostics = setup.get();
+    GetMooncake().installApp(std::move(setup));
+    if (!diagnostics::init(launcher_diagnostics, setup_diagnostics)) {
+        ESP_LOGW(TAG, "Local USB diagnostics unavailable");
+    }
 
     // Main loop
     while (1) {
@@ -57,10 +65,12 @@ extern "C" void app_main(void)
         if (GetHAL().isHermesStartRequested()) {
             break;
         }
+        diagnostics::process(); // Mainloop owns every queued UI action, outside LVGL lock.
     }
 
     // App destructors own LVGL objects, so tear Mooncake down while the LVGL
     // port is locked before handing the screen to Hermes.
+    diagnostics::markHermesHandoff(); // Reject UI requests before any app destruction.
     ESP_LOGI(TAG, "Mooncake teardown start");
     {
         LvglLockGuard lock;
