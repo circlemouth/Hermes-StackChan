@@ -108,11 +108,93 @@ export function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
     return Buffer.concat([header, pcm])
 }
 
+// Return PCM16 mono, never metadata or bytes outside the declared RIFF/data
+// bounds. TTS providers may emit extended headers, stereo or IEEE float WAVs.
 export function wavToPcm(wav: Buffer): { pcm: Buffer; sampleRate: number } {
-    const sampleRate = wav.readUInt32LE(24)
-    const dataIdx = wav.indexOf(Buffer.from('data'))
-    if (dataIdx === -1) throw new Error('WAV data chunk not found')
-    return { pcm: wav.subarray(dataIdx + 8), sampleRate }
+    if (wav.length < 12 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
+        throw new Error('Invalid RIFF/WAVE header')
+    }
+    const riffEnd = wav.readUInt32LE(4) + 8
+    if (riffEnd < 12 || riffEnd > wav.length) throw new Error('Truncated WAV RIFF container')
+    let fmt: Buffer | undefined
+    let data: Buffer | undefined
+    for (let offset = 12; offset < riffEnd;) {
+        if (offset + 8 > riffEnd) throw new Error('Truncated WAV chunk header')
+        const id = wav.toString('ascii', offset, offset + 4)
+        const size = wav.readUInt32LE(offset + 4)
+        const start = offset + 8
+        const end = start + size
+        const next = end + (size & 1)
+        if (next > riffEnd) throw new Error('Truncated WAV chunk or padding')
+        if (id === 'fmt ') {
+            if (fmt) throw new Error('Duplicate WAV fmt chunk')
+            fmt = wav.subarray(start, end)
+        } else if (id === 'data') {
+            if (data) throw new Error('Duplicate WAV data chunk')
+            data = wav.subarray(start, end)
+        }
+        offset = next
+    }
+    if (!fmt || fmt.length < 16) throw new Error('WAV fmt chunk missing or truncated')
+    if (!data) throw new Error('WAV data chunk not found')
+    let format = fmt.readUInt16LE(0)
+    const channels = fmt.readUInt16LE(2)
+    const sampleRate = fmt.readUInt32LE(4)
+    const byteRate = fmt.readUInt32LE(8)
+    const blockAlign = fmt.readUInt16LE(12)
+    const bits = fmt.readUInt16LE(14)
+    if (fmt.length !== 16 && (fmt.length < 18 || 18 + fmt.readUInt16LE(16) > fmt.length)) {
+        throw new Error('Invalid WAV fmt extension')
+    }
+    if (format === 0xfffe) {
+        // KSDATAFORMAT_SUBTYPE_PCM / IEEE_FLOAT, not an arbitrary GUID whose
+        // first two bytes happen to match a supported format tag.
+        if (fmt.length < 40 || fmt.readUInt16LE(16) < 22
+            || fmt.subarray(28, 40).toString('hex') !== '00001000800000aa00389b71') {
+            throw new Error('Unsupported WAV extensible format')
+        }
+        format = fmt.readUInt32LE(24)
+        const validBits = fmt.readUInt16LE(18)
+        if (validBits === 0 || validBits > bits || (format === 3 && validBits !== bits)) {
+            throw new Error('Invalid WAV valid sample bits')
+        }
+        const channelMask = fmt.readUInt32LE(20)
+        if (channelMask !== 0 && channelMask !== (channels === 1 ? 4 : 3)) {
+            throw new Error('Unsupported WAV channel layout')
+        }
+    }
+    if ((channels !== 1 && channels !== 2) || sampleRate < 8_000 || sampleRate > 384_000) {
+        throw new Error('Unsupported WAV channels or sample rate')
+    }
+    if (!((format === 1 && [8, 16, 24, 32].includes(bits)) || (format === 3 && [32, 64].includes(bits)))) {
+        throw new Error('Unsupported WAV sample format')
+    }
+    const sampleBytes = bits / 8
+    if (blockAlign !== channels * sampleBytes || byteRate !== sampleRate * blockAlign || data.length % blockAlign !== 0) {
+        throw new Error('Invalid WAV sample alignment or byte rate')
+    }
+    if (format === 1 && bits === 16 && channels === 1) return { pcm: data, sampleRate }
+
+    const frames = data.length / blockAlign
+    const pcm = Buffer.alloc(frames * 2)
+    for (let frame = 0; frame < frames; frame++) {
+        let sum = 0
+        for (let channel = 0; channel < channels; channel++) {
+            const offset = frame * blockAlign + channel * sampleBytes
+            let sample: number
+            if (format === 3) {
+                const value = bits === 32 ? data.readFloatLE(offset) : data.readDoubleLE(offset)
+                if (!Number.isFinite(value)) throw new Error('Invalid non-finite WAV float sample')
+                sample = Math.max(-1, Math.min(1, value)) * 32768
+            } else if (bits === 8) sample = (data[offset] - 128) * 256
+            else if (bits === 16) sample = data.readInt16LE(offset)
+            else if (bits === 24) sample = data.readIntLE(offset, 3) / 256
+            else sample = data.readInt32LE(offset) / 65536
+            sum += sample
+        }
+        pcm.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sum / channels))), frame * 2)
+    }
+    return { pcm, sampleRate }
 }
 
 function resamplePcm(pcm: Buffer, fromRate: number, toRate: number): Buffer {

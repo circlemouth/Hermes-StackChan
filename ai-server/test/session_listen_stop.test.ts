@@ -75,7 +75,7 @@ function fixture(t: TestContext, config = vadConfig) {
     capture.fastAckFailed = true
     t.after(() => {
         session.close()
-        assert.equal(unregister.mock.callCount(), 1)
+        assert.equal(unregister.mock.callCount(), 0, 'pre-hello fixtures are not device owners')
         for (const forbidden of [fetch, spawn, execFile]) assert.equal(forbidden.mock.callCount(), 0)
     })
     return {
@@ -134,7 +134,10 @@ async function assertTurn(f: Fixture, source: string, batchFrames?: number): Pro
     assert.equal(f.transcribe.mock.callCount(), 1)
     assert.equal(f.transcribe.mock.calls[0].arguments[0].subarray(0, 4).toString(), 'RIFF')
     assert.equal(f.submitPrompt.mock.callCount(), 1)
-    assert.deepEqual(f.submitPrompt.mock.calls[0].arguments, ['mock utterance'])
+    const promptArgs = f.submitPrompt.mock.calls[0].arguments as unknown as [string, { signal: AbortSignal; deadline: number }]
+    assert.equal(promptArgs[0], 'mock utterance')
+    assert.ok(promptArgs[1].signal instanceof AbortSignal)
+    assert.ok(Number.isFinite(promptArgs[1].deadline))
     assert.equal(f.synthesizeSano.mock.callCount(), 1)
     assert.equal(f.synthesizeHermes.mock.callCount(), 0)
     assert.equal(f.encode.mock.callCount(), 1)

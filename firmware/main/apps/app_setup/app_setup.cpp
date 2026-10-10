@@ -10,7 +10,7 @@
 #include <assets/assets.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
-#include <settings.h>
+#include <websocket_endpoint.h>
 
 using namespace mooncake;
 using namespace view;
@@ -49,20 +49,13 @@ void AppSetup::onOpen()
     // Volume
     std::string vol_label = fmt::format("Volume   {}%", (int)GetHAL().getSpeakerVolume());
 
-    // WebSocket URL — url_override 優先、なければ url を参照
-    Settings ws_settings("websocket", false);
-    std::string ws_url = ws_settings.GetString("url_override", "");
-    if (ws_url.empty()) ws_url = ws_settings.GetString("url", "");
-    std::string server_disp;
-    if (ws_url.empty()) {
-        server_disp = "URL missing";
-    } else {
-        size_t s = ws_url.find("://");
-        std::string host = (s != std::string::npos) ? ws_url.substr(s + 3) : ws_url;
-        size_t e = host.find_first_of(":/");
-        if (e != std::string::npos) host = host.substr(0, e);
-        if (host.length() > 15) host = host.substr(0, 13) + "..";
-        server_disp = host;
+    // Use the same validated endpoint as runtime; display only its redacted host.
+    const auto ws_url = GetEffectiveWebsocketUrl();
+    std::string server_disp = runtime_safety::WebsocketHost(ws_url);
+    if (server_disp.empty()) {
+        server_disp = "URL missing/invalid";
+    } else if (server_disp.length() > 15) {
+        server_disp = server_disp.substr(0, 13) + "..";
     }
     std::string server_label = fmt::format("Bridge  {}", server_disp);
     // ────────────────────────────────────────────────────────────
@@ -158,6 +151,7 @@ void AppSetup::onOpen()
     };
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     _menu_page = std::make_unique<view::SelectMenuPage>(_menu_sections);
 
@@ -168,6 +162,7 @@ void AppSetup::onOpen()
 void AppSetup::onRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
 
     if (_menu_page) {
         _menu_page->update();
@@ -196,6 +191,7 @@ void AppSetup::onRunning()
 bool AppSetup::diagnosticsShowSdPrompt()
 {
     LvglLockGuard lock;
+    if (!lock) return false;
     if (!_diagnostics_open) return false;
     if (_sd_config_worker) return _sd_config_worker->isInsertionPromptActive();
     if (_worker) return false; // Do not replace active provisioning/calibration workers.
@@ -210,18 +206,21 @@ bool AppSetup::diagnosticsShowSdPrompt()
 bool AppSetup::diagnosticsSdPromptActive() const
 {
     LvglLockGuard lock;
+    if (!lock) return false;
     return _diagnostics_open && _sd_config_worker && _sd_config_worker->isInsertionPromptActive();
 }
 
 bool AppSetup::diagnosticsRequestSdRead()
 {
     LvglLockGuard lock;
+    if (!lock) return false;
     return _diagnostics_open && _sd_config_worker && _sd_config_worker->requestConfirmedRead();
 }
 
 void AppSetup::diagnosticsCancelSdRead()
 {
     LvglLockGuard lock;
+    if (!lock) return;
     if (_diagnostics_open && _sd_config_worker) _sd_config_worker->cancelDiagnosticRead();
 }
 
@@ -230,6 +229,7 @@ void AppSetup::onClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     _diagnostics_open = false;
     _sd_config_worker = nullptr;

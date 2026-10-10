@@ -1,0 +1,165 @@
+diff --git a/platform/audio_codec_data_i2s.c b/platform/audio_codec_data_i2s.c
+--- a/platform/audio_codec_data_i2s.c
++++ b/platform/audio_codec_data_i2s.c
+@@ -36,6 +36,8 @@
+     bool                         out_disable_pending;
+     bool                         in_reconfig;
+     bool                         out_reconfig;
++    bool                         in_fmt_valid;
++    bool                         out_fmt_valid;
+     esp_codec_dev_sample_info_t  in_fs;
+     esp_codec_dev_sample_info_t  out_fs;
+     esp_codec_dev_sample_info_t  fs;
+@@ -564,8 +566,11 @@
+     int ret = ESP_CODEC_DEV_OK;
+     _i2s_lock(i2s_data, __func__);
+     if (dev_type == ESP_CODEC_DEV_TYPE_IN_OUT) {
+-        ret = _i2s_drv_enable(i2s_data, true, enable);
+-        ret = _i2s_drv_enable(i2s_data, false, enable);
++        int out_ret = _i2s_drv_enable(i2s_data, true, enable);
++        int in_ret = _i2s_drv_enable(i2s_data, false, enable);
++        if (out_ret == ESP_CODEC_DEV_OK) i2s_data->out_enable = enable;
++        if (in_ret == ESP_CODEC_DEV_OK) i2s_data->in_enable = enable;
++        ret = out_ret != ESP_CODEC_DEV_OK ? out_ret : in_ret;
+     } else {
+         bool playback = dev_type & ESP_CODEC_DEV_TYPE_OUT ? true : false;
+         i2s_data_t *paired = get_paired(i2s_data, playback);
+@@ -584,16 +589,16 @@
+         else {
+             ret = _i2s_drv_enable(i2s_data, playback, enable);
+             // Disable TX when RX disable if TX disable is pending
+-            if (enable == false) {
++            if (enable == false && ret == ESP_CODEC_DEV_OK) {
+                 if (playback == false && paired && paired->out_disable_pending)  {
+                     ret = _i2s_drv_enable(paired, true, enable);
+-                    paired->out_disable_pending = false;
++                    if (ret == ESP_CODEC_DEV_OK) paired->out_disable_pending = false;
+                 }
+                 if (playback == true && paired && paired->in_disable_pending)  {
+                     ret = _i2s_drv_enable(paired, false, enable);
+-                    paired->in_disable_pending = false;
+-                }
+-            } else {
++                    if (ret == ESP_CODEC_DEV_OK) paired->in_disable_pending = false;
++                }
++            } else if (enable && ret == ESP_CODEC_DEV_OK) {
+                 // Force to clear pending flags if enable again
+                 if (playback) {
+                     i2s_data->out_disable_pending = false;
+@@ -603,20 +608,27 @@
+             }
+         }
+     }
+-    if (dev_type & ESP_CODEC_DEV_TYPE_IN) {
+-        i2s_data->in_enable = enable;
+-    }
+-    if (dev_type & ESP_CODEC_DEV_TYPE_OUT) {
+-        i2s_data->out_enable = enable;
++    if (ret == ESP_CODEC_DEV_OK && dev_type != ESP_CODEC_DEV_TYPE_IN_OUT) {
++        if (dev_type & ESP_CODEC_DEV_TYPE_IN) i2s_data->in_enable = enable;
++        if (dev_type & ESP_CODEC_DEV_TYPE_OUT) i2s_data->out_enable = enable;
+     }
+     _i2s_unlock(i2s_data);
+     return ret;
+ }
+ 
++#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
++static bool _i2s_same_fmt(const esp_codec_dev_sample_info_t *a, const esp_codec_dev_sample_info_t *b)
++{
++    return a->bits_per_sample == b->bits_per_sample && a->channel == b->channel &&
++           a->channel_mask == b->channel_mask && a->sample_rate == b->sample_rate &&
++           a->mclk_multiple == b->mclk_multiple;
++}
++#endif
++
+ static int _i2s_data_set_fmt(const audio_codec_data_if_t *h, esp_codec_dev_type_t dev_type, esp_codec_dev_sample_info_t *fs)
+ {
+     i2s_data_t *i2s_data = (i2s_data_t *) h;
+-    if (i2s_data == NULL) {
++    if (i2s_data == NULL || fs == NULL) {
+         return ESP_CODEC_DEV_INVALID_ARG;
+     }
+     if (i2s_data->is_open == false) {
+@@ -644,14 +656,25 @@
+         return ESP_CODEC_DEV_NOT_SUPPORT;
+     }
+ #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+-    int ret;
++    int ret = ESP_CODEC_DEV_OK;
+     _i2s_lock(i2s_data, __func__);
+-    // disable internally
++    // Same-format reopen must not stop a duplex master clock feeding live RX.
++    // Only successful previous configuration is reusable, never a failed cache.
++    bool unchanged = !i2s_data->in_reconfig && !i2s_data->out_reconfig &&
++        (!(dev_type & ESP_CODEC_DEV_TYPE_OUT) || (i2s_data->out_fmt_valid && _i2s_same_fmt(&i2s_data->out_fs, fs))) &&
++        (!(dev_type & ESP_CODEC_DEV_TYPE_IN) || (i2s_data->in_fmt_valid && _i2s_same_fmt(&i2s_data->in_fs, fs)));
++    if ((dev_type & ESP_CODEC_DEV_TYPE_IN_OUT) && unchanged) {
++        _i2s_unlock(i2s_data);
++        return ESP_CODEC_DEV_OK;
++    }
++    // disable internally only when configuration really changes
+     if (dev_type & ESP_CODEC_DEV_TYPE_OUT) {
+-        _i2s_drv_enable(i2s_data, true, false);
++        ret = _i2s_drv_enable(i2s_data, true, false);
++        if (ret != ESP_CODEC_DEV_OK) goto fmt_done;
+     }
+     if (dev_type & ESP_CODEC_DEV_TYPE_IN) {
+-        _i2s_drv_enable(i2s_data, false, false);
++        ret = _i2s_drv_enable(i2s_data, false, false);
++        if (ret != ESP_CODEC_DEV_OK) goto fmt_done;
+     }
+     if ((dev_type & ESP_CODEC_DEV_TYPE_IN) != 0 &&
+         (dev_type & ESP_CODEC_DEV_TYPE_OUT) != 0) {
+@@ -660,9 +683,19 @@
+         memcpy(&i2s_data->in_fs, fs, sizeof(esp_codec_dev_sample_info_t));
+         memcpy(&i2s_data->out_fs, fs, sizeof(esp_codec_dev_sample_info_t));
+         ret = set_fs(i2s_data, true, true);
+-        ret = set_fs(i2s_data, false, true);
++        if (ret == ESP_CODEC_DEV_OK) ret = set_fs(i2s_data, false, true);
+     } else {
+         ret = check_fs_compatible(i2s_data, dev_type & ESP_CODEC_DEV_TYPE_OUT ? true : false, fs);
++    }
++fmt_done:
++    if (ret == ESP_CODEC_DEV_OK) {
++        if (dev_type & ESP_CODEC_DEV_TYPE_OUT) i2s_data->out_fmt_valid = true;
++        if (dev_type & ESP_CODEC_DEV_TYPE_IN) i2s_data->in_fmt_valid = true;
++    } else {
++        // Compatibility reconfiguration can touch either paired direction.
++        i2s_data->in_fmt_valid = i2s_data->out_fmt_valid = false;
++        i2s_data_t *paired = get_paired(i2s_data, dev_type & ESP_CODEC_DEV_TYPE_OUT ? true : false);
++        if (paired) paired->in_fmt_valid = paired->out_fmt_valid = false;
+     }
+     _i2s_unlock(i2s_data);
+     return ret;
+@@ -708,13 +741,13 @@
+     if (i2s_data->in_reconfig) {
+         memset(data, 0, size);
+         esp_codec_dev_sleep(10);
+-        return ESP_CODEC_DEV_OK;
++        return ESP_CODEC_DEV_WRONG_STATE;
+     }
+     int ret = i2s_channel_read(rx_chan, data, size, &bytes_read, DEFAULT_WAIT_TIMEOUT);
+ #else
+     int ret = i2s_read(i2s_data->port, data, size, &bytes_read, portMAX_DELAY);
+ #endif
+-    return ret == 0 ? ESP_CODEC_DEV_OK : ESP_CODEC_DEV_DRV_ERR;
++    return ret == 0 && bytes_read == (size_t)size ? ESP_CODEC_DEV_OK : ESP_CODEC_DEV_DRV_ERR;
+ }
+ 
+ static int _i2s_data_write(const audio_codec_data_if_t *h, uint8_t *data, int size)
+@@ -734,13 +767,13 @@
+     }
+     if (i2s_data->out_reconfig) {
+         esp_codec_dev_sleep(10);
+-        return ESP_CODEC_DEV_OK;
++        return ESP_CODEC_DEV_WRONG_STATE;
+     }
+     int ret = i2s_channel_write(tx_chan, data, size, &bytes_written, DEFAULT_WAIT_TIMEOUT);
+ #else
+     int ret = i2s_write(i2s_data->port, data, size, &bytes_written, portMAX_DELAY);
+ #endif
+-    return ret == 0 ? ESP_CODEC_DEV_OK : ESP_CODEC_DEV_DRV_ERR;
++    return ret == 0 && bytes_written == (size_t)size ? ESP_CODEC_DEV_OK : ESP_CODEC_DEV_DRV_ERR;
+ }
+ 
+ static int _i2s_data_close(const audio_codec_data_if_t *h)

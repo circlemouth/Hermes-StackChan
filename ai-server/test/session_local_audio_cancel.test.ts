@@ -135,6 +135,10 @@ function fixture(t: TestContext, options: { nonemptyFrames?: boolean; reply?: st
     const errors = t.mock.method(console, 'error', () => undefined)
     const warnings = t.mock.method(console, 'warn', () => undefined)
     const sent: Array<string | Buffer> = []
+    // Model the paired firmware contract: restore retires admission, and only
+    // a subsequent tts.start permits fallback packets to reach the device.
+    let deviceAdmission = false
+    const admittedFrames: string[] = []
     let synthesizedSamples = 0
     const sano = t.mock.fn(async (_text: string, synthesisOptions: SanoTtsOptions = {}): Promise<Buffer> => {
         assert.ok(synthesisOptions.signal)
@@ -143,7 +147,16 @@ function fixture(t: TestContext, options: { nonemptyFrames?: boolean; reply?: st
     const encode = t.mock.fn((wav: Buffer, _leadSilenceMs = 0) => options.nonemptyFrames ? mockFrames(wav.readInt16LE(44)) : [])
     const decodeFrame = t.mock.fn((_opus: Buffer) => Buffer.alloc(1920))
     const hermesTts = t.mock.fn(async (_text: string) => mockWav())
-    const session = new Session({ send: (data: string | Buffer) => { sent.push(data) } } as never, {
+    const session = new Session({ send: (data: string | Buffer) => {
+        sent.push(data)
+        if (Buffer.isBuffer(data)) {
+            if (deviceAdmission) admittedFrames.push(data.subarray(4).toString('hex'))
+        } else {
+            const message = JSON.parse(data) as Record<string, unknown>
+            if (message['type'] === 'tts' && message['state'] === 'start') deviceAdmission = true
+            if (message['type'] === 'tts' && message['state'] === 'stop') deviceAdmission = false
+        }
+    } } as never, {
         registerDeviceSession: () => () => undefined,
         createInputOpusDecoder: () => ({ decodeFrame: () => Buffer.alloc(1920), dispose: () => undefined }),
         decodeOpusFrames: () => Buffer.alloc(1920),
@@ -165,10 +178,11 @@ function fixture(t: TestContext, options: { nonemptyFrames?: boolean; reply?: st
     const json = () => sent.filter((value): value is string => typeof value === 'string').map(value => JSON.parse(value) as Record<string, unknown>)
     const volumes = () => json().filter(value => value['type'] === 'mcp').map(value => value as unknown as ToolMessage)
         .filter(value => value.payload.params.name === 'self.robot.set_speaker_volume')
-        .map(value => ({ id: value.payload.id, volume: value.payload.params.arguments.volume }))
+        .map(value => ({ id: value.payload.id, volume: value.payload.params.arguments.volume, lease_id: (value.payload.params.arguments as Record<string, unknown>).lease_id }))
     const ackResult = async (index: number, result: unknown) => {
         const tool = volumes()[index]
         assert.ok(tool, `volume request ${index} must exist`)
+        if (tool.volume !== 0) deviceAdmission = false
         session.handleMessage(JSON.stringify({ type: 'mcp', payload: { id: tool.id, result } }))
         await flush()
     }
@@ -180,7 +194,7 @@ function fixture(t: TestContext, options: { nonemptyFrames?: boolean; reply?: st
             await flush()
         } else {
             await ackResult(index, {
-                content: [{ type: 'text', text: JSON.stringify({ speaker_volume: tool.volume, permanent: false }) }],
+                content: [{ type: 'text', text: JSON.stringify({ speaker_volume: tool.volume, permanent: false, lease_id: tool.lease_id, success: true }) }],
                 isError: false,
             })
         }
@@ -212,7 +226,7 @@ function fixture(t: TestContext, options: { nonemptyFrames?: boolean; reply?: st
         assert.equal(forbiddenHttp.mock.callCount(), 0)
         assert.equal(files.size, 0, 'all created mock WAVs cleaned up after reap')
     })
-    return { session, capture, sent, json, volumes, ack, ackResult, resolveTarget, start, abort, quiet, execCalls, playCalls, playedWavs, sano, hermesTts, encode, decodeFrame, warnings, errors, logs, files, fileSetup }
+    return { session, capture, sent, admittedFrames, json, volumes, ack, ackResult, resolveTarget, start, abort, quiet, execCalls, playCalls, playedWavs, sano, hermesTts, encode, decodeFrame, warnings, errors, logs, files, fileSetup }
 }
 
 type Fixture = ReturnType<typeof fixture>
@@ -301,7 +315,6 @@ test('late mute ACK serializes old restore before new mute and cannot publish an
     assert.deepEqual(f.volumes().map(value => value.volume), [0])
     f.abort()
     await f.start('New greeting')
-    await f.resolveTarget()
     const current = f.capture.activeTtsPlayback!
     assert.notEqual(current, old)
     assert.deepEqual(f.volumes().map(value => value.volume), [0], 'new mute waits for old ACK')
@@ -309,6 +322,7 @@ test('late mute ACK serializes old restore before new mute and cannot publish an
     assert.equal(old.localOutputTarget, undefined)
     assert.deepEqual(f.volumes().map(value => value.volume), [0, 62])
     await f.ack(1)
+    await f.resolveTarget()
     assert.deepEqual(f.volumes().map(value => value.volume), [0, 62, 0])
     assert.equal(f.capture.localSpeakerOwner, current)
     assert.equal(current.controller.signal.aborted, false)
@@ -445,12 +459,12 @@ test('new M5 fallback waits for old mute and restore acknowledgments', async t =
     await f.resolveTarget()
     f.abort()
     await f.start('New M5 greeting')
-    await f.resolveTarget(f.execCalls.length - 1, false)
     assert.equal(f.sano.mock.callCount(), 0)
     await f.ack(0)
     assert.equal(f.sano.mock.callCount(), 0)
     assert.deepEqual(f.volumes().map(value => value.volume), [0, 62])
     await f.ack(1)
+    await f.resolveTarget(f.execCalls.length - 1, false)
     assert.equal(f.sano.mock.callCount(), 1)
     assert.equal(f.playCalls.length, 0)
     assert.equal(f.session.getBridgeStatus().state, 'idle')
@@ -541,6 +555,25 @@ test('native cached ACK omits M5 lead but still waits for native completion and 
     f.abort(); await f.ack(1)
 })
 
+test('R15 cached fast acknowledgement fallback also suppresses the original suffix', async t => {
+    const f = fixture(t, { nonemptyFrames: true })
+    f.capture.fastAckFailed = false
+    f.capture.fastAckEntries = [{ text: 'Mock cached ACK。', wav: mockWav(7), frames: mockFrames(7), localFrames: mockFrames(7) }]
+    f.session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'realtime' }))
+    f.session.handleMessage(wrapOpusPayload(Buffer.from([0x71]), 3))
+    f.session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
+    await flush(); await f.resolveTarget(); await f.ack(0)
+    f.playCalls[0].child.emit('close', 1); await flush()
+    assert.deepEqual(f.volumes().map(v => v.volume), [0])
+    t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush()
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), ['frame:0711'])
+    assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 1)
+    await f.ack(1); await sendAllAvatarFrames(t)
+    assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 2, 'fresh admission follows verified restore')
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), ['frame:0711', 'frame:0711', 'frame:0722'])
+    f.abort()
+})
+
 for (const failure of ['missing target', 'unverified mute']) {
     test(`cached ACK retains full M5 lead after ${failure}`, async t => {
         const f = fixture(t, { nonemptyFrames: true })
@@ -553,7 +586,8 @@ for (const failure of ['missing target', 'unverified mute']) {
         await flush(); await f.resolveTarget(0, failure !== 'missing target')
         if (failure === 'unverified mute') { await f.ackResult(0, true); await f.ack(1) }
         await sendAllAvatarFrames(t)
-        assert.deepEqual(outputOrder(f), ['start:', 'sentence_start:0', 'frame:0000', 'frame:0000', 'frame:0000'])
+        assert.deepEqual(outputOrder(f), ['start:', 'sentence_start:0', ...(failure === 'unverified mute' ? ['start:'] : []), 'frame:0000', 'frame:0000', 'frame:0000'])
+        assert.deepEqual(f.admittedFrames, ['0000', '0000', '0000'])
         assert.equal(f.playCalls.length, 0)
         assert.equal(f.sano.mock.callCount(), 0)
         assert.equal(frames.length, 12)
@@ -697,10 +731,10 @@ test('failed/late mute ACK still queues restoration and does not poison the next
     await f.resolveTarget()
     f.abort()
     await f.start('New greeting')
-    await f.resolveTarget()
     await f.ack(0, 'private mute failure')
     assert.deepEqual(f.volumes().map(value => value.volume), [0, 62])
     await f.ack(1)
+    await f.resolveTarget()
     await f.ack(2)
     assert.equal(f.playCalls.length, 1)
     assert.equal(f.session.getBridgeStatus().state, 'processing')
@@ -765,7 +799,9 @@ for (const { name, result } of unverifiedMuteAcks) {
         assert.deepEqual(f.volumes().map(value => value.volume), [0, 62], 'one restore, no mute retry')
         await f.ack(1)
         await sendAllAvatarFrames(t)
-        assert.deepEqual(outputOrder(f), ['start:', 'sentence_start:0', 'frame:0111', 'frame:0122', 'sentence_end:0', 'stop:'])
+        assert.deepEqual(outputOrder(f), ['start:', 'sentence_start:0', 'start:', 'frame:0111', 'frame:0122', 'sentence_end:0', 'stop:'])
+        assert.deepEqual(f.admittedFrames, ['0111', '0122'], 'fresh admission precedes every fallback frame')
+        assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 1)
         assert.equal(f.playCalls.length, 0)
         assert.equal(f.capture.localSpeakerOwner, undefined)
         assert.equal(f.session.getBridgeStatus().state, 'idle')
@@ -782,7 +818,7 @@ for (const { name, result } of [
     { name: 'wrong restore volume', result: { speaker_volume: 10 } },
     { name: 'malformed restore content', result: { content: [{ type: 'text', text: 'private malformed restore ACK' }], isError: false } },
 ]) {
-    test(`${name} warns without false success or blind retry`, async t => {
+    test(`${name} retains ownership until bounded restore retry is verified`, async t => {
         const f = fixture(t)
         await f.start()
         await f.resolveTarget()
@@ -791,24 +827,118 @@ for (const { name, result } of [
         await flush()
         await f.ackResult(1, result)
         assert.equal(f.logs.mock.calls.some(call => call.arguments.some(value => String(value).includes('M5 speaker restored'))), false)
-        assert.equal(f.warnings.mock.callCount(), 1)
-        assert.equal(f.warnings.mock.calls[0].arguments[0].includes('failed to restore M5 speaker'), true)
+        assert.ok(f.capture.localSpeakerOwner, 'unverified restore retains responsibility')
+        assert.deepEqual(f.volumes().map(value => value.volume), [0, 62, 62])
+        await f.ack(2)
         assert.equal(f.capture.localSpeakerOwner, undefined)
         assert.equal(f.session.getBridgeStatus().state, 'idle')
-        assert.deepEqual(f.volumes().map(value => value.volume), [0, 62])
         assert.equal([...f.logs.mock.calls, ...f.warnings.mock.calls].some(call => call.arguments.some(value => String(value).includes('private'))), false)
         await f.start('Next verified local greeting')
         await f.resolveTarget()
-        await f.ack(2)
+        await f.ack(3)
         assert.equal(f.playCalls.length, 2, 'the ownership queue remains reusable')
         f.playCalls[1].child.emit('close', 0)
         await flush()
-        await f.ack(3)
-        assert.equal(f.logs.mock.calls.filter(call => call.arguments.some(value => String(value).includes('M5 speaker restored volume=62'))).length, 1)
-        assert.deepEqual(f.volumes().map(value => value.volume), [0, 62, 0, 62])
-        assert.equal(f.warnings.mock.callCount(), 1)
+        await f.ack(4)
+        assert.equal(f.logs.mock.calls.filter(call => call.arguments.some(value => String(value).includes('M5 speaker restored volume=62'))).length, 2)
+        assert.deepEqual(f.volumes().map(value => value.volume), [0, 62, 62, 0, 62])
+        assert.equal(f.warnings.mock.callCount(), 0)
     })
 }
+
+test('R15 early local failure stops the muted suffix, resets device audio, and replays one whole sentence', async t => {
+    const f = fixture(t, { nonemptyFrames: true })
+    await f.start(); await f.resolveTarget(); await f.ack(0)
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), ['frame:0111'])
+    f.playCalls[0].child.emit('close', 1); await flush()
+    assert.deepEqual(f.volumes().map(v => v.volume), [0], 'do not unmute during original frame loop')
+    t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush()
+    assert.deepEqual(f.volumes().map(v => v.volume), [0, 62])
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), ['frame:0111'])
+    assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 1)
+    await f.ack(1); await sendAllAvatarFrames(t)
+    assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 2, 'fresh admission follows verified restore')
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), ['frame:0111', 'frame:0111', 'frame:0122'])
+    assert.equal(f.sano.mock.callCount(), 1); assert.equal(f.capture.localSpeakerOwner, undefined)
+})
+
+test('R15 canceled fallback cannot reopen TTS admission after late restore ACK', async t => {
+    const f = fixture(t, { nonemptyFrames: true })
+    await f.start(); await f.resolveTarget(); await f.ack(0)
+    f.playCalls[0].child.emit('close', 1); await flush()
+    t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush()
+    const framesBeforeRestore = outputOrder(f).filter(v => v.startsWith('frame:'))
+    f.abort(); await flush(); await f.ack(1)
+    t.mock.timers.tick(1000); await flush()
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), framesBeforeRestore)
+    assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, 1, 'only the pre-restore cancellation/reset was sent')
+    assert.equal(f.capture.localSpeakerOwner, undefined)
+    assert.equal(f.errors.mock.callCount(), 0)
+    assert.equal(f.warnings.mock.callCount(), 1, 'the deliberate player failure is reported once')
+})
+
+test('R14 renewal failure awaits local reap before verified unmute and whole-sentence replay', async t => {
+    const f = fixture(t, { nonemptyFrames: true })
+    f.encode.mock.mockImplementation(wav => [1, 2, 3].map(index => Buffer.from([wav[44], index])))
+    await f.start(); await f.resolveTarget(); await f.ack(0)
+    t.mock.timers.tick(10000); await flush(); await f.ack(1, 'private renewal failure')
+    assert.equal(f.playCalls[0].kill.mock.callCount(), 1)
+    assert.deepEqual(f.volumes().map(v => v.volume), [0, 0], 'restore must wait for local close/reap')
+    f.playCalls[0].child.emit('close', null); await flush()
+    t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush()
+    assert.deepEqual(f.volumes().map(v => v.volume), [0, 0, 62])
+    const beforeRestore = outputOrder(f).filter(v => v.startsWith('frame:'))
+    assert.deepEqual(beforeRestore, ['frame:0101', 'frame:0102'], 'no original suffix after renewal failure')
+    await f.ack(2)
+    for (let i = 0; i < 3; i++) { t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush() }
+    assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')).slice(beforeRestore.length), ['frame:0101', 'frame:0102', 'frame:0103'])
+    assert.equal(f.capture.localSpeakerOwner, undefined)
+})
+
+for (const segment of ['initial', 'next']) for (const cancel of [false, true]) {
+    test(`R14 ${segment} synthesis resolving during renewal restore ${cancel ? 'cannot reopen after cancel' : 'waits for fresh fallback admission'}`, async t => {
+        const f = fixture(t, { nonemptyFrames: true, reply: segment === 'next' ? 'First。Second。' : 'Second。' })
+        const pending = deferred<Buffer>()
+        f.sano.mock.mockImplementation(async text => text.startsWith('Second') ? pending.promise : mockWav(1))
+        await f.start(); await f.resolveTarget(); await f.ack(0)
+        if (segment === 'next') {
+            f.playCalls[0].child.emit('close', 0)
+            await sendAllAvatarFrames(t)
+        }
+        const before = segment === 'next' ? ['frame:0111', 'frame:0122'] : []
+        assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), before)
+        t.mock.timers.tick(10000); await flush(); await f.ack(1, 'private renewal rejection')
+        assert.deepEqual(f.volumes().map(v => v.volume), [0, 0, 62])
+        pending.resolve(mockWav(2)); await flush()
+        t.mock.timers.tick(OUTPUT_FRAME_DURATION_MS); await flush()
+        assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), before, 'no frames while restoration is pending')
+        if (cancel) { f.abort(); await flush() }
+        await f.ack(2); await sendAllAvatarFrames(t)
+        assert.deepEqual(outputOrder(f).filter(v => v.startsWith('frame:')), cancel ? before : [...before, 'frame:0211', 'frame:0222'])
+        assert.equal(f.json().filter(v => v['type'] === 'tts' && v['state'] === 'start' && v['reset'] === true).length, cancel ? 0 : 1)
+        assert.deepEqual(f.admittedFrames, (cancel ? before : [...before, 'frame:0211', 'frame:0222']).map(v => v.slice(6)), 'restore must not strand the next sentence in retired admission')
+        assert.equal(f.capture.localSpeakerOwner, undefined)
+        assert.equal(f.playCalls.length, segment === 'next' ? 1 : 0, 'never start a native player after renewal failure')
+        f.quiet()
+    })
+}
+
+test('R14 expired/released lease status clears responsibility without overwriting permanent user volume', async t => {
+    const f = fixture(t)
+    await f.start(); await f.resolveTarget(); await f.ack(0)
+    f.playCalls[0].child.emit('close', 0); await flush()
+    await f.ack(1, 'lease already expired'); await f.ack(2, 'lease already expired')
+    const statusRequest = f.json().filter(v => v['type'] === 'mcp').map(v => v as unknown as ToolMessage)
+        .find(v => v.payload.params.name === 'self.robot.get_status')!
+    assert.ok(statusRequest)
+    f.session.handleMessage(JSON.stringify({ type: 'mcp', payload: { id: statusRequest.payload.id, result: {
+        content: [{ type: 'text', text: JSON.stringify({ speaker_volume: 47, lease_active: false, lease_id: '' }) }], isError: false,
+    } } }))
+    await flush(); assert.equal(f.capture.localSpeakerOwner, undefined)
+    await f.start('Next greeting'); await f.resolveTarget(); await f.ack(3)
+    f.playCalls[1].child.emit('close', 0); await flush(); await f.ack(4)
+    assert.deepEqual(f.volumes().map(v => v.volume), [0, 62, 62, 0, 62], 'no blind application of saved fallback volume')
+})
 
 test('active mute failure restores M5 before fallback and leaves the volume queue reusable', async t => {
     const f = fixture(t)

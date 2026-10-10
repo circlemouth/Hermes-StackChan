@@ -4,11 +4,21 @@ const DEFAULT_URL = 'http://127.0.0.1:9188'
 const MAX_BODY_CHARS = 1_048_576
 
 type RecordValue = Record<string, unknown>
+type RequestAuthorization = { cookie?: string; csrf?: string }
 type Turn = {
     controller: AbortController
     failure?: Error
     setup?: Promise<string>
+    sessionId?: string
+    cancellation?: Promise<void>
     timer?: ReturnType<typeof setTimeout>
+    deadline: number
+}
+
+export type ChildrenOperationOptions = {
+    signal?: AbortSignal
+    /** Absolute Unix time in milliseconds. */
+    deadline?: number
 }
 
 export type ChildrenHermesOptions = {
@@ -26,6 +36,34 @@ function fail(message: string): ChildrenError { return new ChildrenError(message
 function record(value: unknown): value is RecordValue {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+function operationScope(options: ChildrenOperationOptions, timeoutMs: number) {
+    if (options.deadline !== undefined && !Number.isFinite(options.deadline)) throw fail('Invalid children Hermes deadline')
+    const controller = new AbortController()
+    const deadline = Math.min(options.deadline ?? Infinity, Date.now() + timeoutMs)
+    const onAbort = () => controller.abort()
+    const timer = setTimeout(onAbort, Math.max(0, deadline - Date.now()))
+    timer.unref()
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted || deadline <= Date.now()) onAbort()
+    return {
+        controller, signal: controller.signal, deadline,
+        close: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', onAbort) },
+    }
+}
+
+// An existing single-flight authorization request may have another caller's
+// signal. Each waiter still observes its own cancellation/absolute deadline.
+function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => { signal.removeEventListener('abort', onAbort); reject(fail('Children Hermes operation cancelled or timed out')) }
+        signal.addEventListener('abort', onAbort, { once: true })
+        promise.then((value) => { signal.removeEventListener('abort', onAbort); resolve(value) }, (error) => {
+            signal.removeEventListener('abort', onAbort); reject(error)
+        })
+        if (signal.aborted) onAbort()
+    })
+}
+
 function duration(value: number, maximum: number): number {
     if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
         throw fail('Invalid children Hermes timeout configuration')
@@ -144,8 +182,11 @@ export class ChildrenHttpHermesClient {
     private heartbeatTimer?: ReturnType<typeof setTimeout>
     private heartbeatTask?: Promise<void>
     private sessionFailure?: Error
+    private sessionRetirementTask?: Promise<void>
     private authorizationTask?: Promise<void>
+    private authorizationSignal?: AbortSignal
     private readonly audioControllers = new Set<AbortController>()
+    private readonly setupTasks = new Set<Promise<string>>()
 
     constructor(options: ChildrenHermesOptions = {}) {
         this.url = normalizeChildrenHermesUrl(options.url ?? process.env.HERMES_CHILDREN_URL ?? DEFAULT_URL)
@@ -159,36 +200,49 @@ export class ChildrenHttpHermesClient {
         }
     }
 
-    async submitPrompt(prompt: string): Promise<string> {
+    async submitPrompt(prompt: string, options: ChildrenOperationOptions = {}): Promise<string> {
         let result = ''
-        for await (const event of this.streamPrompt(prompt)) {
+        for await (const event of this.streamPrompt(prompt, options)) {
             if (event.type === 'delta') result += event.text
             else if (event.text !== undefined) result = event.text
         }
         return result
     }
 
-    async *streamPrompt(prompt: string): AsyncGenerator<HermesPromptStreamEvent> {
+    async *streamPrompt(prompt: string, options: ChildrenOperationOptions = {}): AsyncGenerator<HermesPromptStreamEvent> {
         if (this.disposed) throw fail('Children Hermes client disposed')
-        if (this.sessionFailure) throw this.sessionFailure
         if (this.active) throw fail('Children Hermes turn already active')
         if (typeof prompt !== 'string' || !prompt.trim() || [...prompt.trim()].length > 16_384) {
             throw fail('Invalid children Hermes prompt')
         }
-        const turn: Turn = { controller: new AbortController() }
-        this.active = turn
-        turn.timer = setTimeout(() => {
-            turn.failure = fail('Children Hermes turn timed out')
+        if (options.deadline !== undefined && !Number.isFinite(options.deadline)) throw fail('Invalid children Hermes deadline')
+        const deadline = Math.min(options.deadline ?? Infinity, Date.now() + this.turnTimeoutMs)
+        if (options.signal?.aborted) throw fail('Children Hermes turn cancelled')
+        if (deadline <= Date.now()) throw fail('Children Hermes turn timed out')
+        const turn: Turn = { controller: new AbortController(), deadline }
+        const onAbort = () => {
+            turn.failure ??= fail('Children Hermes turn cancelled')
             turn.controller.abort()
-        }, this.turnTimeoutMs)
+        }
+        this.active = turn
+        options.signal?.addEventListener('abort', onAbort, { once: true })
+        if (options.signal?.aborted) onAbort()
+        turn.timer = setTimeout(() => {
+            turn.failure ??= fail('Children Hermes turn timed out')
+            turn.controller.abort()
+        }, Math.max(1, deadline - Date.now()))
         turn.timer.unref()
         let complete = false
         try {
-            await this.cancelTask
-            // Setup has its own bounded timeout, not the turn abort signal: if
-            // close/interrupt races session creation, we must learn and close its ID.
-            turn.setup = this.ensureSession()
-            const sessionId = await turn.setup
+            if (this.cancelTask) await waitFor(this.cancelTask.catch(() => undefined), turn.controller.signal)
+            // Creation keeps a bounded background request to learn/close late
+            // IDs, but its caller observes cancellation and the turn deadline now.
+            if (turn.failure) throw turn.failure
+            turn.setup = this.ensureSession({ signal: turn.controller.signal, deadline }, turn)
+            const setup = turn.setup
+            this.setupTasks.add(setup)
+            void setup.then(() => this.setupTasks.delete(setup), () => this.setupTasks.delete(setup))
+            const sessionId = await waitFor(turn.setup, turn.controller.signal)
             this.checkTurn(turn)
             const response = await this.request(`/api/session/${sessionId}/turn`, 'POST', { text: prompt }, turn.controller.signal)
             let emittedChars = 0
@@ -218,11 +272,12 @@ export class ChildrenHttpHermesClient {
             throw fail('Children Hermes request failed')
         } finally {
             clearTimeout(turn.timer)
+            options.signal?.removeEventListener('abort', onAbort)
             turn.controller.abort()
             // Consumer break, timeout, parse failure and network EOF also stop
             // the worker; aborting fetch alone is not sufficient for cancellation.
-            if (!complete && this.sessionId && !this.disposed) {
-                await this.cancelSession().catch(() => undefined)
+            if (!complete && !this.disposed) {
+                await this.cancelTurn(turn).catch(() => undefined)
             }
             if (this.active === turn) this.active = undefined
         }
@@ -234,10 +289,16 @@ export class ChildrenHttpHermesClient {
             turn.failure = fail('Children Hermes turn cancelled')
             turn.controller.abort()
             clearTimeout(turn.timer)
-            await turn.setup?.catch(() => undefined)
         }
         if (this.disposed) return
-        await this.cancelSession()
+        try {
+            if (turn) await this.cancelTurn(turn)
+            else await this.cancelSession()
+        } finally {
+            // Release ownership even when the generator is parked on a token
+            // awaiting TTS. Its later finally shares this exact cancellation.
+            if (this.active === turn) this.active = undefined
+        }
     }
 
     async dispose(): Promise<void> {
@@ -254,12 +315,13 @@ export class ChildrenHttpHermesClient {
         this.disposeTask = (async () => {
             try {
                 await turn?.setup?.catch(() => undefined)
+                await Promise.allSettled([...this.setupTasks])
                 await this.authorizationTask?.catch(() => undefined)
-                await this.heartbeatTask
+                await this.heartbeatTask?.catch(() => undefined)
                 await this.cancelTask?.catch(() => undefined)
                 if (this.sessionId) {
                     await this.cancelSession().catch(() => undefined)
-                    await this.jsonRequest(`/api/session/${this.sessionId}/close`, 'POST', {})
+                    await this.jsonRequest(`/api/session/${this.sessionId}/close`, 'POST', {}).catch(() => undefined)
                 }
             } finally {
                 this.stopHeartbeat()
@@ -273,6 +335,10 @@ export class ChildrenHttpHermesClient {
     }
 
     private checkTurn(turn: Turn): void {
+        if (!turn.failure && turn.deadline <= Date.now()) {
+            turn.failure = fail('Children Hermes turn timed out')
+            turn.controller.abort()
+        }
         if (turn.failure) throw turn.failure
         if (this.disposed) throw fail('Children Hermes client disposed')
         if (this.sessionFailure) throw this.sessionFailure
@@ -289,25 +355,68 @@ export class ChildrenHttpHermesClient {
         }
     }
 
-    async ensureVoiceEnabled(): Promise<void> {
+    async ensureVoiceEnabled(options: ChildrenOperationOptions = {}): Promise<void> {
         if (this.disposed) throw fail('Children Hermes client disposed')
-        if (this.authorizationTask) return await this.authorizationTask
-        this.authorizationTask = this.refreshAuthorization()
-        try { await this.authorizationTask } finally { this.authorizationTask = undefined }
+        const scope = operationScope(options, this.requestTimeoutMs)
+        this.audioControllers.add(scope.controller)
+        let ownedTask: Promise<void> | undefined
+        try {
+            if (scope.signal.aborted) throw fail('Children Hermes operation cancelled or timed out')
+            // The public setup waiter may return before its authorization has
+            // finished cancelling. Independent callers drain that request under
+            // their own deadline and retry; even a caller which joined BEFORE
+            // the initiating scope aborted must not inherit its cancellation.
+            for (;;) {
+                if (!this.authorizationTask) {
+                    const task = this.refreshAuthorization(scope)
+                    ownedTask = task
+                    this.authorizationTask = task
+                    this.authorizationSignal = scope.signal
+                    void task.finally(() => {
+                        if (this.authorizationTask === task) {
+                            this.authorizationTask = undefined
+                            this.authorizationSignal = undefined
+                        }
+                    }).catch(() => undefined)
+                }
+                const task = this.authorizationTask
+                const initiatingSignal = this.authorizationSignal
+                try {
+                    await waitFor(task, scope.signal)
+                    break
+                } catch (error) {
+                    if (task === ownedTask || scope.signal.aborted || this.disposed || !initiatingSignal?.aborted) throw error
+                    // The retired task has settled; discard only its cancellation,
+                    // never permission/HTTP failures of a live authorization.
+                    if (this.authorizationTask === task) {
+                        this.authorizationTask = undefined
+                        this.authorizationSignal = undefined
+                    }
+                }
+            }
+            if (this.disposed || scope.signal.aborted) throw fail('Children Hermes operation cancelled or timed out')
+        } catch (error) {
+            // The initiating caller owns this HTTP request. Drain its aborted
+            // body before returning so an immediate retry cannot join a doomed
+            // authorization task. Other cancelled waiters need not block it.
+            if (ownedTask && scope.signal.aborted) await ownedTask.catch(() => undefined)
+            throw error
+        } finally {
+            scope.close()
+            this.audioControllers.delete(scope.controller)
+        }
     }
 
-    async synthesize(text: string): Promise<Buffer> {
+    async synthesize(text: string, options: ChildrenOperationOptions = {}): Promise<Buffer> {
         if (typeof text !== 'string' || !text.trim() || [...text].length > 2_000) {
             throw fail('Invalid children Hermes TTS input')
         }
-        await this.ensureVoiceEnabled()
-        if (this.disposed) throw fail('Children Hermes client disposed')
-        const controller = new AbortController()
-        this.audioControllers.add(controller)
-        const timeout = setTimeout(() => controller.abort(), Math.max(this.requestTimeoutMs, 30_000))
-        timeout.unref()
+        const scope = operationScope(options, Math.max(this.requestTimeoutMs, 30_000))
+        this.audioControllers.add(scope.controller)
         try {
-            const response = await this.request('/api/audio/tts', 'POST', { text, profile_id: this.profileId }, controller.signal)
+            await this.ensureVoiceEnabled(scope)
+            if (this.disposed || scope.signal.aborted) throw fail('Children Hermes operation cancelled or timed out')
+            const response = await this.request('/api/audio/tts', 'POST', { text, profile_id: this.profileId }, scope.signal)
             if (!response.body || !/^audio\/wav(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')) {
                 await response.body?.cancel().catch(() => undefined)
                 throw fail('Invalid children Hermes TTS audio')
@@ -331,19 +440,19 @@ export class ChildrenHttpHermesClient {
             if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
                 throw fail('Invalid children Hermes TTS audio')
             }
-            if (this.disposed) throw fail('Children Hermes client disposed')
+            if (this.disposed || scope.signal.aborted) throw fail('Children Hermes operation cancelled or timed out')
             return wav
         } catch (error) {
             if (error instanceof ChildrenError) throw error
             throw fail('Children Hermes TTS request failed')
         } finally {
-            clearTimeout(timeout)
-            this.audioControllers.delete(controller)
+            scope.close()
+            this.audioControllers.delete(scope.controller)
         }
     }
 
-    private async refreshAuthorization(): Promise<void> {
-        const statusResponse = await this.jsonRequest('/api/status', 'GET')
+    private async refreshAuthorization(options: ChildrenOperationOptions = {}): Promise<void> {
+        const statusResponse = await this.jsonRequest('/api/status', 'GET', undefined, options)
         const status = statusResponse.value
         if (!record(status) || typeof status['csrf_token'] !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(status['csrf_token']) || !Array.isArray(status['profiles'])) {
             throw fail('Invalid children Hermes status response')
@@ -353,34 +462,72 @@ export class ChildrenHttpHermesClient {
         if (owner && this.cookie && `children_owner=${owner}` !== this.cookie && this.sessionId) {
             this.sessionFailure = fail('Children Hermes owner authorization expired')
             this.stopHeartbeat()
-            throw this.sessionFailure
+            if (this.active) {
+                this.active.failure = this.sessionFailure
+                this.active.controller.abort()
+            }
+            await this.retireFailedSession()
         }
         if (owner) this.cookie = `children_owner=${owner}`
         if (!this.cookie) throw fail('Children Hermes status did not issue owner authorization')
         this.csrf = status['csrf_token']
         this.validateProfile(status['profiles'].find((profile: unknown) => record(profile) && profile['id'] === this.profileId))
         if (this.disposed) throw fail('Children Hermes client disposed')
-        if (this.sessionFailure) throw this.sessionFailure
     }
 
-    private async ensureSession(): Promise<string> {
-        await this.ensureVoiceEnabled()
+    private async retireFailedSession(): Promise<void> {
+        if (this.sessionRetirementTask) return await this.sessionRetirementTask
+        const task = this.finishSessionRetirement()
+        this.sessionRetirementTask = task
+        try { await task } finally {
+            if (this.sessionRetirementTask === task) this.sessionRetirementTask = undefined
+        }
+    }
+
+    private async finishSessionRetirement(): Promise<void> {
+        // Stop scheduling first, then drain in-flight work so no late heartbeat
+        // or cancellation result can poison the newly created session.
+        this.stopHeartbeat()
+        await this.heartbeatTask?.catch(() => undefined)
+        await this.cancelTask?.catch(() => undefined)
+        const oldId = this.sessionId
+        this.sessionId = undefined
+        // Close with the old authorization; never give the old ID to a new
+        // owner. Local quarantine does not depend on backend close succeeding.
+        if (oldId) await this.jsonRequest(`/api/session/${oldId}/close`, 'POST', {}).catch(() => undefined)
+        this.cookie = undefined
+        this.csrf = undefined
+    }
+
+    private async ensureSession(options: ChildrenOperationOptions, turn: Turn): Promise<string> {
+        if (this.sessionFailure) await this.retireFailedSession()
+        if (turn.failure) throw turn.failure
+        await this.ensureVoiceEnabled(options)
         if (this.disposed) throw fail('Children Hermes client disposed')
-        if (this.sessionId) return this.sessionId
-        const { value } = await this.jsonRequest('/api/session', 'POST', { profile_id: this.profileId })
+        if (turn.failure) throw turn.failure
+        // Only successful authorization (including enabled/voice checks) lets a
+        // transient failure recover. Revocation can never be bypassed here.
+        this.sessionFailure = undefined
+        if (this.sessionId) { turn.sessionId = this.sessionId; return this.sessionId }
+        const authorization = { cookie: this.cookie, csrf: this.csrf }
+        const { value } = await this.jsonRequest('/api/session', 'POST', { profile_id: this.profileId }, {}, authorization)
         if (!record(value) || typeof value['session_id'] !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(value['session_id'])) {
             throw fail('Invalid children Hermes session response')
         }
-        this.sessionId = value['session_id']
+        const sessionId = value['session_id']
         try {
             this.validateProfile(value['profile'])
+            this.checkTurn(turn)
+            if (this.active !== turn) throw fail('Children Hermes turn cancelled')
         } catch (error) {
-            await this.jsonRequest(`/api/session/${this.sessionId}/close`, 'POST', {}).catch(() => undefined)
-            this.sessionId = undefined
+            // A late ID belongs to its original caller/authorization, not to a
+            // newer turn. Never install it or cancel/clear the newer session.
+            await this.jsonRequest(`/api/session/${sessionId}/close`, 'POST', {}, {}, authorization).catch(() => undefined)
             throw error
         }
-        if (!this.disposed) this.scheduleHeartbeat()
-        return this.sessionId
+        turn.sessionId = this.sessionId = sessionId
+        this.scheduleHeartbeat()
+        return sessionId
     }
 
     private scheduleHeartbeat(): void {
@@ -411,10 +558,16 @@ export class ChildrenHttpHermesClient {
         this.heartbeatTimer = undefined
     }
 
-    private async cancelSession(): Promise<void> {
+    private async cancelTurn(turn: Turn): Promise<void> {
+        if (!turn.sessionId) return // unsubmitted late creation closes itself
+        turn.cancellation ??= this.cancelSession(turn.sessionId)
+        await turn.cancellation
+    }
+
+    private async cancelSession(sessionId = this.sessionId): Promise<void> {
+        if (!sessionId || sessionId !== this.sessionId) return
         if (this.cancelTask) return await this.cancelTask
-        if (!this.sessionId) return
-        this.cancelTask = this.jsonRequest(`/api/session/${this.sessionId}/cancel`, 'POST', {}).then(() => undefined)
+        this.cancelTask = this.jsonRequest(`/api/session/${sessionId}/cancel`, 'POST', {}).then(() => undefined)
         try {
             await this.cancelTask
         } catch {
@@ -426,27 +579,28 @@ export class ChildrenHttpHermesClient {
         }
     }
 
-    private async jsonRequest(path: string, method: 'GET' | 'POST', body?: RecordValue): Promise<{ value: unknown; response: Response }> {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs)
-        timeout.unref()
+    private async jsonRequest(path: string, method: 'GET' | 'POST', body?: RecordValue, options: ChildrenOperationOptions = {}, authorization?: RequestAuthorization): Promise<{ value: unknown; response: Response }> {
+        const scope = operationScope(options, this.requestTimeoutMs)
         try {
-            const response = await this.request(path, method, body, controller.signal)
-            return { response, value: await readJson(response) }
+            const response = await this.request(path, method, body, scope.signal, authorization)
+            const value = await readJson(response)
+            if (scope.signal.aborted) throw fail('Children Hermes operation cancelled or timed out')
+            return { response, value }
         } catch (error) {
             if (error instanceof ChildrenError) throw error
             throw fail('Children Hermes request failed')
         } finally {
-            clearTimeout(timeout)
+            scope.close()
         }
     }
 
-    private async request(path: string, method: 'GET' | 'POST', body: RecordValue | undefined, signal: AbortSignal): Promise<Response> {
+    private async request(path: string, method: 'GET' | 'POST', body: RecordValue | undefined, signal: AbortSignal, authorization?: RequestAuthorization): Promise<Response> {
+        const { cookie, csrf } = authorization ?? { cookie: this.cookie, csrf: this.csrf }
         const headers: Record<string, string> = { Accept: 'application/json, text/event-stream', 'Cache-Control': 'no-store' }
-        if (this.cookie) headers['Cookie'] = this.cookie
+        if (cookie) headers['Cookie'] = cookie
         if (method === 'POST') {
-            if (!this.csrf || !this.cookie) throw fail('Children Hermes owner authorization is unavailable')
-            headers['X-CSRF-Token'] = this.csrf
+            if (!csrf || !cookie) throw fail('Children Hermes owner authorization is unavailable')
+            headers['X-CSRF-Token'] = csrf
             headers['Content-Type'] = 'application/json'
         }
         let response: Response
@@ -460,6 +614,10 @@ export class ChildrenHttpHermesClient {
         }
         if (!response.ok) {
             await response.body?.cancel().catch(() => undefined)
+            if ([404, 410].includes(response.status) && /^\/api\/session\/[^/]+\/(?:turn|heartbeat|cancel)$/.test(path)) {
+                this.sessionFailure = fail('Children Hermes session expired')
+                this.stopHeartbeat()
+            }
             throw fail(`Children Hermes HTTP request rejected (${response.status})`)
         }
         return response

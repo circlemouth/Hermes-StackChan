@@ -78,6 +78,7 @@ function fixture(t: TestContext, paused?: string, vad = true) {
     const synthesize = t.mock.fn(async (_text: string) => Buffer.from('mock wav'))
     const encode = t.mock.fn((_wav: Buffer) => [] as Buffer[])
     const unregister = t.mock.fn(() => undefined)
+    let registered = false
     const previous = process.env.STACKCHAN_DIAGNOSTIC_VOICE_PAUSED
     if (paused === undefined) delete process.env.STACKCHAN_DIAGNOSTIC_VOICE_PAUSED
     else process.env.STACKCHAN_DIAGNOSTIC_VOICE_PAUSED = paused
@@ -85,6 +86,7 @@ function fixture(t: TestContext, paused?: string, vad = true) {
     try {
         session = new Session(ws as never, {
             registerDeviceSession: bridge => {
+                registered = true
                 const remove = registerDeviceSession(bridge)
                 return () => { remove(); unregister() }
             },
@@ -105,9 +107,10 @@ function fixture(t: TestContext, paused?: string, vad = true) {
     const capture = session as unknown as Capture
     capture.localTtsOutputConfig.enabled = false
     capture.fastAckFailed = true // hello resets this, so paused hello tests still exercise warmup gating
-    t.after(() => {
+    t.after(async () => {
         session.close()
-        assert.equal(unregister.mock.callCount(), 1)
+        await flush()
+        assert.equal(unregister.mock.callCount(), registered ? 1 : 0)
         assert.equal(dispose.mock.callCount(), 1)
         for (const mock of forbidden) assert.equal(mock.mock.callCount(), 0)
     })

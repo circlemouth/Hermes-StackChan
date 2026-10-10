@@ -5,6 +5,7 @@
  */
 #include "stackchan_display.h"
 #include <esp_log.h>
+#include <atomic>
 #include <esp_err.h>
 #include <esp_random.h>
 #include <esp_lvgl_port.h>
@@ -248,13 +249,13 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     // Always show a boot surface. Warm reboot previously skipped this, which
     // could leave the display black until the launcher finished rebuilding.
     ESP_LOGI(TAG, "Create boot logo label");
-    Lock();
+    DisplayLockGuard boot_lock(this, 0);
+    if (!boot_lock) return;
     {
         uitk::lvgl_cpp::ScreenActive screen;
         screen.setBgColor(lv_color_hex(0x000000));
     }
     GetHAL().bootLogo = std::make_unique<BootLogo>(GetHAL().getBootLogoMessage());
-    Unlock();
 
     // Robot will be created later in the Hermes runtime UI.
 }
@@ -268,6 +269,8 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
         esp_timer_delete(preview_timer_);
     }
 
+    DisplayLockGuard destroy_lock(this, 0);
+    if (!destroy_lock) return;
     if (preview_image_ != nullptr) {
         lv_obj_del(preview_image_);
     }
@@ -339,6 +342,7 @@ void StackChanAvatarDisplay::ResetForHermesHandoffLocked()
 void StackChanAvatarDisplay::ResetForHermesHandoff()
 {
     DisplayLockGuard lock(this);
+    if (!lock) return;
     ResetForHermesHandoffLocked();
 }
 
@@ -351,6 +355,7 @@ void StackChanAvatarDisplay::SetupUI()
     auto& stackchan = GetStackChan();
     if (setup_ui_called_ && stackchan.hasAvatar()) {
         DisplayLockGuard lock(this);
+    if (!lock) return;
         if (display_ != nullptr) {
             lv_display_set_default(display_);
             lv_obj_t* active_screen = lv_display_get_screen_active(display_);
@@ -370,6 +375,7 @@ void StackChanAvatarDisplay::SetupUI()
     }
 
     DisplayLockGuard lock(this);
+    if (!lock) return;
 
     auto& board = Board::GetInstance();
     if (auto* backlight = board.GetBacklight()) {
@@ -453,11 +459,9 @@ void StackChanAvatarDisplay::SetupUI()
     ESP_LOGI(TAG, "Hermes avatar SetupUI complete");
 }
 
-void StackChanAvatarDisplay::LvglLock()
+bool StackChanAvatarDisplay::LvglLock(int timeout_ms)
 {
-    if (!Lock(30000)) {
-        ESP_LOGE("Display", "Failed to lock display");
-    }
+    return Lock(timeout_ms);
 }
 
 void StackChanAvatarDisplay::LvglUnlock()
@@ -583,6 +587,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
 
     {
         DisplayLockGuard lock(this);
+    if (!lock) return;
 
         // ESP_LOGE(TAG, "SetEmotion: %s", emotion);
 
@@ -657,6 +662,7 @@ void StackChanAvatarDisplay::SetChatMessage(const char* role, const char* conten
     // ESP_LOGE(TAG, "SetChatMessage: role=%s, content=%s", role ? role : "null", content ? content : "null");
 
     DisplayLockGuard lock(this);
+    if (!lock) return;
 
     if (strcmp(role, "system") == 0) {
         if (content != nullptr && SystemInfo::GetUserAgent() == content) {
@@ -677,6 +683,7 @@ void StackChanAvatarDisplay::ClearChatMessages()
     }
 
     DisplayLockGuard lock(this);
+    if (!lock) return;
 
     stackchan.avatar().clearSpeech();
 
@@ -690,16 +697,22 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 
 void StackChanAvatarDisplay::SetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms)
 {
+    TrySetPreviewImageForDuration(std::move(image), duration_ms);
+}
+
+bool StackChanAvatarDisplay::TrySetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms)
+{
     DisplayLockGuard lock(this);
+    if (!lock) return false;
     if (preview_image_ == nullptr) {
-        return;
+        return false;
     }
 
     if (image == nullptr) {
         esp_timer_stop(preview_timer_);
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
         preview_image_cached_.reset();
-        return;
+        return true;
     }
 
     preview_image_cached_ = std::move(image);
@@ -714,7 +727,7 @@ void StackChanAvatarDisplay::SetPreviewImageForDuration(std::unique_ptr<LvglImag
     lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(preview_image_);
     esp_timer_stop(preview_timer_);
-    ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, duration_ms * 1000));
+    return esp_timer_start_once(preview_timer_, int64_t(duration_ms) * 1000) == ESP_OK;
 }
 
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
@@ -733,6 +746,7 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
     }
 
     DisplayLockGuard lock(this);
+    if (!lock) return;
 
     auto lvgl_theme = static_cast<LvglTheme*>(theme);
     auto text_font  = lvgl_theme->text_font()->font();
@@ -741,8 +755,8 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
 }
 
 #include <hal/board/hal_bridge.h>
-static bool _is_hermes_ready = false;
-static bool _is_hermes_idle  = false;
+static std::atomic<bool> _is_hermes_ready{false};
+static std::atomic<bool> _is_hermes_idle{false};
 bool hal_bridge::is_hermes_ready()
 {
     return _is_hermes_ready;
@@ -770,6 +784,7 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
     {
         DisplayLockGuard lock(this);
+    if (!lock) return;
         auto& avatar = stackchan.avatar();
 
         bool is_idle = false;

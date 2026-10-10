@@ -8,19 +8,21 @@
 2. HERMES 起動時に顔が表示されず、画面下端に `HERMES` 文字とアプリアイコンの上端だけが残る問題を解決する。
 3. firmware 側で実装済みだが ai-server / MCP server 側で未公開の機能を公開する。
 4. Hermes と M5-stackchan がより自然に対話できるように brush-up する。
+5. runtime 監査 R01–R26 の復旧・期限・入力・設定を修正し、V01–V06 の実機検証候補と host 合格を区別する。対応表と未実施条件は [Runtime audit resolution](<10-runtime-audit-resolution.md>) に記録する（bridge 362/362、firmware host 12/12、ESP-IDF build 合格。実機・外部推論は未実施）。
 
 ## ドキュメント構成
 
 | ファイル | 内容 |
 |---|---|
-| `01-current-state-and-goals.md` | 現状、目標、非目標、完了条件 |
-| `02-firmware-autostart-display.md` | firmware 側の自動起動停止と画面崩れ修正手順 |
-| `03-mcp-tool-publication.md` | 未公開 tool の公開、schema、mapping、README/tests 更新 |
-| `04-natural-dialogue.md` | 自然対話化の改善項目、優先度、実装案 |
-| `05-test-plan.md` | firmware / ai-server / 実機確認のテスト計画 |
-| `06-implementation-prompt.md` | 実装エージェントにそのまま渡す完遂プロンプト |
-| `08-lcd-sd-spi-incident.md` | HERMES 起動時の LCD 顔表示失敗と SD / SPI / GPIO35 競合の調査記録 |
-| `09-cores3-shared-spi-safety.md` | CoreS3 の LCD / SD 共有 SPI 安定化ルールと検証観点 |
+| [01-current-state-and-goals.md](<01-current-state-and-goals.md>) | 現状、目標、非目標、完了条件 |
+| [02-firmware-autostart-display.md](<02-firmware-autostart-display.md>) | firmware 側の自動起動停止と画面崩れ修正手順 |
+| [03-mcp-tool-publication.md](<03-mcp-tool-publication.md>) | 未公開 tool の公開、schema、mapping、README/tests 更新 |
+| [04-natural-dialogue.md](<04-natural-dialogue.md>) | 自然対話化の改善項目、優先度、実装案 |
+| [05-test-plan.md](<05-test-plan.md>) | firmware / ai-server / 実機確認のテスト計画 |
+| [06-implementation-prompt.md](<06-implementation-prompt.md>) | 実装エージェントにそのまま渡す完遂プロンプト |
+| [08-lcd-sd-spi-incident.md](<08-lcd-sd-spi-incident.md>) | HERMES 起動時の LCD 顔表示失敗と SD / SPI / GPIO35 競合の調査記録 |
+| [09-cores3-shared-spi-safety.md](<09-cores3-shared-spi-safety.md>) | CoreS3 の LCD / SD 共有 SPI 安定化ルールと検証観点 |
+| [10-runtime-audit-resolution.md](<10-runtime-audit-resolution.md>) | R01–R26 対応表、V01–V06 hardening、復旧契約、統合・実機の未実施条件 |
 
 ## 作業対象の主要ファイル
 

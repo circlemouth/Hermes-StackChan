@@ -253,7 +253,6 @@ test('Session interrupts idle listening to speak a queued follow-up prompt', asy
 
     session.handleMessage(JSON.stringify({ type: 'hello', version: 1 }))
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }))
-    session.handleMessage(Buffer.from([1]))
     await session.enqueueFollowup('結果を短く伝えて')
 
     await waitFor(() => jsonMessages(ws).some((msg) => msg['type'] === 'tts' && msg['state'] === 'stop'))
@@ -280,9 +279,9 @@ test('isIgnorableShortTranscript ignores only narrow filler fragments', () => {
     assert.equal(isIgnorableShortTranscript(' あ。 '), true)
     assert.equal(isIgnorableShortTranscript('ハハ'), true)
     assert.equal(isIgnorableShortTranscript('フフ。'), true)
-    assert.equal(isIgnorableShortTranscript('はい'), true)
-    assert.equal(isIgnorableShortTranscript('うん'), true)
-    assert.equal(isIgnorableShortTranscript('OK'), true)
+    assert.equal(isIgnorableShortTranscript('はい'), false)
+    assert.equal(isIgnorableShortTranscript('うん'), false)
+    assert.equal(isIgnorableShortTranscript('OK'), false)
     assert.equal(isIgnorableShortTranscript('チッ'), true)
     assert.equal(isIgnorableShortTranscript('フッ'), true)
     assert.equal(isIgnorableShortTranscript('くっ'), true)
@@ -291,8 +290,8 @@ test('isIgnorableShortTranscript ignores only narrow filler fragments', () => {
 
 test('isIgnorableTimeoutTranscript ignores timeout-only backchannels', () => {
     assert.equal(isIgnorableTimeoutTranscript('お'), true)
-    assert.equal(isIgnorableTimeoutTranscript('うん'), true)
-    assert.equal(isIgnorableTimeoutTranscript('はい'), true)
+    assert.equal(isIgnorableTimeoutTranscript('うん'), false)
+    assert.equal(isIgnorableTimeoutTranscript('はい'), false)
     assert.equal(isIgnorableTimeoutTranscript('ハハ'), true)
     assert.equal(isIgnorableTimeoutTranscript('チッ'), true)
     assert.equal(isIgnorableTimeoutTranscript('フッ'), true)
@@ -307,7 +306,7 @@ test('Session resumes listening after an ignored short transcript', async () => 
         registerDeviceSession: () => () => undefined,
         localVadConfig: { ...testVadConfig, enabled: false },
         decodeOpusFrames: async () => Buffer.alloc(320),
-        transcribeWav: async () => 'うん',
+        transcribeWav: async () => 'えっ',
         hermes: {
             submitPrompt: async () => {
                 llmCalled = true
@@ -438,7 +437,7 @@ test('Session accepts wake word detect during post-TTS cooldown', async () => {
     session.close()
 })
 
-test('Session delays auto listen start during post-TTS cooldown and drops cooldown audio', async () => {
+test('Session accepts every frame when the device explicitly listens during cooldown', async () => {
     const ws = new MockWebSocket()
     const decodedFrameCounts: number[] = []
     let transcribeCount = 0
@@ -472,7 +471,7 @@ test('Session delays auto listen start during post-TTS cooldown and drops cooldo
     session.handleMessage(JSON.stringify({ type: 'listen', state: 'stop' }))
 
     await waitFor(() => jsonMessages(ws).filter((msg) => msg['type'] === 'stt').length === 2)
-    assert.deepEqual(decodedFrameCounts, [10, 10])
+    assert.deepEqual(decodedFrameCounts, [10, 13])
     assert.equal(transcribeCount, 2)
 
     session.close()

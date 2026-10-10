@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hal.h"
+#include <audio_codec.h>
 #include <memory>
 #include <atomic>
 #include <utility>
@@ -209,11 +210,13 @@ void Hal::hermes_board_init()
 static void _stackchan_update_task(void* param)
 {
     bool is_setup_done = false;
+    bool sntp_started = false;
     std::atomic<bool> launcher_reboot_requested{false};
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
 
+        if (auto* codec = Board::GetInstance().GetAudioCodec()) codec->PollVolumeLease();
         tools::update_reminders();
 
         if (!hal_bridge::is_hermes_idle()) {
@@ -221,19 +224,15 @@ static void _stackchan_update_task(void* param)
         }
 
         {
-            LvglLockGuard lock;
+            LvglLockGuard lock(100);
+            if (lock) {
 
             if (GetStackChan().hasAvatar()) {
                 GetStackChan().update();
             }
 
-            if (!hal_bridge::is_hermes_ready()) {
-                continue;
-            }
-
             if (!is_setup_done) {
-                // Setup when the vendored audio runtime is ready
-                GetHAL().startSntp();
+                // Home must exist even while network/audio initialization stalls.
                 view::create_home_indicator([&launcher_reboot_requested]() { launcher_reboot_requested = true; },
                                             0x81DBBD, 0x134233);
                 view::create_status_bar(0x81DBBD, 0x134233);
@@ -242,6 +241,12 @@ static void _stackchan_update_task(void* param)
 
             view::update_home_indicator();
             view::update_status_bar();
+            }
+        }
+
+        if (!sntp_started && hal_bridge::is_hermes_ready()) {
+            GetHAL().startSntp();
+            sntp_started = true;
         }
 
         if (launcher_reboot_requested.exchange(false)) {
@@ -269,17 +274,13 @@ void Hal::requestLauncherReturnReboot()
         ESP_LOGI(_tag.data(), "Launcher return markers committed");
     };
 
-    if (hal_bridge::is_hermes_mode()) {
-        // Runtime owns sockets/audio. Use its existing graceful reboot path on
-        // app_main rather than resetting from the USB/stackchan control task.
-        // No LVGL cleanup or synchronous rendering is performed here.
-        hal_bridge::schedule_hermes_reboot(std::move(prepare_return));
-        return;
-    }
-
+    // Commit the boot escape markers here, not behind a blocked app queue.
     prepare_return();
-    delay(150);
-    esp_restart();
+    const auto created = xTaskCreate([](void*) {
+        vTaskDelay(pdMS_TO_TICKS(150));
+        esp_restart();
+    }, "launcher_escape", 3072, nullptr, 10, nullptr);
+    if (created != pdPASS) esp_restart();
 }
 
 void Hal::startHermes()
@@ -303,6 +304,7 @@ void Hal::startHermes()
         mclog::tagInfo(_tag, "reminder triggered: id: {}, msg: {}", id, msg);
         {
             LvglLockGuard lock;
+            if (!lock) return;
             auto& avatar = GetStackChan().avatar();
             avatar.addDecorator(std::make_unique<view::ReminderView>(lv_screen_active(), msg));
         }
@@ -392,9 +394,9 @@ void Hal::factoryReset()
 /* -------------------------------------------------------------------------- */
 #include "board/hal_bridge.h"
 
-void Hal::lvglLock()
+bool Hal::lvglLock(int timeout_ms)
 {
-    hal_bridge::disply_lvgl_lock();
+    return hal_bridge::disply_lvgl_lock(timeout_ms);
 }
 
 void Hal::lvglUnlock()
@@ -451,7 +453,8 @@ void Hal::lvgl_init()
 {
     mclog::tagInfo(_tag, "lvgl init");
 
-    hal_bridge::disply_lvgl_lock();
+    LvglLockGuard lock;
+    if (!lock) return;
 
     mclog::tagInfo(_tag, "create lvgl touchpad indev");
     lvTouchpad = lv_indev_create();
@@ -459,8 +462,6 @@ void Hal::lvgl_init()
     lv_indev_set_read_cb(lvTouchpad, lvgl_read_cb);
     lv_indev_set_group(lvTouchpad, lv_group_get_default());
     lv_indev_set_display(lvTouchpad, hal_bridge::display_get_lvgl_display());
-
-    hal_bridge::disply_lvgl_unlock();
 }
 
 /* -------------------------------------------------------------------------- */

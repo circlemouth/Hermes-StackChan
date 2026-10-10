@@ -28,6 +28,7 @@ void AppLauncher::onLauncherOpen()
     mclog::tagInfo(getAppInfo().name, "Launcher started");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     if (!_startup_checked && GetHAL().hasSdConfigError()) {
         mclog::tagWarn(getAppInfo().name, "SD config error: {}", GetHAL().getLastSdConfigError());
@@ -56,6 +57,7 @@ void AppLauncher::onLauncherOpen()
 void AppLauncher::onLauncherRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
 
     if (_startup_worker) {
         _startup_worker->update();
@@ -85,6 +87,7 @@ void AppLauncher::onLauncherClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     _view.reset();
 }
@@ -133,6 +136,7 @@ bool AppLauncher::diagnosticsOpenApp(const char* name)
         if (app.info.name == name) {
             {
                 LvglLockGuard lock;
+    if (!lock) return false;
                 _startup_worker.reset(); // Explicit local command replaces startup guidance.
                 _screensaver.reset();
                 _startup_checked = true;

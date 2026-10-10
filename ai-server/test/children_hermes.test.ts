@@ -271,7 +271,7 @@ test('consumer break cancels worker, and a turn timeout cancels a stalled stream
     } finally { await client.dispose(); await backend.close() }
 })
 
-test('heartbeat runs before 90-second expiry, failures fail closed, and disposal stops it', async () => {
+test('heartbeat runs before expiry, failed sessions are recreated, and disposal stops it', async () => {
     const success = await mock()
     const healthy = new ChildrenHttpHermesClient({ url: success.url, heartbeatMs: 15 })
     try {
@@ -289,8 +289,8 @@ test('heartbeat runs before 90-second expiry, failures fail closed, and disposal
         await privateRejection(client.submitPrompt(PRIVATE), /heartbeat/)
         await privateRejection(client.submitPrompt(PRIVATE), /heartbeat/)
         await client.dispose()
-        assert.equal(backend.requests.filter((r) => r.path.endsWith('/heartbeat')).length, 1)
-        assert.equal(backend.requests.filter((r) => r.path.endsWith('/close')).length, 1)
+        assert.equal(backend.requests.filter((r) => r.path.endsWith('/heartbeat')).length, 2)
+        assert.equal(backend.requests.filter((r) => r.path.endsWith('/close')).length, 2)
     } finally { await client.dispose(); await backend.close() }
 })
 

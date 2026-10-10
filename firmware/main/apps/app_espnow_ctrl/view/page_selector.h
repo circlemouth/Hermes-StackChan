@@ -82,7 +82,7 @@ private:
  */
 static inline int create_page_selector_and_wait(std::string_view label, const std::vector<std::string>& options)
 {
-    GetHAL().lvglLock();
+    if (!GetHAL().lvglLock()) return -1;
     auto page_selector = std::make_unique<view::PageSelector>(label, options);
     GetHAL().lvglUnlock();
 
@@ -91,6 +91,7 @@ static inline int create_page_selector_and_wait(std::string_view label, const st
         GetHAL().delay(50);
 
         LvglLockGuard lock;
+    if (!lock) continue;
         if (page_selector->update()) {
             index = page_selector->getSelectedIndex();
             break;
@@ -99,6 +100,7 @@ static inline int create_page_selector_and_wait(std::string_view label, const st
 
     {
         LvglLockGuard lock;
+    if (!lock) return -1;
         page_selector.reset();
     }
 

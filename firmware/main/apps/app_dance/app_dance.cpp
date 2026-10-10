@@ -40,6 +40,7 @@ void AppDance::onOpen()
     std::unique_ptr<view::LoadingPage> loading_page;
     {
         LvglLockGuard lock;
+    if (!lock) return;
         loading_page = std::make_unique<view::LoadingPage>(0xB77BFF, 0x422268);
         loading_page->setMessage("Starting\n BLE server...");
     }
@@ -48,6 +49,7 @@ void AppDance::onOpen()
     GetHAL().startBleServer();
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     // Destroy loading page
     loading_page.reset();
@@ -95,6 +97,7 @@ void AppDance::onRunning()
     std::lock_guard<std::mutex> lock(_mutex);
 
     LvglLockGuard lvgl_lock;
+    if (!lvgl_lock) return;
 
     if (_ble_avatar_data.update_flag) {
         GetStackChan().updateAvatarFromJson(_ble_avatar_data.data_ptr);
@@ -127,6 +130,7 @@ void AppDance::onClose()
 
     {
         LvglLockGuard lock;
+    if (!lock) return;
 
         GetStackChan().resetAvatar();
 

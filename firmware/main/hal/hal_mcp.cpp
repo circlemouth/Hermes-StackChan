@@ -15,9 +15,13 @@
 #include <board.h>
 #include <esp_heap_caps.h>
 #include <jpg/jpeg_to_image.h>
+// LVGL's bundled header exposes its C API; its optional C++ overloads are unused.
+#define LODEPNG_NO_COMPILE_CPP
+#include <src/libs/lodepng/lodepng.h>
 #include <mooncake_log.h>
 #include <mcp_server.h>
 #include <settings.h>
+#include <websocket_endpoint.h>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
 #include <freertos/FreeRTOS.h>
@@ -27,6 +31,8 @@
 #include "board/config.h"
 #include "board/stackchan_camera.h"
 #include "board/stackchan_display.h"
+#include "board/cores3_audio_codec.h"
+#include <esp_timer.h>
 
 using namespace stackchan;
 
@@ -53,12 +59,7 @@ const char* wifi_status_to_string(WifiStatus status)
 
 std::string get_websocket_url()
 {
-    Settings ws_settings("websocket", false);
-    std::string websocket_url = ws_settings.GetString("url_override", "");
-    if (websocket_url.empty()) {
-        websocket_url = ws_settings.GetString("url", "");
-    }
-    return websocket_url;
+    return GetEffectiveWebsocketUrl();
 }
 
 std::string websocket_scheme(std::string_view url)
@@ -72,19 +73,7 @@ std::string websocket_scheme(std::string_view url)
 
 std::string websocket_host(std::string_view url)
 {
-    auto host_start = url.find("://");
-    if (host_start == std::string_view::npos) {
-        host_start = 0;
-    } else {
-        host_start += 3;
-    }
-
-    auto host_end = url.find_first_of(":/", host_start);
-    if (host_end == std::string_view::npos) {
-        host_end = url.length();
-    }
-
-    return std::string(url.substr(host_start, host_end - host_start));
+    return runtime_safety::WebsocketHost(url);
 }
 
 bool is_jpeg(const uint8_t* data, size_t len)
@@ -100,6 +89,15 @@ bool is_png(const uint8_t* data, size_t len)
 
 std::unique_ptr<LvglImage> preview_image_from_bytes(const uint8_t* data, size_t len)
 {
+    size_t decoded_width = 0, decoded_height = 0;
+    if (!runtime_safety::PreviewDimensions(data, len, decoded_width, decoded_height)) {
+        throw std::runtime_error("Invalid or oversized image dimensions");
+    }
+    const size_t working_bytes = decoded_width * decoded_height * 20 + len * 3;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < working_bytes + 128 * 1024 ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < decoded_width * decoded_height * 8 + decoded_height * 8 + 1024) {
+        throw std::runtime_error("Insufficient preview memory budget");
+    }
     if (is_jpeg(data, len)) {
 #ifdef CONFIG_IDF_TARGET_ESP32
         throw std::runtime_error("JPEG preview decode is not available on this target");
@@ -110,7 +108,8 @@ std::unique_ptr<LvglImage> preview_image_from_bytes(const uint8_t* data, size_t 
         size_t height     = 0;
         size_t stride     = 0;
         esp_err_t ret     = jpeg_to_image(data, len, &out_data, &out_len, &width, &height, &stride);
-        if (ret != ESP_OK || out_data == nullptr) {
+        if (ret != ESP_OK || out_data == nullptr || width != decoded_width || height != decoded_height ||
+            out_len > decoded_width * decoded_height * 4) {
             if (out_data) {
                 heap_caps_free(out_data);
             }
@@ -121,15 +120,36 @@ std::unique_ptr<LvglImage> preview_image_from_bytes(const uint8_t* data, size_t 
     }
 
     if (is_png(data, len)) {
-        auto* copy = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (copy == nullptr) {
-            copy = heap_caps_malloc(len, MALLOC_CAP_8BIT);
+        #if LV_USE_LODEPNG
+        LodePNGState state;
+        lodepng_state_init(&state);
+        runtime_safety::ScopeExit state_cleanup([&]() { lodepng_state_cleanup(&state); });
+        state.decoder.read_text_chunks = 0;
+        state.decoder.remember_unknown_chunks = 0;
+        state.decoder.max_text_size = 4096;
+        state.decoder.max_icc_size = 4096;
+        state.decoder.zlibsettings.max_output_size = decoded_width * decoded_height * 8 + decoded_height * 8 + 1024;
+        unsigned char* rgba = nullptr;
+        unsigned width = 0, height = 0;
+        const unsigned error = lodepng_decode(&rgba, &width, &height, &state, data, len);
+        runtime_safety::ScopeExit rgba_cleanup([&]() { if (rgba) lv_free(rgba); });
+        if (error || !rgba || width != decoded_width || height != decoded_height || McpServer::WorkCancelled())
+            throw std::runtime_error("Invalid PNG image or expired preview");
+        const size_t pixels = decoded_width * decoded_height;
+        auto* rgb = static_cast<uint16_t*>(heap_caps_malloc(pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!rgb) throw std::runtime_error("Failed to allocate PNG preview");
+        // Decode off the main task; composite transparency on the black preview.
+        for (size_t i = 0; i < pixels; ++i) {
+            const unsigned alpha = rgba[i * 4 + 3];
+            const unsigned r = rgba[i * 4] * alpha / 255;
+            const unsigned g = rgba[i * 4 + 1] * alpha / 255;
+            const unsigned b = rgba[i * 4 + 2] * alpha / 255;
+            rgb[i] = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
         }
-        if (copy == nullptr) {
-            throw std::runtime_error("Failed to allocate memory for PNG image");
-        }
-        std::memcpy(copy, data, len);
-        return std::make_unique<LvglAllocatedImage>(copy, len);
+        return std::make_unique<LvglAllocatedImage>(rgb, pixels * 2, width, height, width * 2, LV_COLOR_FORMAT_RGB565);
+#else
+        throw std::runtime_error("PNG decoder unavailable");
+#endif
     }
 
     throw std::runtime_error("Unsupported image format; only JPEG and PNG are supported");
@@ -138,18 +158,29 @@ std::unique_ptr<LvglImage> preview_image_from_bytes(const uint8_t* data, size_t 
 std::unique_ptr<LvglImage> download_preview_image(const std::string& url)
 {
     auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
-    if (!http->Open("GET", url)) {
-        throw std::runtime_error("Failed to open URL: " + url);
+    http->SetTimeout(3000);
+    if (url.size() > 2048 || (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0)) {
+        throw std::runtime_error("Preview requires a bounded HTTP(S) URL");
     }
+    struct HttpCloseGuard { Http* http; ~HttpCloseGuard() { http->Close(); } } close_guard{http.get()};
+    if (!http->Open("GET", url)) throw std::runtime_error("Failed to open preview endpoint");
 
     int status_code = http->GetStatusCode();
     if (status_code != 200) {
-        http->Close();
         throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
     }
 
-    std::string body = http->ReadAll();
-    http->Close();
+    if (http->GetBodyLength() > kMaxPreviewImageBytes) throw std::runtime_error("Preview body exceeds limit");
+    std::string body;
+    char chunk[4096];
+    while (true) {
+        if (McpServer::WorkCancelled()) throw std::runtime_error("Preview cancelled or expired");
+        const int count = http->Read(chunk, sizeof(chunk));
+        if (count < 0) throw std::runtime_error("Preview download failed");
+        if (count == 0) break;
+        if (body.size() + count > kMaxPreviewImageBytes) throw std::runtime_error("Preview body exceeds limit");
+        body.append(chunk, count);
+    }
 
     if (body.empty()) {
         throw std::runtime_error("Downloaded image is empty");
@@ -171,6 +202,11 @@ cJSON* play_test_tone(int frequency_hz, int duration_ms, int amplitude)
     if (audio_codec == nullptr) {
         throw std::runtime_error("audio codec unavailable");
     }
+    if (!audio_codec->BeginDiagnosticOutput()) throw std::runtime_error("Audio busy: diagnostic tone requires inactive microphone and speaker");
+    struct DiagnosticGuard {
+        AudioCodec* codec;
+        ~DiagnosticGuard() { codec->EnableOutput(false); codec->EndDiagnosticOutput(); }
+    } diagnostic_guard{audio_codec};
     const bool was_output_enabled = audio_codec->output_enabled();
     const bool input_was_enabled  = audio_codec->input_enabled();
 
@@ -185,6 +221,7 @@ cJSON* play_test_tone(int frequency_hz, int duration_ms, int amplitude)
     audio_codec->EnableOutput(true);
     size_t written = 0;
     while (written < total_frames) {
+        if (McpServer::WorkCancelled()) throw std::runtime_error("Diagnostic tone cancelled or expired");
         const size_t frames = std::min(kChunkFrames, total_frames - written);
         chunk.resize(frames);
         for (size_t i = 0; i < frames; ++i) {
@@ -199,13 +236,15 @@ cJSON* play_test_tone(int frequency_hz, int duration_ms, int amplitude)
                 static_cast<double>(sample_index) / static_cast<double>(kSampleRate);
             chunk[i] = static_cast<int16_t>(std::sin(phase) * static_cast<double>(amplitude) * envelope);
         }
-        audio_codec->OutputData(chunk);
+        if (audio_codec->OutputData(chunk) != static_cast<int>(frames)) throw std::runtime_error("Diagnostic PCM write failed");
         written += frames;
     }
 
     std::vector<int16_t> silence(kChunkFrames, 0);
     for (int i = 0; i < 3; ++i) {
-        audio_codec->OutputData(silence);
+        if (McpServer::WorkCancelled()) throw std::runtime_error("Diagnostic tone cancelled or expired");
+        if (audio_codec->OutputData(silence) != static_cast<int>(silence.size()))
+            throw std::runtime_error("Diagnostic PCM write failed");
     }
     vTaskDelay(pdMS_TO_TICKS(20));
     // Keep the speaker path open when the mic side is active. On CoreS3, closing
@@ -250,12 +289,17 @@ void Hal::robot_mcp_init()
                            cJSON_AddStringToObject(result, "wifi_status",
                                                    wifi_status_to_string(GetHAL().getWifiStatus()));
                            cJSON_AddBoolToObject(result, "wifi_configured", GetHAL().isAppConfiged());
+                            cJSON_AddStringToObject(result, "power_settings_apply", "next_restart");
                            cJSON_AddBoolToObject(result, "sd_config_error", GetHAL().hasSdConfigError());
                            if (GetHAL().hasSdConfigError()) {
                                cJSON_AddStringToObject(result, "sd_config_error_detail",
                                                        GetHAL().getLastSdConfigError().c_str());
                            }
                            cJSON_AddNumberToObject(result, "speaker_volume", GetHAL().getSpeakerVolume());
+                            auto lease = static_cast<CoreS3AudioCodec*>(Board::GetInstance().GetAudioCodec())->GetVolumeLease();
+                            cJSON_AddBoolToObject(result, "lease_active", lease.active());
+                            cJSON_AddStringToObject(result, "lease_id", lease.owner.c_str());
+                            cJSON_AddNumberToObject(result, "lease_remaining_ms", lease.active() ? std::max<int64_t>(0, lease.expires_ms - esp_timer_get_time() / 1000) : 0);
                            cJSON_AddNumberToObject(result, "backlight_brightness", GetHAL().getBackLightBrightness());
 #if CONFIG_HERMES_AUTOSTART
                            cJSON_AddBoolToObject(result, "hermes_autostart", true);
@@ -274,7 +318,9 @@ void Hal::robot_mcp_init()
     mcp_server.AddTool("self.robot.set_speaker_volume",
                        "Set StackChan speaker volume. Use low values such as 25-45 when diagnosing distortion.",
                        PropertyList({Property("volume", kPropertyTypeInteger, 40, 0, 100),
-                                     Property("permanent", kPropertyTypeBoolean, false)}),
+                                     Property("permanent", kPropertyTypeBoolean, false),
+                                      Property("lease_id", kPropertyTypeString, std::string("")),
+                                      Property("lease_ms", kPropertyTypeInteger, 0, 0, 120000)}),
                        [this](const PropertyList& properties) -> ReturnValue {
                            int volume    = properties["volume"].value<int>();
                            bool permanent = properties["permanent"].value<bool>();
@@ -285,11 +331,20 @@ void Hal::robot_mcp_init()
                            }
 
                            mclog::tagInfo(_tag, "set_speaker_volume: volume={}, permanent={}", volume, permanent);
-                           GetHAL().setSpeakerVolume(static_cast<uint8_t>(volume), permanent);
+                           auto* codec = dynamic_cast<CoreS3AudioCodec*>(Board::GetInstance().GetAudioCodec());
+                            if (!codec) throw std::runtime_error("Speaker codec unavailable");
+                            const auto owner = properties["lease_id"].value<std::string>();
+                            const bool success = codec->SetVolumeLease(volume, permanent, owner, properties["lease_ms"].value<int>());
+                            const auto lease = codec->GetVolumeLease();
 
                            cJSON* result = cJSON_CreateObject();
                            cJSON_AddNumberToObject(result, "speaker_volume", GetHAL().getSpeakerVolume());
                            cJSON_AddBoolToObject(result, "permanent", permanent);
+                            cJSON_AddBoolToObject(result, "success", success);
+                            cJSON_AddNumberToObject(result, "volume", codec->output_volume());
+                            cJSON_AddBoolToObject(result, "lease_active", lease.active());
+                            cJSON_AddStringToObject(result, "lease_id", owner.c_str());
+                            cJSON_AddNumberToObject(result, "lease_remaining_ms", lease.active() ? std::max<int64_t>(0, lease.expires_ms - esp_timer_get_time() / 1000) : 0);
                            return result;
                        });
 
@@ -381,7 +436,8 @@ void Hal::robot_mcp_init()
 
             mclog::tagInfo(_tag, "set_led_color: r={}, g={}, b={}", r, g, b);
 
-            LvglLockGuard lock;
+            LvglLockGuard lock(250);
+            if (!lock) throw std::runtime_error("Display busy");
 
             GetStackChan().leftNeonLight().setColor(r, g, b);
             GetStackChan().rightNeonLight().setColor(r, g, b);
@@ -441,7 +497,11 @@ void Hal::robot_mcp_init()
                            }
 
                            auto image = download_preview_image(url);
-                           display->SetPreviewImageForDuration(std::move(image), duration_seconds * 1000);
+                           auto preview = std::make_shared<std::unique_ptr<LvglImage>>(std::move(image));
+                            McpServer::DeferWorkCompletion([display, preview, duration_seconds]() mutable {
+                                if (!display->TrySetPreviewImageForDuration(std::move(*preview), duration_seconds * 1000))
+                                    throw std::runtime_error("Display busy or preview unavailable");
+                            });
                            return true;
                        });
 

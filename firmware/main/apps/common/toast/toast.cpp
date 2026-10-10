@@ -174,6 +174,7 @@ void ToastManager::onCreate()
 void ToastManager::onRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
 
     // Handle toast request
     if (!_toast_request_queue.empty()) {

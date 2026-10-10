@@ -32,6 +32,7 @@ void AppAvatar::onOpen()
     mclog::tagInfo(getAppInfo().name, "on open");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     GetHAL().bootLogo.reset();
 
@@ -55,6 +56,7 @@ void AppAvatar::onOpen()
 void AppAvatar::onRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
 
     GetStackChan().update();
     view::update_home_indicator();
@@ -66,6 +68,7 @@ void AppAvatar::onClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     GetStackChan().resetAvatar();
     GetStackChan().clearModifiers();

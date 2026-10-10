@@ -10,6 +10,7 @@
 #include <mooncake_log.h>
 #include <mooncake.h>
 #include <settings.h>
+#include <websocket_endpoint.h>
 #include <esp_mac.h>
 #include <ssid_manager.h>
 
@@ -286,12 +287,7 @@ bool Hal::hasSavedWifiCredentials()
 
 bool Hal::hasHermesBridgeUrl()
 {
-    Settings ws_settings("websocket", false);
-    std::string websocket_url = ws_settings.GetString("url_override", "");
-    if (websocket_url.empty()) {
-        websocket_url = ws_settings.GetString("url", "");
-    }
-    return !websocket_url.empty();
+    return !GetEffectiveWebsocketUrl().empty();
 }
 
 bool Hal::hasSdConfigError()

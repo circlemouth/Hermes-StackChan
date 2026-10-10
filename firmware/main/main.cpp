@@ -12,6 +12,7 @@
 #include <hal/hal.h>
 #include <hal/diagnostics.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <lvgl.h>
 
 using namespace mooncake;
@@ -74,6 +75,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Mooncake teardown start");
     {
         LvglLockGuard lock;
+        if (!lock) esp_restart();
         GetMooncake().uninstallAllApps();
         DestroyMooncake();
         clean_lvgl_for_hermes_handoff_locked();

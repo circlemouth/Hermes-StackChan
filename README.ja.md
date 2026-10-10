@@ -224,6 +224,8 @@ HERMES_LOCAL_STT_LANGUAGE=ja
 # 端末で Use Hermes TTS を選んだ場合だけ使う任意の endpoint:
 # STACKCHAN_LOCAL_TTS_URL=http://127.0.0.1:18002/?language=ja
 STACKCHAN_LOCAL_TTS_TIMEOUT_MS=15000
+# STT / Hermes 初期化+応答 / TTS を含む turn 全体の期限:
+STACKCHAN_TURN_TIMEOUT_MS=180000
 STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=false
 STACKCHAN_LOCAL_TTS_OUTPUT_TARGET_NAME=JBL Flip 3
 STACKCHAN_LOCAL_TTS_OUTPUT_VOLUME=0.35
@@ -261,7 +263,7 @@ STACKCHAN_AUTO_LED_MANUAL_HOLD_MS=8000
 ```
 
 `HERMES_ROOT` は、STT と任意の Hermes TTS helper 経路が使う HermesAgent の source tree または module root を指すようにします。標準の TTS provider は `sanoTTS-jp` です。`children_http` 以外の mode で、端末で `Use Hermes TTS` を選び、`STACKCHAN_LOCAL_TTS_URL` を設定すると、`ai-server` はUTF-8テキストを常駐ローカルendpointへ直接POSTし、WAV応答を受け取ります。URL未設定時は Hermes のPython TTS helperを使います。直接POSTではsegmentごとのHermes/Python helper起動がなくなります。Piper Plusの `piper.http_server` はこの経路と互換です。標準の `sanoTTS-jp` 経路では `STACKCHAN_LOCAL_TTS_URL` は使いません。
-`STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=true` にすると、TTS provider の選択に関係なく、`ai-server` は TTS turn ごとに指定名の PipeWire sink を探します。接続中でも、firmware の ACK がM5音量 `0` を明示した後だけホスト側スピーカーから発話します。boolean の成功、音量の欠落・不正値・非ゼロ ACK ではホスト再生を開始しません。消音中のM5にも同期用のOpus frameを送り続けるため、顔と発話状態は連動します。sinkが見つからない、または初期化に失敗した場合は音量復元を試み、`STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME` のM5内蔵スピーカーへ自動フォールバックします。復元成功のログは ACK が設定した復元音量を確認できた場合だけ出します。ACK で確認できるのはfirmwareが報告した設定値で、物理的な消音や可聴性の証明ではありません。BluetoothスピーカーをStackChan背後に置く構成で有効です。
+`STACKCHAN_LOCAL_TTS_OUTPUT_ENABLED=true` にすると、TTS provider の選択に関係なく、`ai-server` は TTS turn ごとに指定名の PipeWire sink を探します。厳密な ACK で M5 音量 `0` と一時 speaker lease ID の一致を確認した後だけホスト再生を開始します。消音中の M5 にも同期用 Opus frame を送るため、顔と発話状態は連動します。boolean の成功、不正な content、lease ID 不一致、音量の欠落・非ゼロではホスト再生を開始しません。対応 firmware は消音前の runtime 音量を保存し、lease 解放・期限切れ・切断時に復元します。一時消音は NVS に保存しません。`STACKCHAN_LOCAL_TTS_FALLBACK_M5_VOLUME` は bridge の fallback 用ヒントであり、firmware が保存した元音量や後からユーザーが永久保存した設定を上書きする許可ではありません。復元を確認できない場合は fail closed にします。lease 対応 bridge と firmware は必ず対で更新してください。旧 firmware ではこの復旧保証はありません。ACK は報告された設定の確認であり、物理的な消音・可聴性の証明ではありません。[実行時の信頼性と監査対応表](<docs/hermes-refactor/10-runtime-audit-resolution.md>)を参照してください。
 ホスト再生では `pw-play` に private な一時WAVファイルを渡して、元のsample rate/channel数を維持します。WAV全体をraw stdinへ流す方式は使いません。abort/deadline時はplayerをkillして終了回収を待ってからファイルを削除します（directory 0700/file 0600）。process成功だけでは実際に音が聞こえたことは証明できません。filesystem準備・cleanupは再生deadlineの外で完了を待ち、cleanup失敗時にはprivateファイルが残る場合があります。[再生検証と制限事項](docs/hermes-refactor/11-latency-baseline.md#jbl-return-wav-container-playback-correction)を参照してください。
 常時稼働の低スペック端末では `STACKCHAN_HERMES_WARMUP_ENABLED=true` にすると、device WebSocket listenerを開く前に最小限の非表示プロンプトを1回送ります。providerのcold start待ちをservice起動時へ移せます。待機は `STACKCHAN_HERMES_WARMUP_TIMEOUT_MS` で上限を設け、失敗しても `ai-server` 自体は起動します。
 local VAD は低遅延の M5Stack 経路で default on です。入力 Opus は session ごとの disposable decoder で復号し、一時的な decode 失敗では decoder を作り直します。連続失敗した場合だけ arrival-gap timeout に退避するため、1つの壊れた frame が TTS encoder まで巻き込む状態を避けます。`STACKCHAN_VAD_END_SILENCE_MS` は遅延と早切れの主な調整点で、自然な日本語会話では 600-750 ms 程度が実用範囲です。
@@ -388,6 +390,17 @@ interrupt の扱い:
 - barge-in は TTS 再生中も firmware が mic frame を送り続ける場合に有効です。firmware が再生中の mic input を止める場合、server 側だけでは検出できません。現在の xiaozhi speaking-state code は、選択中の listening / AEC mode で実機確認してください。
 - Dashboard mode では `ai-server` は StackChan 用 Hermes session にだけ `session.interrupt` を送ります。Children mode ではこの bridge が開始した turn だけを cancel し、同じ profile の別の使用中会話は停止しません。
 - Dashboard/TUI 側で別用途に使っている session は interrupt しません。
+
+### 信頼性と復旧
+
+- `STACKCHAN_TURN_TIMEOUT_MS` の既定値は `180000` ms（設定値は 1000–600000 ms に制限）です。STT、Hermes 起動・session 作成・応答、TTS を 1 つの絶対期限で覆い、helper 固有の timeout はそれより短い上限として働きます。キャンセル時は HTTP response body を閉じ、Python・ffmpeg・local player を終了・回収して、次の turn の裏で無期限の処理を残しません。上限付きのキャンセル・driver cleanup は仕事の期限後に完了する場合があります。
+- 中断・失敗・期限切れの RPC generation は transport/session ごと隔離し、遅着 event が次の回答に混ざるのを防ぎます。成功した turn の会話履歴は保持します。Children は毎 turn profile/voice 権限を確認し、heartbeat/cancel failure・期限切れ・owner 変更時は隔離した session を再作成します。成功 cancel 後は session を継続できます。stream consumer が TTS 待ちでも中断時に所有権を解放します。Children session 作成中の caller はキャンセルで速やかに戻り、上限付き background cleanup が遅い ID を旧認可で close して、新 session を上書きしません。権限失効を復旧で迂回しません。ローカルで中断しても、外部で既に実行された tool の副作用までは取り消せません。
+- `はい`、`うん`、`了解`、`OK`、`いいえ` など意味のある短い返答は標準で受理します。明示的な端末 `listen.start` は TTS 後 cooldown を待たず、cooldown 中の暗黙の音声入力は上限付き buffer に保持します。barge-in 検出に使った frame も次の録音へ渡します。受理済み follow-up 通知は FIFO で処理し、VAD 開始閾値未満の有声語頭を含む、進行中のユーザー録音を上書きしません。
+- ロボット制御の所有者は最初に hello を完了した端末です。後続接続は制御を奪わず、所有者が閉じた場合は最も古い残存 hello 完了接続へ移します。hello 未実施の診断接続は所有者になりません。
+- 外部再生では 30 秒の非永続 speaker lease を使い、10 秒ごとに更新します。解放・期限切れ・切断時は元の runtime 音量へ戻し、永久保存の音量設定は lease を無効化するため、古い復元要求でその設定を戻しません。厳密な lease ACK と復元確認は fail closed です。local segment 失敗時は対応 bridge/firmware の復旧経路で元の frame 送信を停止し、player を終了回収し、消音中の端末 queue を reset して復元 ACK を確認し、ACK 後の新しい decoder/admission reset を経て M5 で文全体を 1 回再送します。外部 player の最後の可聴位置が不明なため、途中まで聞こえた部分が繰り返される場合があります。[対になる protocol の統合状況](<docs/hermes-refactor/10-runtime-audit-resolution.md#integration-status>)を参照してください。
+- HERMES 手動起動で Wi-Fi/bridge の準備に失敗しても理由を示し、Home を使える状態を維持します。電源投入時の自動起動は標準で無効のままです。Setup では SSID/password の前後の空白を維持し、黙って trim せず制御文字を拒否します。URL の整形・`ws`/`wss` 検証とは分離し、準備確認・安全な status・実通信で同じ override 優先の接続先を使います。電源設定は `Save (Restart Required)` とし、status は `power_settings_apply:"next_restart"` を返します。保存した timer 方針の反映には再起動が必要です。
+
+[R01–R26 / V01–V06 対応表](<docs/hermes-refactor/10-runtime-audit-resolution.md>)では実装・host 回帰試験・手動合格条件を分けています。統合検証は bridge build・362/362 tests、firmware Debug CTest 12/12、codec strict/ASan/UBSan、再現可能な patch、ESP-IDF v5.5.4 build と EOF ISR/atomic の IRAM 配置確認に合格しました。実機の音声/DMA/duplex clock/LCD/camera、外部 Hermes/EVO の実推論、Bluetooth の物理再生は未実施で、これらの結果を実機合格とはしません。[LCD/SD 安全規約](<docs/hermes-refactor/09-cores3-shared-spi-safety.md>)の 20 MHz・queue depth 2、RGB565 byte-swap 転送 buffer、reset 順序 `esp_lcd_panel_reset` → `aw9523_->ResetIli9342` → `esp_lcd_panel_init`、Setup の明示操作だけで SD import 後に再起動する規約を維持してください。Launcher/HERMES/handoff に SD probe や LCD 直接描画を追加しません。
 
 動きの制御:
 

@@ -38,3 +38,20 @@ stackchan_apply_managed_component_patch(
     "${ESP_WIFI_CONNECT_COMPONENT_DIR}" "${ESP_WIFI_CONNECT_PATCH}" "esp-wifi-connect station stability")
 stackchan_apply_managed_component_patch(
     "${ESP_LVGL_PORT_COMPONENT_DIR}" "${ESP_LVGL_PORT_PATCH}" "esp_lvgl_port RGB565 swap buffer")
+
+set(ESP_VIDEO_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-video-bounded-dequeue.patch")
+set(ESP_VIDEO_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_video")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_VIDEO_PATCH}")
+stackchan_apply_managed_component_patch(
+    "${ESP_VIDEO_COMPONENT_DIR}" "${ESP_VIDEO_PATCH}" "esp_video bounded dequeue")
+
+set(ESP_CODEC_IO_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-codec-complete-io.patch")
+set(ESP_CODEC_COMPONENT_DIR "${CMAKE_SOURCE_DIR}/managed_components/espressif__esp_codec_dev")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_CODEC_IO_PATCH}")
+stackchan_apply_managed_component_patch(
+    "${ESP_CODEC_COMPONENT_DIR}" "${ESP_CODEC_IO_PATCH}" "esp_codec_dev complete PCM transfers")
+
+set(ESP_CODEC_CONTROL_PATCH "${CMAKE_SOURCE_DIR}/patches/esp-codec-control-errors.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ESP_CODEC_CONTROL_PATCH}")
+stackchan_apply_managed_component_patch(
+    "${ESP_CODEC_COMPONENT_DIR}" "${ESP_CODEC_CONTROL_PATCH}" "esp_codec_dev verified codec controls")

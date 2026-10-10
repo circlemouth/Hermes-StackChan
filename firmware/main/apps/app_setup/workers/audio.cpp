@@ -5,6 +5,7 @@
  */
 #include "workers.h"
 #include <hal/hal.h>
+#include <esp_system.h>
 #include <mooncake_log.h>
 
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -109,12 +110,14 @@ void MicTestWorker::update()
     GetHAL().lvglUnlock();
     auto error_message = GetHAL().startMicTest([this](MicTestStatus status) {
         LvglLockGuard lock;
+    if (!lock) return;
         _status = status;
         update_button_text();
         update_button_state();
         update_button_color();
     });
-    GetHAL().lvglLock();
+    // Reacquire the caller-owned guard without a finite timeout.
+    if (!GetHAL().lvglLock(0)) esp_restart();
 
     _is_testing = false;
 

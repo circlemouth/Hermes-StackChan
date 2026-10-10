@@ -1,0 +1,14 @@
+diff --git a/src/esp_video_ioctl.c b/src/esp_video_ioctl.c
+--- a/src/esp_video_ioctl.c
++++ b/src/esp_video_ioctl.c
+@@ -175,7 +175,9 @@
+ static esp_err_t esp_video_ioctl_dqbuf(struct esp_video *video, struct v4l2_buffer *vbuf)
+ {
+     esp_err_t ret;
+-    uint32_t ticks = portMAX_DELAY;
++    /* StackChan: a stalled camera must not pin the bounded MCP I/O worker.
++     * This pinned driver does not implement O_NONBLOCK for VIDIOC_DQBUF. */
++    uint32_t ticks = pdMS_TO_TICKS(750);
+     struct esp_video_buffer_info info;
+     struct esp_video_buffer_element *element;
+ 

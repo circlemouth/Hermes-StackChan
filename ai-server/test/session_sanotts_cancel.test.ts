@@ -68,10 +68,11 @@ function fixture(t: TestContext, streamPrompt?: (prompt: string) => AsyncIterabl
     const submitPrompt = t.mock.fn(async (prompt: string) => `${prompt}。`)
     const interrupt = t.mock.fn(async () => undefined)
     const unregister = t.mock.fn(() => undefined)
+    let registered = false
     const speechPcm = Buffer.alloc(1920)
     for (let index = 0; index < 960; index++) speechPcm.writeInt16LE(3000, index * 2)
     const session = new Session({ send: (data: string | Buffer) => { sent.push(data) } } as never, {
-        registerDeviceSession: () => unregister,
+        registerDeviceSession: () => { registered = true; return unregister },
         createInputOpusDecoder: () => ({ decodeFrame: () => speechPcm, dispose: () => undefined }),
         decodeOpusFrames: () => speechPcm,
         transcribeWav: transcribe,
@@ -87,7 +88,7 @@ function fixture(t: TestContext, streamPrompt?: (prompt: string) => AsyncIterabl
     capture.localTtsOutputConfig.enabled = false
     t.after(() => {
         session.close()
-        assert.equal(unregister.mock.callCount(), 1)
+        assert.equal(unregister.mock.callCount(), registered ? 1 : 0)
         for (const mock of forbidden) assert.equal(mock.mock.callCount(), 0)
     })
     const json = () => sent.filter((item): item is string => typeof item === 'string').map(item => JSON.parse(item) as Record<string, unknown>)
@@ -170,7 +171,8 @@ test('close aborts pending synthesis and suppresses late output and subsequent i
     f.listen()
     f.frame()
     f.stop()
-    await f.followup('closed followup')
+    await assert.rejects(f.followup('closed followup'), /session is closed/)
+    await flush()
     assert.equal(f.sent.length, sentAtClose)
     assert.equal(f.encode.mock.callCount(), 0)
     assert.equal(f.calls.length, 1)
@@ -335,7 +337,7 @@ test('real Sano failure still alerts and speaks the existing error fallback', as
     assert.equal(f.synthesizeHermes.mock.callCount(), 0)
 })
 
-test('successful Sano and explicit Hermes retain normal completion and Hermes one-argument API', async t => {
+test('successful Sano and explicit Hermes retain normal completion and pass cancellation options', async t => {
     const f = fixture(t)
     await f.followup()
     f.calls[0].resolve(Buffer.from('normal WAV'))
@@ -350,7 +352,10 @@ test('successful Sano and explicit Hermes retain normal completion and Hermes on
     await f.followup('Hermes greeting')
     assert.equal(f.calls.length, 1)
     assert.equal(f.synthesizeHermes.mock.callCount(), callsBeforeReply + 1)
-    for (const call of f.synthesizeHermes.mock.calls) assert.equal(call.arguments.length, 1)
+    for (const call of f.synthesizeHermes.mock.calls) {
+        assert.equal(call.arguments.length, 2)
+        assert.ok((call.arguments[1] as { signal: AbortSignal }).signal)
+    }
     assert.equal(stops(f), 2)
     assert.equal(f.errors.mock.callCount(), 0)
 })

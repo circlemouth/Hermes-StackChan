@@ -111,7 +111,7 @@ HermesPowerSavingWorker::HermesPowerSavingWorker()
     apply_button_common_style(*_btn_confirm);
     _btn_confirm->align(LV_ALIGN_TOP_MID, 0, 326);
     _btn_confirm->setSize(290, 50);
-    _btn_confirm->label().setText("Confirm");
+    _btn_confirm->label().setText("Save (Restart Required)");
     _btn_confirm->onClick().connect([this]() { _confirm_flag = true; });
 
     update_idle_label();

@@ -3,6 +3,10 @@
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include <settings.h>
+#include <algorithm>
 
 #define TAG "CoreS3AudioCodec"
 
@@ -77,9 +81,9 @@ CoreS3AudioCodec::CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rat
 }
 
 CoreS3AudioCodec::~CoreS3AudioCodec() {
-    ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
+    esp_codec_dev_close(output_dev_);
     esp_codec_dev_delete(output_dev_);
-    ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
+    esp_codec_dev_close(input_dev_);
     esp_codec_dev_delete(input_dev_);
 
     audio_codec_delete_codec_if(in_codec_if_);
@@ -88,6 +92,17 @@ CoreS3AudioCodec::~CoreS3AudioCodec() {
     audio_codec_delete_ctrl_if(out_ctrl_if_);
     audio_codec_delete_gpio_if(gpio_if_);
     audio_codec_delete_data_if(data_if_);
+
+    // Final object teardown only, never the restoration/drain path. Delete the
+    // TX channel before releasing its ISR context; failed teardown leaks four
+    // bytes rather than leaving a running ISR with a dangling atomic pointer.
+    if (rx_handle_) { i2s_channel_disable(rx_handle_); i2s_del_channel(rx_handle_); }
+    if (tx_handle_) {
+        i2s_channel_disable(tx_handle_);
+        if (i2s_del_channel(tx_handle_) == ESP_OK && tx_eof_count_) {
+            heap_caps_free(tx_eof_count_);
+        }
+    }
 }
 
 void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din) {
@@ -100,8 +115,10 @@ void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
         .role = I2S_ROLE_MASTER,
         .dma_desc_num = AUDIO_CODEC_DMA_DESC_NUM,
         .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
-        .auto_clear_after_cb = true,
-        .auto_clear_before_cb = false,
+        // v5.5.4 clears the completed descriptor before on_sent. Seven
+        // completions after fencing cover all six buffers plus a DMA guard.
+        .auto_clear_after_cb = false,
+        .auto_clear_before_cb = true,
         .intr_priority = 0,
     };
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle_, &rx_handle_));
@@ -177,70 +194,10 @@ void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_tdm_mode(rx_handle_, &tdm_cfg));
+    // Registration is legal only before initial enable. Allocation/registration
+    // failure disables leases (ordinary audio can remain available), not boot.
+    RegisterTxCompletionTracking();
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
     ESP_LOGI(TAG, "Duplex channels created");
-}
-
-void CoreS3AudioCodec::SetOutputVolume(int volume) {
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
-    AudioCodec::SetOutputVolume(volume);
-}
-
-void CoreS3AudioCodec::EnableInput(bool enable) {
-    if (enable == input_enabled_) {
-        return;
-    }
-    if (enable) {
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 2,
-            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        if (input_reference_) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
-        }
-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
-    } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
-    }
-    AudioCodec::EnableInput(enable);
-}
-
-void CoreS3AudioCodec::EnableOutput(bool enable) {
-    if (enable == output_enabled_) {
-        return;
-    }
-    if (enable) {
-        // Play 16bit 1 channel
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)output_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
-    } else {
-        ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
-    }
-    AudioCodec::EnableOutput(enable);
-}
-
-int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
-    }
-    return samples;
-}
-
-int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
-    }
-    return samples;
 }

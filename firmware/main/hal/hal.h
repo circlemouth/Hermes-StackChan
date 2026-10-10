@@ -145,7 +145,7 @@ public:
     /* --------------------------------- Display -------------------------------- */
     lv_indev_t* lvTouchpad = nullptr;
     std::unique_ptr<BootLogo> bootLogo;
-    void lvglLock();
+    bool lvglLock(int timeout_ms = 0);
     void lvglUnlock();
     void setBackLightBrightness(uint8_t brightness, bool permanent = false);
     uint8_t getBackLightBrightness();
@@ -265,13 +265,11 @@ Hal& GetHAL();
  *
  */
 class LvglLockGuard {
+    bool acquired_;
 public:
-    LvglLockGuard()
-    {
-        GetHAL().lvglLock();
-    }
-    ~LvglLockGuard()
-    {
-        GetHAL().lvglUnlock();
-    }
+    explicit LvglLockGuard(int timeout_ms = 0) : acquired_(GetHAL().lvglLock(timeout_ms)) {}
+    ~LvglLockGuard() { if (acquired_) GetHAL().lvglUnlock(); }
+    explicit operator bool() const { return acquired_; }
+    LvglLockGuard(const LvglLockGuard&) = delete;
+    LvglLockGuard& operator=(const LvglLockGuard&) = delete;
 };

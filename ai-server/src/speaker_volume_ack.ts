@@ -3,8 +3,12 @@ const MAX_ACK_DEPTH = 6
 
 /** Parse only explicit firmware volume acknowledgements, never generic success. */
 export function readSpeakerVolumeAck(result: unknown): number | undefined {
+    return readSpeakerVolumeAckRecord(result)?.['speaker_volume'] as number | undefined
+}
+
+export function readSpeakerVolumeAckRecord(result: unknown): Record<string, unknown> | undefined {
     let remainingText = MAX_ACK_TEXT_LENGTH
-    const parse = (value: unknown, depth: number): number | undefined => {
+    const parse = (value: unknown, depth: number): Record<string, unknown> | undefined => {
         if (depth > MAX_ACK_DEPTH) return undefined
         if (typeof value === 'string') {
             if (!value.length || value.length > remainingText) return undefined
@@ -15,7 +19,7 @@ export function readSpeakerVolumeAck(result: unknown): number | undefined {
         const record = value as Record<string, unknown>
         const has = (key: string) => Object.prototype.hasOwnProperty.call(record, key)
         // Reject error/malformed error markers at every wrapper layer.
-        if (has('error') || (has('isError') && record['isError'] !== false)) return undefined
+        if (has('error') || record['success'] === false || (has('isError') && record['isError'] !== false)) return undefined
         if (has('content')) {
             // Mixed or multiple results are ambiguous, so cannot authorize playback.
             if (has('speaker_volume')) return undefined
@@ -33,7 +37,7 @@ export function readSpeakerVolumeAck(result: unknown): number | undefined {
         if (!has('speaker_volume')) return undefined
         const volume = record['speaker_volume']
         return typeof volume === 'number' && Number.isInteger(volume) && volume >= 0 && volume <= 100
-            ? volume
+            ? record
             : undefined
     }
     try {

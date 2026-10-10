@@ -16,7 +16,7 @@ using namespace setup_workers;
 class LvglUnlockGuard {
 public:
     LvglUnlockGuard() { GetHAL().lvglUnlock(); }
-    ~LvglUnlockGuard() { GetHAL().lvglLock(); }
+    ~LvglUnlockGuard() { if (!GetHAL().lvglLock(0)) esp_restart(); }
     LvglUnlockGuard(const LvglUnlockGuard&) = delete;
     LvglUnlockGuard& operator=(const LvglUnlockGuard&) = delete;
 };

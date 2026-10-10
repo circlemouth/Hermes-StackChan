@@ -1,16 +1,19 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3e8721ee1 100644
+index d69d43d..6bd8bbb 100644
 --- a/main/application.cc
 +++ b/main/application.cc
-@@ -11,6 +11,7 @@
+@@ -9,8 +9,10 @@
+ #include "mcp_server.h"
+ #include "assets.h"
  #include "settings.h"
++#include "websocket_endpoint.h"
  
  #include <cstring>
 +#include <algorithm>
  #include <esp_log.h>
  #include <cJSON.h>
  #include <driver/gpio.h>
-@@ -44,6 +45,33 @@ Application::Application() {
+@@ -44,6 +46,33 @@ Application::Application() {
          .skip_unhandled_events = true
      };
      esp_timer_create(&clock_timer_args, &clock_timer_handle_);
@@ -44,7 +47,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
  }
  
  Application::~Application() {
-@@ -51,6 +79,10 @@ Application::~Application() {
+@@ -51,6 +80,10 @@ Application::~Application() {
          esp_timer_stop(clock_timer_handle_);
          esp_timer_delete(clock_timer_handle_);
      }
@@ -55,7 +58,24 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      vEventGroupDelete(event_group_);
  }
  
-@@ -280,19 +312,31 @@ void Application::HandleNetworkConnectedEvent() {
+@@ -83,6 +116,7 @@ void Application::Initialize() {
+     callbacks.on_vad_change = [this](bool speaking) {
+         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
+     };
++    callbacks.on_playback_progress = [this]() { xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE); };
+     audio_service_.SetCallbacks(callbacks);
+ 
+     // Add state change listeners
+@@ -245,6 +279,8 @@ void Application::Run() {
+             }
+         }
+ 
++        FinishTtsIfDrained();
++
+         if (bits & MAIN_EVENT_CLOCK_TICK) {
+             clock_ticks_++;
+             auto display = Board::GetInstance().GetDisplay();
+@@ -280,19 +316,31 @@ void Application::HandleNetworkConnectedEvent() {
  
      // Update the status bar immediately to show the network state
      auto display = Board::GetInstance().GetDisplay();
@@ -88,7 +108,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      display->UpdateStatusBar(true);
  }
  
-@@ -314,10 +358,18 @@ void Application::HandleActivationDoneEvent() {
+@@ -314,10 +362,18 @@ void Application::HandleActivationDoneEvent() {
      auto& board = Board::GetInstance();
      board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
  
@@ -111,17 +131,14 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
  }
  
  void Application::ActivationTask() {
-@@ -400,6 +452,18 @@ void Application::CheckNewVersion() {
+@@ -400,6 +456,15 @@ void Application::CheckNewVersion() {
      int retry_count = 0;
      int retry_delay = 10; // Initial retry delay in seconds
  
 +    Settings wifi_settings("wifi", false);
 +    Settings websocket_settings("websocket", false);
 +    std::string explicit_ota_url = wifi_settings.GetString("ota_url");
-+    std::string local_websocket_url = websocket_settings.GetString("url");
-+    if (local_websocket_url.empty()) {
-+        local_websocket_url = websocket_settings.GetString("url_override");
-+    }
++    std::string local_websocket_url = GetEffectiveWebsocketUrl();
 +    if (explicit_ota_url.empty() && !local_websocket_url.empty()) {
 +        ESP_LOGI(TAG, "Skipping cloud version check because a local websocket is configured");
 +        return;
@@ -130,16 +147,13 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      auto& board = Board::GetInstance();
      while (true) {
          auto display = board.GetDisplay();
-@@ -477,13 +541,26 @@ void Application::InitializeProtocol() {
+@@ -477,13 +542,23 @@ void Application::InitializeProtocol() {
  
      display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
  
 -    if (ota_->HasMqttConfig()) {
 +    Settings websocket_settings("websocket", false);
-+    std::string local_websocket_url = websocket_settings.GetString("url");
-+    if (local_websocket_url.empty()) {
-+        local_websocket_url = websocket_settings.GetString("url_override");
-+    }
++    std::string local_websocket_url = GetEffectiveWebsocketUrl();
 +
 +    if (!local_websocket_url.empty()) {
 +        ESP_LOGI(TAG, "Using configured local websocket protocol");
@@ -158,7 +172,16 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      }
  
      protocol_->OnConnected([this]() {
-@@ -502,6 +579,7 @@ void Application::InitializeProtocol() {
+@@ -496,12 +571,14 @@ void Application::InitializeProtocol() {
+     });
+     
+     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+-        if (GetDeviceState() == kDeviceStateSpeaking) {
+-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
++        const unsigned generation = audio_service_.PlaybackGeneration();
++        if (tts_admission_.accepts()) {
++            audio_service_.PushPacketToDecodeQueue(std::move(packet), false, generation);
+         }
      });
      
      protocol_->OnAudioChannelOpened([this, codec, &board]() {
@@ -166,9 +189,14 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
          board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
          if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
              ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
-@@ -511,13 +589,33 @@ void Application::InitializeProtocol() {
+@@ -510,33 +587,70 @@ void Application::InitializeProtocol() {
+     });
      
      protocol_->OnAudioChannelClosed([this, &board]() {
++        tts_admission_.Cancel();
++        audio_service_.ResetDecoder();
++        McpServer::GetInstance().OnConnectionClosed();
++        if (auto* codec = board.GetAudioCodec()) codec->RequestVolumeLeaseRelease();
          board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 -        Schedule([this]() {
 +        const bool preserve_protocol_error = !last_error_message_.empty();
@@ -187,6 +215,10 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      });
      
 +    protocol_->OnDisconnected([this]() {
++        tts_admission_.Cancel();
++        audio_service_.ResetDecoder();
++        McpServer::GetInstance().OnConnectionClosed();
++        if (auto* codec = Board::GetInstance().GetAudioCodec()) codec->RequestVolumeLeaseRelease();
 +        Schedule([this]() {
 +            if (!protocol_ || protocol_->IsAudioChannelOpened()) {
 +                return;
@@ -202,7 +234,44 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
      protocol_->OnIncomingJson([this, display](const cJSON* root) {
          // Parse JSON data
          auto type = cJSON_GetObjectItem(root, "type");
-@@ -609,34 +707,85 @@ void Application::InitializeProtocol() {
++        if (!cJSON_IsString(type)) return;
+         if (strcmp(type->valuestring, "tts") == 0) {
+             auto state = cJSON_GetObjectItem(root, "state");
++            if (!cJSON_IsString(state)) return;
+             if (strcmp(state->valuestring, "start") == 0) {
+-                Schedule([this]() {
++                const unsigned generation = tts_admission_.Begin();
++                // Transport admission precedes scheduled UI state: first PCM cannot
++                // outrun Speaking while the main thread is processing other work.
++                audio_service_.ResetDecoder();
++                if (!tts_admission_.Admit(generation)) return;
++                Schedule([this, generation]() {
++                    if (tts_admission_.generation() != generation) return;
++                    tts_stop_pending_ = false;
+                     aborted_ = false;
+                     SetDeviceState(kDeviceStateSpeaking);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+-                Schedule([this]() {
+-                    if (GetDeviceState() == kDeviceStateSpeaking) {
+-                        if (listening_mode_ == kListeningModeManualStop) {
+-                            SetDeviceState(kDeviceStateIdle);
+-                        } else {
+-                            SetDeviceState(kDeviceStateListening);
+-                        }
+-                    }
++                const unsigned generation = tts_admission_.Stop();
++                Schedule([this, generation]() {
++                    if (tts_admission_.generation() != generation) return;
++                    // Do not clear queued final PCM by entering Listening early.
++                    // The main task never waits for codec/network I/O to drain.
++                    tts_stop_pending_ = true;
++                    tts_stop_generation_ = generation;
++                    FinishTtsIfDrained();
+                 });
+             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+                 auto text = cJSON_GetObjectItem(root, "text");
+@@ -609,34 +723,85 @@ void Application::InitializeProtocol() {
      protocol_->Start();
  }
  
@@ -314,7 +383,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -706,18 +855,24 @@ void Application::HandleToggleChatEvent() {
+@@ -706,18 +871,24 @@ void Application::HandleToggleChatEvent() {
      } else if (state == kDeviceStateSpeaking) {
          AbortSpeaking(kAbortReasonNone);
      } else if (state == kDeviceStateListening) {
@@ -340,7 +409,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
              return;
          }
      }
-@@ -725,6 +880,36 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -725,6 +896,36 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
      SetListeningMode(mode);
  }
  
@@ -377,7 +446,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
  void Application::HandleStartListeningEvent() {
      auto state = GetDeviceState();
      
-@@ -865,7 +1050,11 @@ void Application::HandleStateChangedEvent() {
+@@ -865,7 +1066,11 @@ void Application::HandleStateChangedEvent() {
          case kDeviceStateUnknown:
          case kDeviceStateIdle:
              display->SetStatus(Lang::Strings::STANDBY);
@@ -390,7 +459,68 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
              display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
              audio_service_.EnableVoiceProcessing(false);
              audio_service_.EnableWakeWordDetection(true);
-@@ -1096,6 +1285,7 @@ void Application::SetAecMode(AecMode mode) {
+@@ -881,11 +1086,8 @@ void Application::HandleStateChangedEvent() {
+ 
+             // Make sure the audio processor is running
+             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+-                // For auto mode, wait for playback queue to be empty before enabling voice processing
+-                // This prevents audio truncation when STOP arrives late due to network jitter
+-                if (listening_mode_ == kListeningModeAutoStop) {
+-                    audio_service_.WaitForPlaybackQueueEmpty();
+-                }
++                // TTS stop reaches this state only after nonblocking drain tracking.
++                // Explicit user transitions may abort, but never block the main task.
+                 
+                 // Send the start listening command
+                 protocol_->SendStartListening(listening_mode_);
+@@ -914,7 +1116,7 @@ void Application::HandleStateChangedEvent() {
+                 // Only AFE wake word can be detected in speaking mode
+                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+             }
+-            audio_service_.ResetDecoder();
++            // Decoder was reset by the transport before first-packet admission.
+             break;
+         case kDeviceStateWifiConfiguring:
+             audio_service_.EnableVoiceProcessing(false);
+@@ -926,6 +1128,16 @@ void Application::HandleStateChangedEvent() {
+     }
+ }
+ 
++void Application::FinishTtsIfDrained() {
++    if (!tts_stop_pending_) return;
++    if (tts_admission_.generation() != tts_stop_generation_) { tts_stop_pending_ = false; return; }
++    if (!audio_service_.IsPlaybackDrained()) return;
++    tts_stop_pending_ = false;
++    if (GetDeviceState() == kDeviceStateSpeaking) {
++        SetDeviceState(listening_mode_ == kListeningModeManualStop ? kDeviceStateIdle : kDeviceStateListening);
++    }
++}
++
+ void Application::Schedule(std::function<void()>&& callback) {
+     {
+         std::lock_guard<std::mutex> lock(mutex_);
+@@ -937,6 +1149,8 @@ void Application::Schedule(std::function<void()>&& callback) {
+ void Application::AbortSpeaking(AbortReason reason) {
+     ESP_LOGI(TAG, "Abort speaking");
+     aborted_ = true;
++    tts_admission_.Cancel();
++    audio_service_.ResetDecoder();
+     if (protocol_) {
+         protocol_->SendAbortSpeaking(reason);
+     }
+@@ -1068,8 +1282,9 @@ bool Application::CanEnterSleepMode() {
+ 
+ void Application::SendMcpMessage(const std::string& payload) {
+     // Always schedule to run in main task for thread safety
+-    Schedule([this, payload = std::move(payload)]() {
+-        if (protocol_) {
++    const auto generation = McpServer::GetInstance().connection_generation();
++    Schedule([this, generation, payload = std::move(payload)]() {
++        if (protocol_ && generation == McpServer::GetInstance().connection_generation()) {
+             protocol_->SendMcpMessage(payload);
+         }
+     });
+@@ -1096,6 +1311,7 @@ void Application::SetAecMode(AecMode mode) {
          }
  
          // If the AEC mode is changed, close the audio channel
@@ -398,7 +528,7 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
          if (protocol_ && protocol_->IsAudioChannelOpened()) {
              protocol_->CloseAudioChannel();
          }
-@@ -1108,6 +1298,8 @@ void Application::PlaySound(const std::string_view& sound) {
+@@ -1108,6 +1324,8 @@ void Application::PlaySound(const std::string_view& sound) {
  
  void Application::ResetProtocol() {
      Schedule([this]() {
@@ -407,16 +537,29 @@ index d69d43d0ea7c7c1037604ec259446c54f0b0c5cb..ede5661264efa431517f44b6c69588d3
          // Close audio channel if opened
          if (protocol_ && protocol_->IsAudioChannelOpened()) {
              protocol_->CloseAudioChannel();
-@@ -1116,4 +1308,3 @@ void Application::ResetProtocol() {
+@@ -1116,4 +1334,3 @@ void Application::ResetProtocol() {
          protocol_.reset();
      });
  }
 -
 diff --git a/main/application.h b/main/application.h
-index 7ca7af4fac4d01ca190d2f2d710f6f4aee64ac4c..f0ba267d5b89d5abee257b04d9fe2d03dbce2e0a 100644
+index 7ca7af4..792e430 100644
 --- a/main/application.h
 +++ b/main/application.h
-@@ -129,6 +129,7 @@ private:
+@@ -8,10 +8,12 @@
+ 
+ #include <string>
+ #include <mutex>
++#include <atomic>
+ #include <deque>
+ #include <memory>
+ 
+ #include "protocol.h"
++#include "runtime_safety.h"
+ #include "ota.h"
+ #include "audio_service.h"
+ #include "device_state.h"
+@@ -129,6 +131,7 @@ private:
      std::unique_ptr<Protocol> protocol_;
      EventGroupHandle_t event_group_ = nullptr;
      esp_timer_handle_t clock_timer_handle_ = nullptr;
@@ -424,8 +567,15 @@ index 7ca7af4fac4d01ca190d2f2d710f6f4aee64ac4c..f0ba267d5b89d5abee257b04d9fe2d03
      DeviceStateMachine state_machine_;
      ListeningMode listening_mode_ = kListeningModeAutoStop;
      AecMode aec_mode_ = kAecOff;
-@@ -140,6 +141,9 @@ private:
-     bool aborted_ = false;
+@@ -137,9 +140,15 @@ private:
+     std::unique_ptr<Ota> ota_;
+ 
+     bool has_server_time_ = false;
+-    bool aborted_ = false;
++    std::atomic<bool> aborted_{false};
++    runtime_safety::TtsAdmission tts_admission_;
++    bool tts_stop_pending_ = false;
++    unsigned tts_stop_generation_ = 0;
      bool assets_version_checked_ = false;
      bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
 +    bool startup_connection_probe_pending_ = false;
@@ -434,11 +584,12 @@ index 7ca7af4fac4d01ca190d2f2d710f6f4aee64ac4c..f0ba267d5b89d5abee257b04d9fe2d03
      int clock_ticks_ = 0;
      TaskHandle_t activation_task_handle_ = nullptr;
  
-@@ -155,6 +159,10 @@ private:
+@@ -155,6 +164,11 @@ private:
      void HandleWakeWordDetectedEvent();
      void ContinueOpenAudioChannel(ListeningMode mode);
      void ContinueWakeWordInvoke(const std::string& wake_word);
 +    void ProbeStartupConnection();
++    void FinishTtsIfDrained();
 +    void ContinueStartupConnectionProbe();
 +    void ScheduleAudioChannelReconnect();
 +    void CancelAudioChannelReconnect();
@@ -446,7 +597,7 @@ index 7ca7af4fac4d01ca190d2f2d710f6f4aee64ac4c..f0ba267d5b89d5abee257b04d9fe2d03
      // Activation task (runs in background)
      void ActivationTask();
 diff --git a/main/assets.cc b/main/assets.cc
-index ad6194422fc79bd8a568873d57ee83ba1aa79b37..6b84daf55a11421f9fb2923dd409396c2e3aafc1 100644
+index ad61944..6b84daf 100644
 --- a/main/assets.cc
 +++ b/main/assets.cc
 @@ -3,8 +3,8 @@
@@ -600,7 +751,7 @@ index ad6194422fc79bd8a568873d57ee83ba1aa79b37..6b84daf55a11421f9fb2923dd409396c
  bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
      ESP_LOGI(TAG, "Downloading new version of assets from %s", url.c_str());
 diff --git a/main/assets.h b/main/assets.h
-index 3692e0c7292f22f585a6848d95235e0573394af7..7bfbc5caac716fab33fd63ff64d5f56bb4714bdb 100644
+index 3692e0c..7bfbc5c 100644
 --- a/main/assets.h
 +++ b/main/assets.h
 @@ -68,13 +68,13 @@ private:
@@ -624,11 +775,184 @@ index 3692e0c7292f22f585a6848d95235e0573394af7..7bfbc5caac716fab33fd63ff64d5f56b
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git a/main/audio/audio_codec.cc b/main/audio/audio_codec.cc
+index 03e2baa..aa4d1c0 100644
+--- a/main/audio/audio_codec.cc
++++ b/main/audio/audio_codec.cc
+@@ -4,6 +4,7 @@
+ 
+ #include <esp_log.h>
+ #include <cstring>
++#include <algorithm>
+ #include <driver/i2s_common.h>
+ 
+ #define TAG "AudioCodec"
+@@ -14,24 +15,30 @@ AudioCodec::AudioCodec() {
+ AudioCodec::~AudioCodec() {
+ }
+ 
+-void AudioCodec::OutputData(std::vector<int16_t>& data) {
+-    Write(data.data(), data.size());
++int AudioCodec::OutputDataAtEpoch(std::vector<int16_t>& data, uint32_t epoch) {
++    if (epoch != OutputEpoch()) return 0;
++    if (!output_enabled()) EnableOutput(true);
++    return output_enabled() ? OutputData(data) : 0;
++}
++
++int AudioCodec::OutputData(std::vector<int16_t>& data) {
++    return Write(data.data(), data.size());
+ }
+ 
+ bool AudioCodec::InputData(std::vector<int16_t>& data) {
+     int samples = Read(data.data(), data.size());
+-    if (samples > 0) {
++    if (samples == static_cast<int>(data.size()) && samples > 0) {
+         return true;
+     }
++    std::fill(data.begin(), data.end(), 0);
+     return false;
+ }
+ 
+ void AudioCodec::Start() {
+     Settings settings("audio", false);
+     output_volume_ = settings.GetInt("output_volume", output_volume_);
+-    if (output_volume_ <= 0) {
+-        ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (10)", output_volume_);
+-        output_volume_ = 10;
++    if (output_volume_ < 0 || output_volume_ > 100) {
++        output_volume_ = 70;
+     }
+ 
+     ESP_LOGI(TAG, "Audio codec started");
+@@ -39,7 +46,7 @@ void AudioCodec::Start() {
+ 
+ void AudioCodec::SetOutputVolume(int volume) {
+     output_volume_ = volume;
+-    ESP_LOGI(TAG, "Set output volume to %d", output_volume_);
++    ESP_LOGI(TAG, "Set output volume to %d", output_volume_.load());
+     
+     Settings settings("audio", true);
+     settings.SetInt("output_volume", output_volume_);
+diff --git a/main/audio/audio_codec.h b/main/audio/audio_codec.h
+index 819e646..6313105 100644
+--- a/main/audio/audio_codec.h
++++ b/main/audio/audio_codec.h
+@@ -8,6 +8,8 @@
+ #include <vector>
+ #include <string>
+ #include <functional>
++#include <atomic>
++#include <cstdint>
+ 
+ #include "board.h"
+ 
+@@ -20,11 +22,20 @@ public:
+     virtual ~AudioCodec();
+     
+     virtual void SetOutputVolume(int volume);
++    virtual bool SetOutputVolumeTemporary(int volume) { return false; }
++    virtual bool BeginDiagnosticOutput() { return false; }
++    virtual void EndDiagnosticOutput() {}
++    virtual void RequestVolumeLeaseRelease() {}
++    virtual void PollVolumeLease() {}
+     virtual void SetInputGain(float gain);
+     virtual void EnableInput(bool enable);
+     virtual void EnableOutput(bool enable);
+ 
+-    virtual void OutputData(std::vector<int16_t>& data);
++    // Bind an epoch at admission/reset, never when dequeuing old PCM.
++    virtual uint32_t BeginOutputEpoch() { return 0; }
++    virtual uint32_t OutputEpoch() { return 0; }
++    virtual int OutputDataAtEpoch(std::vector<int16_t>& data, uint32_t epoch);
++    virtual int OutputData(std::vector<int16_t>& data);
+     virtual bool InputData(std::vector<int16_t>& data);
+     virtual void Start();
+ 
+@@ -34,10 +45,10 @@ public:
+     inline int output_sample_rate() const { return output_sample_rate_; }
+     inline int input_channels() const { return input_channels_; }
+     inline int output_channels() const { return output_channels_; }
+-    inline int output_volume() const { return output_volume_; }
++    inline int output_volume() const { return output_volume_.load(); }
+     inline float input_gain() const { return input_gain_; }
+-    inline bool input_enabled() const { return input_enabled_; }
+-    inline bool output_enabled() const { return output_enabled_; }
++    inline bool input_enabled() const { return input_enabled_.load(); }
++    inline bool output_enabled() const { return output_enabled_.load(); }
+ 
+ protected:
+     i2s_chan_handle_t tx_handle_ = nullptr;
+@@ -45,13 +56,13 @@ protected:
+ 
+     bool duplex_ = false;
+     bool input_reference_ = false;
+-    bool input_enabled_ = false;
+-    bool output_enabled_ = false;
++    std::atomic<bool> input_enabled_{false};
++    std::atomic<bool> output_enabled_{false};
+     int input_sample_rate_ = 0;
+     int output_sample_rate_ = 0;
+     int input_channels_ = 1;
+     int output_channels_ = 1;
+-    int output_volume_ = 70;
++    std::atomic<int> output_volume_{70};
+     float input_gain_ = 0.0;
+ 
+     virtual int Read(int16_t* dest, int samples) = 0;
 diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
-index 350ac58672d357cb48497446360afb0b6e761470..7309d03e24f6b921a65e814169e25dcf575b00e4 100644
+index 350ac58..714793d 100644
 --- a/main/audio/audio_service.cc
 +++ b/main/audio/audio_service.cc
-@@ -238,7 +238,7 @@ void AudioService::AudioInputTask() {
+@@ -1,4 +1,5 @@
+ #include "audio_service.h"
++#include "runtime_safety.h"
+ #include <esp_log.h>
+ #include <cstring>
+ 
+@@ -62,6 +63,7 @@ AudioService::~AudioService() {
+ void AudioService::Initialize(AudioCodec* codec) {
+     codec_ = codec;
+     codec_->Start();
++    playback_output_epoch_ = codec_->BeginOutputEpoch();
+ 
+     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(codec->output_sample_rate(), OPUS_FRAME_DURATION_MS);
+     auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
+@@ -167,17 +169,33 @@ void AudioService::Start() {
+ }
+ 
+ void AudioService::Stop() {
++    std::lock_guard<std::mutex> transition(playback_transition_mutex_);
+     esp_timer_stop(audio_power_timer_);
+-    service_stopped_ = true;
++    {
++        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++        service_stopped_ = true;
++        playback_transitioning_ = true;
++        ++playback_generation_;
++        audio_queue_cv_.notify_all();
++    }
++    // Fence a task already dequeued before Stop, without a queue/codec lock cycle.
++    const uint32_t epoch = codec_ ? codec_->BeginOutputEpoch() : 0;
++    {
++        std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
++        if (opus_decoder_ != nullptr) esp_opus_dec_reset(opus_decoder_);
++    }
+     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
+         AS_EVENT_WAKE_WORD_RUNNING |
+         AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+ 
+     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++    playback_output_epoch_ = epoch;
++    playback_transitioning_ = false;
+     audio_encode_queue_.clear();
+     audio_decode_queue_.clear();
+     audio_playback_queue_.clear();
+     audio_testing_queue_.clear();
++    timestamp_queue_.clear();
+     audio_queue_cv_.notify_all();
+ }
+ 
+@@ -238,7 +256,7 @@ void AudioService::AudioInputTask() {
          }
          if (audio_input_need_warmup_) {
              audio_input_need_warmup_ = false;
@@ -637,7 +961,208 @@ index 350ac58672d357cb48497446360afb0b6e761470..7309d03e24f6b921a65e814169e25dcf
              continue;
          }
  
-@@ -700,7 +700,10 @@ void AudioService::CheckAndUpdateAudioPowerState() {
+@@ -297,16 +315,27 @@ void AudioService::AudioOutputTask() {
+ 
+         auto task = std::move(audio_playback_queue_.front());
+         audio_playback_queue_.pop_front();
++        playback_in_flight_ = true;
+         audio_queue_cv_.notify_all();
+         lock.unlock();
++        runtime_safety::ScopeExit finish([this, &lock]() {
++            if (!lock.owns_lock()) lock.lock();
++            playback_in_flight_ = false;
++            audio_queue_cv_.notify_all();
++            if (callbacks_.on_playback_progress) callbacks_.on_playback_progress();
++        });
+ 
++        if (task->playback_generation != playback_generation_.load()) continue;
+         if (!codec_->output_enabled()) {
+             esp_timer_stop(audio_power_timer_);
+             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+-            codec_->EnableOutput(true);
+         }
+-
+-        codec_->OutputData(task->pcm);
++        // Never sample the current codec epoch here: parked old PCM must stay
++        // bound to its original admission across restore, expiry and reset.
++        if (codec_->OutputDataAtEpoch(task->pcm, task->output_epoch) != static_cast<int>(task->pcm.size())) {
++            // Disabled/failed/partial writes are not playback or AEC timestamps.
++            continue;
++        }
+ 
+         /* Update the last output time */
+         last_output_time_ = std::chrono::steady_clock::now();
+@@ -338,16 +367,24 @@ void AudioService::OpusCodecTask() {
+ 
+         /* Decode the audio from decode queue */
+         if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
+-            auto packet = std::move(audio_decode_queue_.front());
++            auto admitted = std::move(audio_decode_queue_.front());
+             audio_decode_queue_.pop_front();
++            auto packet = std::move(admitted.packet);
++            const unsigned generation = admitted.playback_generation;
++            decode_in_flight_ = true;
+             audio_queue_cv_.notify_all();
+             lock.unlock();
+ 
+             auto task = std::make_unique<AudioTask>();
+             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+             task->timestamp = packet->timestamp;
++            task->playback_generation = generation;
++            task->output_epoch = admitted.output_epoch;
+ 
+-            SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
++            std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
++            const bool stale = generation != playback_generation_.load();
++            // A parked old packet must not even reopen/reconfigure the new decoder.
++            if (!stale) SetDecodeSampleRateLocked(packet->sample_rate, packet->frame_duration);
+             if (opus_decoder_ != nullptr) {
+                 task->pcm.resize(decoder_frame_size_);
+                 esp_audio_dec_in_raw_t raw = {
+@@ -362,10 +399,12 @@ void AudioService::OpusCodecTask() {
+                     .decoded_size = 0,
+                 };
+                 esp_audio_dec_info_t dec_info = {};
+-                std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
+-                auto ret = esp_opus_dec_decode(opus_decoder_, &raw, &out_frame, &dec_info);
++                auto ret = ESP_AUDIO_ERR_OK;
++                // Reset may have completed after this packet was dequeued. Do
++                // not let old audio mutate the freshly reset decoder state.
++                if (!stale) ret = esp_opus_dec_decode(opus_decoder_, &raw, &out_frame, &dec_info);
+                 decoder_lock.unlock();
+-                if (ret == ESP_AUDIO_ERR_OK) {
++                if (!stale && ret == ESP_AUDIO_ERR_OK) {
+                     task->pcm.resize(out_frame.decoded_size / sizeof(int16_t));
+                     if (decoder_sample_rate_ != codec_->output_sample_rate() && output_resampler_ != nullptr) {
+                         uint32_t target_size = 0;
+@@ -378,18 +417,20 @@ void AudioService::OpusCodecTask() {
+                         task->pcm = std::move(resampled);
+                     }
+                     lock.lock();
+-                    audio_playback_queue_.push_back(std::move(task));
++                    if (generation == playback_generation_.load()) audio_playback_queue_.push_back(std::move(task));
+                     audio_queue_cv_.notify_all();
+                     debug_statistics_.decode_count++;
+                 } else {
+-                    ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
++                    if (!stale) ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
+                     lock.lock();
+                 }
+             } else {
+-                ESP_LOGE(TAG, "Audio decoder is not configured");
++                decoder_lock.unlock();
++                if (!stale) ESP_LOGE(TAG, "Audio decoder is not configured");
+                 lock.lock();
+             }
+-            debug_statistics_.decode_count++;
++            decode_in_flight_ = false;
++            if (callbacks_.on_playback_progress) callbacks_.on_playback_progress();
+         }
+         /* Encode the audio to send queue */
+         if (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) {
+@@ -445,16 +486,15 @@ void AudioService::OpusCodecTask() {
+     ESP_LOGW(TAG, "Opus codec task stopped");
+ }
+ 
+-void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
++void AudioService::SetDecodeSampleRateLocked(int sample_rate, int frame_duration) {
+     if (decoder_sample_rate_ == sample_rate && decoder_duration_ms_ == frame_duration) {
+         return;
+     }
+-    std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
++    // Caller holds decoder_mutex_ across close/open/configuration and decode.
+     if (opus_decoder_ != nullptr) {
+         esp_opus_dec_close(opus_decoder_);
+         opus_decoder_ = nullptr;
+     }
+-    decoder_lock.unlock();
+     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(sample_rate, frame_duration);
+     auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
+     if (opus_decoder_ == nullptr) {
+@@ -503,16 +543,22 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
+     audio_queue_cv_.notify_all();
+ }
+ 
+-bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
++bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait, unsigned expected_generation) {
+     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
+         if (wait) {
+-            audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
++            audio_queue_cv_.wait(lock, [this, expected_generation]() {
++                return service_stopped_ || playback_transitioning_ ||
++                    (expected_generation != ~0u && expected_generation != playback_generation_.load()) ||
++                    audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
++            });
+         } else {
+             return false;
+         }
+     }
+-    audio_decode_queue_.push_back(std::move(packet));
++    if (service_stopped_ || playback_transitioning_) return false;
++    if (expected_generation != ~0u && expected_generation != playback_generation_.load()) return false;
++    audio_decode_queue_.push_back({std::move(packet), playback_generation_.load(), playback_output_epoch_});
+     audio_queue_cv_.notify_all();
+     return true;
+ }
+@@ -609,9 +655,15 @@ void AudioService::EnableAudioTesting(bool enable) {
+         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING);
+     } else {
+         xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING);
+-        /* Copy audio_testing_queue_ to audio_decode_queue_ */
++        /* Bind test playback to the same admission snapshot as server Opus. */
+         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+-        audio_decode_queue_ = std::move(audio_testing_queue_);
++        audio_decode_queue_.clear();
++        if (!service_stopped_ && !playback_transitioning_) {
++            for (auto& packet : audio_testing_queue_) {
++                audio_decode_queue_.push_back({std::move(packet), playback_generation_.load(), playback_output_epoch_});
++            }
++        }
++        audio_testing_queue_.clear();
+         audio_queue_cv_.notify_all();
+     }
+ }
+@@ -665,17 +717,33 @@ void AudioService::WaitForPlaybackQueueEmpty() {
+     });
+ }
+ 
+-void AudioService::ResetDecoder() {
++bool AudioService::IsPlaybackDrained() {
+     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+-    std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
+-    if (opus_decoder_ != nullptr) {
+-        esp_opus_dec_reset(opus_decoder_);
++    return audio_decode_queue_.empty() && audio_playback_queue_.empty() && !decode_in_flight_ && !playback_in_flight_;
++}
++
++void AudioService::ResetDecoder() {
++    std::lock_guard<std::mutex> transition(playback_transition_mutex_);
++    {
++        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++        playback_transitioning_ = true;
++        ++playback_generation_;
++        audio_queue_cv_.notify_all();
+     }
+-    decoder_lock.unlock();
++    // No queue mutex while waiting for an in-flight codec write. Admission is
++    // closed until the new generation and its codec epoch are installed together.
++    const uint32_t epoch = codec_->BeginOutputEpoch();
++    {
++        std::unique_lock<std::mutex> decoder_lock(decoder_mutex_);
++        if (opus_decoder_ != nullptr) esp_opus_dec_reset(opus_decoder_);
++    }
++    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
++    playback_output_epoch_ = epoch;
+     timestamp_queue_.clear();
+     audio_decode_queue_.clear();
+     audio_playback_queue_.clear();
+     audio_testing_queue_.clear();
++    playback_transitioning_ = false;
+     audio_queue_cv_.notify_all();
+ }
+ 
+@@ -700,7 +768,10 @@ void AudioService::CheckAndUpdateAudioPowerState() {
  void AudioService::SetModelsList(srmodel_list_t* models_list) {
      models_list_ = models_list;
  
@@ -649,306 +1174,88 @@ index 350ac58672d357cb48497446360afb0b6e761470..7309d03e24f6b921a65e814169e25dcf
      if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
          wake_word_ = std::make_unique<CustomWakeWord>();
      } else if (esp_srmodel_filter(models_list_, ESP_WN_PREFIX, NULL) != nullptr) {
-diff --git a/main/boards/common/backlight.cc b/main/boards/common/backlight.cc
-index c62fd7aca7363f7c6c8e640acafad0df5727b4cc..0ec50792cdda92f6fc1288a2d83a31c8a86aa9e5 100644
---- a/main/boards/common/backlight.cc
-+++ b/main/boards/common/backlight.cc
-@@ -40,6 +40,11 @@ void Backlight::RestoreBrightness() {
-         saved_brightness = 10;  // 设置一个较低的默认值
-     }
-     
-+    if (brightness_ == saved_brightness && target_brightness_ == saved_brightness) {
-+        SetBrightnessImpl(saved_brightness);
-+        return;
-+    }
-+
-     SetBrightness(saved_brightness);
- }
+diff --git a/main/audio/audio_service.h b/main/audio/audio_service.h
+index 99db546..dbab529 100644
+--- a/main/audio/audio_service.h
++++ b/main/audio/audio_service.h
+@@ -77,6 +77,7 @@
  
-diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
-index 835997d174cad52305486a91464494914baad5ca..ea50d51e317611ded3dd17eba428007e90f26590 100644
---- a/main/boards/common/i2c_device.cc
-+++ b/main/boards/common/i2c_device.cc
-@@ -32,4 +32,8 @@ uint8_t I2cDevice::ReadReg(uint8_t reg) {
- 
- void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
-     ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
-+}
+ struct AudioServiceCallbacks {
+     std::function<void(void)> on_send_queue_available;
++    std::function<void(void)> on_playback_progress;
+     std::function<void(const std::string&)> on_wake_word_detected;
+     std::function<void(bool)> on_vad_change;
+     std::function<void(void)> on_audio_testing_queue_full;
+@@ -93,6 +94,14 @@ struct AudioTask {
+     AudioTaskType type;
+     std::vector<int16_t> pcm;
+     uint32_t timestamp;
++    unsigned playback_generation = 0;
++    uint32_t output_epoch = 0;
++};
 +
-+esp_err_t I2cDevice::TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms) {
-+    return i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, timeout_ms);
- }
-\ No newline at end of file
-diff --git a/main/boards/common/i2c_device.h b/main/boards/common/i2c_device.h
-index 7bc917bf2f094f64d653a355acc361bef9a69a00..874b1377a7107dcac89e8e3c026c49985eb5078c 100644
---- a/main/boards/common/i2c_device.h
-+++ b/main/boards/common/i2c_device.h
-@@ -13,6 +13,7 @@ protected:
-     void WriteReg(uint8_t reg, uint8_t value);
-     uint8_t ReadReg(uint8_t reg);
-     void ReadRegs(uint8_t reg, uint8_t* buffer, size_t length);
-+    esp_err_t TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms = 100);
++struct PlaybackPacket {
++    std::unique_ptr<AudioStreamPacket> packet;
++    unsigned playback_generation;
++    uint32_t output_epoch;
  };
  
- #endif // I2C_DEVICE_H
-diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
-index 377685ba7e6bf33549a76265f1784eec0e6b8b17..52b2d23099c1e1b403ac30da703ef033b3cc83fd 100644
---- a/main/boards/common/wifi_board.cc
-+++ b/main/boards/common/wifi_board.cc
-@@ -26,6 +26,18 @@ static const char *TAG = "WifiBoard";
- // Connection timeout in seconds
- static constexpr int CONNECT_TIMEOUT_SEC = 60;
+ struct DebugStatistics {
+@@ -115,6 +124,7 @@ public:
+     const std::string& GetLastWakeWord() const;
+     bool IsVoiceDetected() const { return voice_detected_; }
+     bool IsIdle();
++    bool IsPlaybackDrained();
+     void WaitForPlaybackQueueEmpty();
+     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
+     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
+@@ -127,7 +137,8 @@ public:
  
-+namespace {
-+
-+std::string BuildHermesWifiErrorMessage() {
-+    auto& ssid_manager = SsidManager::GetInstance();
-+    if (ssid_manager.GetSsidList().empty()) {
-+        return "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
-+    }
-+    return "HERMES Wi-Fi error: cannot connect to configured Wi-Fi. Check SSID/password, 2.4GHz Wi-Fi, router signal, and SD /config.json.";
-+}
-+
-+}  // namespace
-+
- WifiBoard::WifiBoard() {
-     // Create connection timeout timer
-     esp_timer_create_args_t timer_args = {
-@@ -157,9 +169,14 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
- }
+     void SetCallbacks(AudioServiceCallbacks& callbacks);
  
- void WifiBoard::StartWifiConfigMode() {
-+    auto previous_state = Application::GetInstance().GetDeviceState();
-     in_config_mode_ = true;
-     // Transition to wifi configuring state
-     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
-+    bool show_hermes_wifi_failure = previous_state == kDeviceStateStarting ||
-+                                    previous_state == kDeviceStateActivating ||
-+                                    previous_state == kDeviceStateWifiConfiguring;
-+
- #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
-     auto& wifi_manager = WifiManager::GetInstance();
+-    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
++    unsigned PlaybackGeneration() const { return playback_generation_.load(); }
++    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false, unsigned expected_generation = ~0u);
+     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+     void PlaySound(const std::string_view& sound);
+     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
+@@ -165,8 +176,15 @@ private:
+     TaskHandle_t audio_output_task_handle_ = nullptr;
+     TaskHandle_t opus_codec_task_handle_ = nullptr;
+     std::mutex audio_queue_mutex_;
++    // Serialize resets without ever acquiring the codec mutex under queue lock.
++    std::mutex playback_transition_mutex_;
++    std::atomic<unsigned> playback_generation_{0};
++    uint32_t playback_output_epoch_ = 0;
++    bool playback_transitioning_ = false;
++    bool decode_in_flight_ = false;
++    bool playback_in_flight_ = false;
+     std::condition_variable audio_queue_cv_;
+-    std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
++    std::deque<PlaybackPacket> audio_decode_queue_;
+     std::deque<std::unique_ptr<AudioStreamPacket>> audio_send_queue_;
+     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
+     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
+@@ -177,7 +195,7 @@ private:
+     bool wake_word_initialized_ = false;
+     bool audio_processor_initialized_ = false;
+     bool voice_detected_ = false;
+-    bool service_stopped_ = true;
++    std::atomic<bool> service_stopped_{true};
+     bool audio_input_need_warmup_ = false;
  
-@@ -179,6 +196,27 @@ void WifiBoard::StartWifiConfigMode() {
-     // initialize esp-blufi protocol
-     blufi.init();
- #endif
-+
-+    if (show_hermes_wifi_failure) {
-+        Application::GetInstance().Schedule([]() {
-+            auto display = Board::GetInstance().GetDisplay();
-+            if (display == nullptr) {
-+                return;
-+            }
-+
-+            std::string message = BuildHermesWifiErrorMessage();
-+            auto& wifi_manager = WifiManager::GetInstance();
-+            if (wifi_manager.IsConfigMode()) {
-+                message += " Setup hotspot: ";
-+                message += wifi_manager.GetApSsid();
-+                message += " ";
-+                message += wifi_manager.GetApWebUrl();
-+            }
-+            display->SetEmotion("sad");
-+            display->SetChatMessage("system", message.c_str());
-+        });
-+    }
-+
- #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
-     // Start acoustic provisioning task
-     auto codec = Board::GetInstance().GetAudioCodec();
-diff --git a/main/ota.cc b/main/ota.cc
-index bcc0dc552377527acd26e59cdb2adff6940b3605..804a0c185713a87ea79a1171f5d9bc0af10c9667 100644
---- a/main/ota.cc
-+++ b/main/ota.cc
-@@ -26,6 +26,9 @@
+     esp_timer_handle_t audio_power_timer_ = nullptr;
+@@ -188,7 +206,7 @@ private:
+     void AudioOutputTask();
+     void OpusCodecTask();
+     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
+-    void SetDecodeSampleRate(int sample_rate, int frame_duration);
++    void SetDecodeSampleRateLocked(int sample_rate, int frame_duration);
+     void CheckAndUpdateAudioPowerState();
+ };
  
- 
- Ota::Ota() {
-+    auto app_desc = esp_app_get_description();
-+    current_version_ = app_desc->version;
-+
- #ifdef ESP_EFUSE_BLOCK_USR_DATA
-     // Read Serial Number from efuse user_data
-     uint8_t serial_number[33] = {0};
-diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
-index f0cc0344ae89b7c4e2ab991af770df41b0bfe043..0e97c3c119d05d722b5585f6a9e933c0d4b7a6f7 100644
---- a/main/protocols/websocket_protocol.cc
-+++ b/main/protocols/websocket_protocol.cc
-@@ -12,6 +12,37 @@
- 
- #define TAG "WS"
- 
-+namespace {
-+
-+std::string DescribeWebsocketEndpoint(const std::string& url) {
-+    if (url.empty()) {
-+        return "empty websocket_url";
-+    }
-+
-+    auto scheme_end = url.find("://");
-+    if (scheme_end == std::string::npos || scheme_end == 0) {
-+        return "configured websocket endpoint";
-+    }
-+
-+    auto authority_start = scheme_end + 3;
-+    auto authority_end = url.find_first_of("/?#", authority_start);
-+    std::string authority = url.substr(
-+        authority_start,
-+        authority_end == std::string::npos ? std::string::npos : authority_end - authority_start);
-+    auto credentials_end = authority.rfind('@');
-+    if (credentials_end != std::string::npos) {
-+        authority = authority.substr(credentials_end + 1);
-+    }
-+
-+    if (authority.empty()) {
-+        return "configured websocket endpoint";
-+    }
-+
-+    return url.substr(0, scheme_end) + "://" + authority;
-+}
-+
-+}  // namespace
-+
- WebsocketProtocol::WebsocketProtocol() {
-     event_group_handle_ = xEventGroupCreate();
- }
-@@ -77,12 +108,25 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
- 
- void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
-     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
-+    suppress_next_disconnect_notification_ = true;
-     websocket_.reset();
- }
- 
- bool WebsocketProtocol::OpenAudioChannel() {
-+    // Retire a failed client before installing callbacks on its replacement.
-+    // A delayed hello from the old session must not satisfy this handshake.
-+    if (websocket_ != nullptr) {
-+        CloseAudioChannel(false);
-+    }
-+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
-+    session_id_.clear();
-+    suppress_next_disconnect_notification_ = false;
-     Settings settings("websocket", false);
-     std::string url = settings.GetString("url");
-+    if (url.empty()) {
-+        url = settings.GetString("url_override");
-+    }
-+    const std::string endpoint = DescribeWebsocketEndpoint(url);
-     std::string token = settings.GetString("token");
-     int version = settings.GetInt("version");
-     if (version != 0) {
-@@ -91,10 +135,16 @@ bool WebsocketProtocol::OpenAudioChannel() {
- 
-     error_occurred_ = false;
- 
-+    if (url.empty()) {
-+        SetError("HERMES endpoint error: websocket_url is missing or invalid. Check SD /config.json.");
-+        return false;
-+    }
-+
-     auto network = Board::GetInstance().GetNetwork();
-     websocket_ = network->CreateWebSocket(1);
-     if (websocket_ == nullptr) {
-         ESP_LOGE(TAG, "Failed to create websocket");
-+        SetError("HERMES endpoint error: cannot create websocket client.");
-         return false;
-     }
- 
-@@ -146,10 +196,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
-                 }
-             }
-         } else {
--            // Parse JSON data
--            auto root = cJSON_Parse(data);
--            auto type = cJSON_GetObjectItem(root, "type");
--            if (cJSON_IsString(type)) {
-+            // WebSocket text is length-delimited, not necessarily NUL-terminated.
-+            auto root = cJSON_ParseWithLength(data, len);
-+            auto type = cJSON_IsObject(root) ? cJSON_GetObjectItem(root, "type") : nullptr;
-+            if (cJSON_IsString(type) && type->valuestring != nullptr) {
-                 if (strcmp(type->valuestring, "hello") == 0) {
-                     ParseServerHello(root);
-                 } else {
-@@ -158,7 +208,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
-                     }
-                 }
-             } else {
--                ESP_LOGE(TAG, "Missing message type, data: %s", data);
-+                ESP_LOGE(TAG, "Invalid JSON message or missing/string-invalid type (length=%zu)", len);
-             }
-             cJSON_Delete(root);
-         }
-@@ -166,16 +216,21 @@ bool WebsocketProtocol::OpenAudioChannel() {
-     });
- 
-     websocket_->OnDisconnected([this]() {
-+        const bool expected_disconnect = suppress_next_disconnect_notification_;
-+        suppress_next_disconnect_notification_ = false;
-         ESP_LOGI(TAG, "Websocket disconnected");
-         if (on_audio_channel_closed_ != nullptr) {
-             on_audio_channel_closed_();
-         }
-+        if (!expected_disconnect && on_disconnected_ != nullptr) {
-+            on_disconnected_();
-+        }
-     });
- 
--    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
-+    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", endpoint.c_str(), version_);
-     if (!websocket_->Connect(url.c_str())) {
-         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
--        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
-+        SetError("HERMES endpoint error: cannot connect to " + endpoint + ". Start ai-server and check Wi-Fi.");
-         return false;
-     }
- 
-@@ -189,7 +244,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
-     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
-     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
-         ESP_LOGE(TAG, "Failed to receive server hello");
--        SetError(Lang::Strings::SERVER_TIMEOUT);
-+        SetError("HERMES endpoint timeout: no hello from " + endpoint + ". Check ai-server bridge.");
-         return false;
-     }
- 
-@@ -205,6 +260,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
-     cJSON* root = cJSON_CreateObject();
-     cJSON_AddStringToObject(root, "type", "hello");
-     cJSON_AddNumberToObject(root, "version", version_);
-+    Settings hermes_settings("hermes", false);
-+    cJSON_AddStringToObject(root, "tts_provider",
-+                            hermes_settings.GetBool("tts_hermes", false) ? "hermes" : "sanotts");
-     cJSON* features = cJSON_CreateObject();
- #if CONFIG_USE_SERVER_AEC
-     cJSON_AddBoolToObject(features, "aec", true);
-@@ -227,8 +285,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
- 
- void WebsocketProtocol::ParseServerHello(const cJSON* root) {
-     auto transport = cJSON_GetObjectItem(root, "transport");
--    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
--        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
-+    if (!cJSON_IsString(transport) || transport->valuestring == nullptr ||
-+        strcmp(transport->valuestring, "websocket") != 0) {
-+        ESP_LOGE(TAG, "Missing, invalid or unsupported websocket transport");
-         return;
-     }
- 
-diff --git a/main/protocols/websocket_protocol.h b/main/protocols/websocket_protocol.h
-index 48bbc0035edd6aed0cf5ce37eb7fb69df557caf9..35584985b3496d9e2290693eef10e728ddb4f0e1 100644
---- a/main/protocols/websocket_protocol.h
-+++ b/main/protocols/websocket_protocol.h
-@@ -25,6 +25,7 @@ private:
-     EventGroupHandle_t event_group_handle_;
-     std::unique_ptr<WebSocket> websocket_;
-     int version_ = 1;
-+    bool suppress_next_disconnect_notification_ = false;
- 
-     void ParseServerHello(const cJSON* root);
-     bool SendText(const std::string& text) override;
 diff --git a/main/audio/processors/no_audio_processor.cc b/main/audio/processors/no_audio_processor.cc
-index 90f997a9f888d2b337375f42efbabe742766811b..dc6388440749b7c14d15c2843958dbdf25d543d9 100644
+index 90f997a..dc63884 100644
 --- a/main/audio/processors/no_audio_processor.cc
 +++ b/main/audio/processors/no_audio_processor.cc
 @@ -4,60 +4,91 @@
@@ -1067,7 +1374,7 @@ index 90f997a9f888d2b337375f42efbabe742766811b..dc6388440749b7c14d15c2843958dbdf
          return 0;
      }
 diff --git a/main/audio/processors/no_audio_processor.h b/main/audio/processors/no_audio_processor.h
-index 70ef1d16c014b0089ae66d7db5cdcfbaf2688b0d..5fd018b5170fdc4d5de46162f312d289d0ab0677 100644
+index 70ef1d1..5fd018b 100644
 --- a/main/audio/processors/no_audio_processor.h
 +++ b/main/audio/processors/no_audio_processor.h
 @@ -4,6 +4,9 @@
@@ -1094,3 +1401,1381 @@ index 70ef1d16c014b0089ae66d7db5cdcfbaf2688b0d..5fd018b5170fdc4d5de46162f312d289
      std::function<void(bool speaking)> vad_state_change_callback_;
      std::atomic<bool> is_running_ = false;
  };
+diff --git a/main/boards/common/axp2101.cc b/main/boards/common/axp2101.cc
+index 854f0b8..518cd1e 100644
+--- a/main/boards/common/axp2101.cc
++++ b/main/boards/common/axp2101.cc
+@@ -35,7 +35,8 @@ float Axp2101::GetTemperature() {
+ }
+ 
+ void Axp2101::PowerOff() {
+-    uint8_t value = ReadReg(0x10);
++    uint8_t value = 0;
++    if (TryReadRegs(0x10, &value, 1) != ESP_OK) return;
+     value = value | 0x01;
+     WriteReg(0x10, value);
+ }
+diff --git a/main/boards/common/backlight.cc b/main/boards/common/backlight.cc
+index c62fd7a..0ec5079 100644
+--- a/main/boards/common/backlight.cc
++++ b/main/boards/common/backlight.cc
+@@ -40,6 +40,11 @@ void Backlight::RestoreBrightness() {
+         saved_brightness = 10;  // 设置一个较低的默认值
+     }
+     
++    if (brightness_ == saved_brightness && target_brightness_ == saved_brightness) {
++        SetBrightnessImpl(saved_brightness);
++        return;
++    }
++
+     SetBrightness(saved_brightness);
+ }
+ 
+diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
+index 835997d..fbc0510 100644
+--- a/main/boards/common/i2c_device.cc
++++ b/main/boards/common/i2c_device.cc
+@@ -1,6 +1,10 @@
+ #include "i2c_device.h"
+ 
+ #include <esp_log.h>
++#include <cstring>
++#include <cassert>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
+ 
+ #define TAG "I2cDevice"
+ 
+@@ -20,16 +24,41 @@ I2cDevice::I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr) {
+ }
+ 
+ void I2cDevice::WriteReg(uint8_t reg, uint8_t value) {
++    std::lock_guard<std::recursive_mutex> lock(transaction_mutex_);
++    // A failed ReadReg must NEVER feed a destructive read/modify/write.
++    // Only a successful read by THIS task recovers its write gate.
++    if (!failed_reads_.may_write(reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()))) return;
+     uint8_t buffer[2] = {reg, value};
+-    ESP_ERROR_CHECK(i2c_master_transmit(i2c_device_, buffer, 2, 100));
++    esp_err_t err = ESP_FAIL;
++    for (int attempt = 0; attempt < 2; ++attempt) {
++        err = i2c_master_transmit(i2c_device_, buffer, 2, 10);
++        if (err == ESP_OK) return;
++    }
++    ++failure_count_;
++    ESP_LOGW(TAG, "Register write failed: reg=0x%02x err=%s", reg, esp_err_to_name(err));
+ }
+ 
+ uint8_t I2cDevice::ReadReg(uint8_t reg) {
+-    uint8_t buffer[1];
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, 1, 100));
+-    return buffer[0];
++    uint8_t value = 0;
++    TryReadRegs(reg, &value, 1);
++    return value;
+ }
+ 
+ void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
+-    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100));
+-}
+\ No newline at end of file
++    TryReadRegs(reg, buffer, length);
++}
++
++esp_err_t I2cDevice::TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms) {
++    std::lock_guard<std::recursive_mutex> lock(transaction_mutex_);
++    timeout_ms = std::clamp(timeout_ms, 1, 1000);
++    esp_err_t err = ESP_FAIL;
++    for (int attempt = 0; attempt < 2; ++attempt) {
++        err = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, timeout_ms);
++        if (err == ESP_OK) { failed_reads_.recover(reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle())); return ESP_OK; }
++    }
++    std::memset(buffer, 0, length);
++    failed_reads_.fail(reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
++    ++failure_count_;
++    ESP_LOGW(TAG, "Register read failed: reg=0x%02x err=%s", reg, esp_err_to_name(err));
++    return err;
++}
+diff --git a/main/boards/common/i2c_device.h b/main/boards/common/i2c_device.h
+index 7bc917b..8051787 100644
+--- a/main/boards/common/i2c_device.h
++++ b/main/boards/common/i2c_device.h
+@@ -2,17 +2,25 @@
+ #define I2C_DEVICE_H
+ 
+ #include <driver/i2c_master.h>
++#include <atomic>
++#include <mutex>
++#include "runtime_safety.h"
+ 
+ class I2cDevice {
+ public:
+     I2cDevice(i2c_master_bus_handle_t i2c_bus, uint8_t addr);
++    unsigned failure_count() const { return failure_count_.load(); }
+ 
+ protected:
+     i2c_master_dev_handle_t i2c_device_;
++    std::recursive_mutex transaction_mutex_;
++    runtime_safety::FailedReadGate failed_reads_;
++    std::atomic<unsigned> failure_count_{0};
+ 
+     void WriteReg(uint8_t reg, uint8_t value);
+     uint8_t ReadReg(uint8_t reg);
+     void ReadRegs(uint8_t reg, uint8_t* buffer, size_t length);
++    esp_err_t TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length, int timeout_ms = 10);
+ };
+ 
+ #endif // I2C_DEVICE_H
+diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
+index 377685b..52b2d23 100644
+--- a/main/boards/common/wifi_board.cc
++++ b/main/boards/common/wifi_board.cc
+@@ -26,6 +26,18 @@ static const char *TAG = "WifiBoard";
+ // Connection timeout in seconds
+ static constexpr int CONNECT_TIMEOUT_SEC = 60;
+ 
++namespace {
++
++std::string BuildHermesWifiErrorMessage() {
++    auto& ssid_manager = SsidManager::GetInstance();
++    if (ssid_manager.GetSsidList().empty()) {
++        return "HERMES Wi-Fi error: wifi_networks is missing or empty. Check SD /config.json.";
++    }
++    return "HERMES Wi-Fi error: cannot connect to configured Wi-Fi. Check SSID/password, 2.4GHz Wi-Fi, router signal, and SD /config.json.";
++}
++
++}  // namespace
++
+ WifiBoard::WifiBoard() {
+     // Create connection timeout timer
+     esp_timer_create_args_t timer_args = {
+@@ -157,9 +169,14 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
+ }
+ 
+ void WifiBoard::StartWifiConfigMode() {
++    auto previous_state = Application::GetInstance().GetDeviceState();
+     in_config_mode_ = true;
+     // Transition to wifi configuring state
+     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
++    bool show_hermes_wifi_failure = previous_state == kDeviceStateStarting ||
++                                    previous_state == kDeviceStateActivating ||
++                                    previous_state == kDeviceStateWifiConfiguring;
++
+ #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
+     auto& wifi_manager = WifiManager::GetInstance();
+ 
+@@ -179,6 +196,27 @@ void WifiBoard::StartWifiConfigMode() {
+     // initialize esp-blufi protocol
+     blufi.init();
+ #endif
++
++    if (show_hermes_wifi_failure) {
++        Application::GetInstance().Schedule([]() {
++            auto display = Board::GetInstance().GetDisplay();
++            if (display == nullptr) {
++                return;
++            }
++
++            std::string message = BuildHermesWifiErrorMessage();
++            auto& wifi_manager = WifiManager::GetInstance();
++            if (wifi_manager.IsConfigMode()) {
++                message += " Setup hotspot: ";
++                message += wifi_manager.GetApSsid();
++                message += " ";
++                message += wifi_manager.GetApWebUrl();
++            }
++            display->SetEmotion("sad");
++            display->SetChatMessage("system", message.c_str());
++        });
++    }
++
+ #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
+     // Start acoustic provisioning task
+     auto codec = Board::GetInstance().GetAudioCodec();
+diff --git a/main/display/display.h b/main/display/display.h
+index 9e73014..571b010 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -1,5 +1,6 @@
+ #ifndef DISPLAY_H
+ #define DISPLAY_H
++#include "runtime_safety.h"
+ 
+ #include "emoji_collection.h"
+ 
+@@ -56,26 +57,18 @@ protected:
+     Theme* current_theme_ = nullptr;
+ 
+     friend class DisplayLockGuard;
++    template<class> friend class runtime_safety::OwnedLock;
+     virtual bool Lock(int timeout_ms = 0) = 0;
+     virtual void Unlock() = 0;
+ };
+ 
+-
+-class DisplayLockGuard {
++class DisplayLockGuard : public runtime_safety::OwnedLock<Display> {
+ public:
+-    DisplayLockGuard(Display *display) : display_(display) {
+-        if (!display_->Lock(30000)) {
+-            ESP_LOGE("Display", "Failed to lock display");
+-        }
+-    }
+-    ~DisplayLockGuard() {
+-        display_->Unlock();
+-    }
+-
+-private:
+-    Display *display_;
++    DisplayLockGuard(Display* display, int timeout_ms = 250)
++        : runtime_safety::OwnedLock<Display>(display, timeout_ms) {}
+ };
+ 
++
+ class NoDisplay : public Display {
+ private:
+     virtual bool Lock(int timeout_ms = 0) override {
+diff --git a/main/display/lvgl_display/lvgl_display.cc b/main/display/lvgl_display/lvgl_display.cc
+index 46668dd..96ad44a 100644
+--- a/main/display/lvgl_display/lvgl_display.cc
++++ b/main/display/lvgl_display/lvgl_display.cc
+@@ -1,4 +1,5 @@
+ #include <esp_log.h>
++#include <esp_lvgl_port.h>
+ #include <esp_err.h>
+ #include <string>
+ #include <cstdlib>
+@@ -12,6 +13,8 @@
+ #include "settings.h"
+ #include "assets/lang_config.h"
+ #include "jpg/image_to_jpeg.h"
++#include "mcp_server.h"
++#include "runtime_safety.h"
+ 
+ #define TAG "Display"
+ 
+@@ -21,6 +24,7 @@ LvglDisplay::LvglDisplay() {
+         .callback = [](void *arg) {
+             LvglDisplay *display = static_cast<LvglDisplay*>(arg);
+             DisplayLockGuard lock(display);
++            if (!lock) return;
+             lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
+             lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+         },
+@@ -46,6 +50,8 @@ LvglDisplay::~LvglDisplay() {
+         esp_timer_delete(notification_timer_);
+     }
+ 
++    const bool destroy_locked = lvgl_port_lock(0);
++    if (destroy_locked) {
+     if (network_label_ != nullptr) {
+         lv_obj_del(network_label_);
+     }
+@@ -64,6 +70,8 @@ LvglDisplay::~LvglDisplay() {
+     if( low_battery_popup_ != nullptr ) {
+         lv_obj_del(low_battery_popup_);
+     }
++    lvgl_port_unlock();
++    }
+     if (pm_lock_ != nullptr) {
+         esp_pm_lock_delete(pm_lock_);
+     }
+@@ -74,6 +82,7 @@ void LvglDisplay::SetStatus(const char* status) {
+         ESP_LOGW(TAG, "SetStatus('%s') called before SetupUI() - message will be lost!", status);
+     }
+     DisplayLockGuard lock(this);
++    if (!lock) return;
+     if (status_label_ == nullptr) {
+         if (setup_ui_called_) {
+             ESP_LOGW(TAG, "SetStatus('%s') failed: status_label_ is nullptr (SetupUI() was called but label not created)", status);
+@@ -96,6 +105,7 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
+         ESP_LOGW(TAG, "ShowNotification('%s') called before SetupUI() - message will be lost!", notification);
+     }
+     DisplayLockGuard lock(this);
++    if (!lock) return;
+     if (notification_label_ == nullptr) {
+         if (setup_ui_called_) {
+             ESP_LOGW(TAG, "ShowNotification('%s') failed: notification_label_ is nullptr (SetupUI() was called but label not created)", notification);
+@@ -118,6 +128,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+     // Update mute icon
+     {
+         DisplayLockGuard lock(this);
++    if (!lock) return;
+         if (mute_label_ == nullptr) {
+             return;
+         }
+@@ -150,6 +161,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+     }
+ 
+     esp_pm_lock_acquire(pm_lock_);
++    struct PmRelease { esp_pm_lock_handle_t handle; ~PmRelease() { esp_pm_lock_release(handle); } } pm_release{pm_lock_};
+     // Update battery icon
+     int battery_level;
+     bool charging, discharging;
+@@ -169,6 +181,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+             icon = levels[battery_level / 20];
+         }
+         DisplayLockGuard lock(this);
++    if (!lock) return;
+         if (battery_label_ != nullptr && battery_icon_ != icon) {
+             battery_icon_ = icon;
+             lv_label_set_text(battery_label_, battery_icon_);
+@@ -209,13 +222,14 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
+             icon = board.GetNetworkStateIcon();
+             if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
+                 DisplayLockGuard lock(this);
++    if (!lock) return;
+                 network_icon_ = icon;
+                 lv_label_set_text(network_label_, network_icon_);
+             }
+         }
+     }
+ 
+-    esp_pm_lock_release(pm_lock_);
++
+ }
+ 
+ void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+@@ -234,6 +248,7 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
+ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
+ #if CONFIG_LV_USE_SNAPSHOT
+     DisplayLockGuard lock(this);
++    if (!lock) return false;
+ 
+     lv_obj_t* screen = lv_screen_active();
+     lv_draw_buf_t* draw_buffer = lv_snapshot_take(screen, LV_COLOR_FORMAT_RGB565);
+@@ -242,6 +257,11 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
+         return false;
+     }
+ 
++    runtime_safety::ScopeExit release([draw_buffer] { lv_draw_buf_destroy(draw_buffer); });
++    if (!draw_buffer->data || !draw_buffer->header.w || !draw_buffer->header.h ||
++        draw_buffer->data_size > 2 * 1024 * 1024) return false;
++    lock.Release(); // Snapshot owns its memory; slow encoding does not hold LVGL.
++
+     // swap bytes
+     uint16_t* data = (uint16_t*)draw_buffer->data;
+     size_t pixel_count = draw_buffer->data_size / 2;
+@@ -252,21 +272,28 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
+     // Clear output string and use callback version to avoid pre-allocating large memory blocks
+     jpeg_data.clear();
+ 
+-    // Use callback-based JPEG encoder to further save memory
++    // Never unwind an allocation failure through the encoder's C callback or
++    // keep an incomplete/oversized JPEG. The snapshot is released on every exit.
++    struct Output { std::string* bytes; bool failed = false; } output{&jpeg_data};
+     bool ret = image_to_jpeg_cb((uint8_t*)draw_buffer->data, draw_buffer->data_size, draw_buffer->header.w, draw_buffer->header.h, V4L2_PIX_FMT_RGB565, quality,
+         [](void *arg, size_t index, const void *data, size_t len) -> size_t {
+-        std::string* output = static_cast<std::string*>(arg);
++        auto* output = static_cast<Output*>(arg);
+         if (data && len > 0) {
+-            output->append(static_cast<const char*>(data), len);
++            if (output->failed || McpServer::WorkCancelled() || len > 2 * 1024 * 1024 - output->bytes->size()) {
++                output->failed = true;
++                return 0;
++            }
++            try { output->bytes->append(static_cast<const char*>(data), len); }
++            catch (...) { output->failed = true; return 0; }
+         }
+         return len;
+-    }, &jpeg_data);
+-    if (!ret) {
++    }, &output);
++    if (!ret || output.failed || jpeg_data.empty()) {
++        jpeg_data.clear();
+         ESP_LOGE(TAG, "Failed to convert image to JPEG");
++        return false;
+     }
+-
+-    lv_draw_buf_destroy(draw_buffer);
+-    return ret;
++    return true;
+ #else
+     ESP_LOGE(TAG, "LV_USE_SNAPSHOT is not enabled");
+     return false;
+diff --git a/main/mcp_server.cc b/main/mcp_server.cc
+index 7cd7ba0..f9d14e3 100644
+--- a/main/mcp_server.cc
++++ b/main/mcp_server.cc
+@@ -8,6 +8,8 @@
+ #include <esp_app_desc.h>
+ #include <algorithm>
+ #include <cstring>
++#include <esp_timer.h>
++#include <memory>
+ #include <esp_pthread.h>
+ 
+ #include "application.h"
+@@ -193,91 +195,62 @@ void McpServer::AddUserOnlyTools() {
+                 Property("quality", kPropertyTypeInteger, 80, 1, 100)
+             }),
+             [display](const PropertyList& properties) -> ReturnValue {
+-                auto url = properties["url"].value<std::string>();
+-                auto quality = properties["quality"].value<int>();
+-
++                const auto url = properties["url"].value<std::string>();
++                if (url.size() > 2048 || (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0))
++                    throw std::runtime_error("Snapshot upload requires an HTTP(S) URL of at most 2048 bytes");
+                 std::string jpeg_data;
+-                if (!display->SnapshotToJpeg(jpeg_data, quality)) {
+-                    throw std::runtime_error("Failed to snapshot screen");
+-                }
++                if (WorkCancelled() || !display->SnapshotToJpeg(jpeg_data, properties["quality"].value<int>()) ||
++                    jpeg_data.empty() || jpeg_data.size() > 2 * 1024 * 1024)
++                    throw std::runtime_error("Failed to snapshot screen or snapshot exceeds limit");
+ 
+-                ESP_LOGI(TAG, "Upload snapshot %u bytes to %s", jpeg_data.size(), url.c_str());
+-                
+-                // 构造multipart/form-data请求体
+-                std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
+-                
++                const std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
+                 auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
++                http->SetTimeout(3000);
+                 http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+-                if (!http->Open("POST", url)) {
+-                    throw std::runtime_error("Failed to open URL: " + url);
+-                }
+-                {
+-                    // 文件字段头部
+-                    std::string file_header;
+-                    file_header += "--" + boundary + "\r\n";
+-                    file_header += "Content-Disposition: form-data; name=\"file\"; filename=\"screenshot.jpg\"\r\n";
+-                    file_header += "Content-Type: image/jpeg\r\n";
+-                    file_header += "\r\n";
+-                    http->Write(file_header.c_str(), file_header.size());
+-                }
+-
+-                // JPEG数据
+-                http->Write((const char*)jpeg_data.data(), jpeg_data.size());
+-
+-                {
+-                    // multipart尾部
+-                    std::string multipart_footer;
+-                    multipart_footer += "\r\n--" + boundary + "--\r\n";
+-                    http->Write(multipart_footer.c_str(), multipart_footer.size());
+-                }
+-                http->Write("", 0);
+-
+-                if (http->GetStatusCode() != 200) {
+-                    throw std::runtime_error("Unexpected status code: " + std::to_string(http->GetStatusCode()));
++                runtime_safety::ScopeExit close([&] { http->Close(); });
++                if (WorkCancelled() || !http->Open("POST", url))
++                    throw std::runtime_error("Failed to open snapshot upload");
++                auto write = [&](const std::string& bytes) {
++                    for (size_t offset = 0; offset < bytes.size();) {
++                        const size_t chunk = std::min<size_t>(4096, bytes.size() - offset);
++                        if (WorkCancelled() || http->Write(bytes.data() + offset, chunk) != static_cast<int>(chunk))
++                            throw std::runtime_error("Snapshot upload cancelled or write failed");
++                        offset += chunk;
++                    }
++                };
++                write("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"screenshot.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n");
++                write(jpeg_data);
++                write("\r\n--" + boundary + "--\r\n");
++                if (WorkCancelled() || http->Write("", 0) < 0 || http->GetStatusCode() != 200)
++                    throw std::runtime_error("Snapshot upload rejected or cancelled");
++                size_t received = 0;
++                char response[1024];
++                while (true) {
++                    if (WorkCancelled()) throw std::runtime_error("Snapshot upload cancelled or expired");
++                    const int count = http->Read(response, sizeof(response));
++                    if (count < 0) throw std::runtime_error("Snapshot response read failed");
++                    if (count == 0) break;
++                    received += count;
++                    if (received > 8192) throw std::runtime_error("Snapshot response exceeds limit");
+                 }
+-                std::string result = http->ReadAll();
+-                http->Close();
+-                ESP_LOGI(TAG, "Snapshot screen result: %s", result.c_str());
++                ESP_LOGI(TAG, "Uploaded snapshot: %u bytes", static_cast<unsigned>(jpeg_data.size()));
+                 return true;
+             });
+         
+-        AddUserOnlyTool("self.screen.preview_image", "Preview an image on the screen",
+-            PropertyList({
+-                Property("url", kPropertyTypeString)
+-            }),
+-            [display](const PropertyList& properties) -> ReturnValue {
+-                auto url = properties["url"].value<std::string>();
+-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+-
+-                if (!http->Open("GET", url)) {
+-                    throw std::runtime_error("Failed to open URL: " + url);
+-                }
+-                int status_code = http->GetStatusCode();
+-                if (status_code != 200) {
+-                    throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
+-                }
+-
+-                size_t content_length = http->GetBodyLength();
+-                char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
+-                if (data == nullptr) {
+-                    throw std::runtime_error("Failed to allocate memory for image: " + url);
+-                }
+-                size_t total_read = 0;
+-                while (total_read < content_length) {
+-                    int ret = http->Read(data + total_read, content_length - total_read);
+-                    if (ret < 0) {
+-                        heap_caps_free(data);
+-                        throw std::runtime_error("Failed to download image: " + url);
+-                    }
+-                    if (ret == 0) {
+-                        break;
+-                    }
+-                    total_read += ret;
++        AddUserOnlyTool("self.screen.preview_image", "Preview a bounded JPEG or PNG on the screen for six seconds",
++            PropertyList({Property("url", kPropertyTypeString)}),
++            [this](const PropertyList& properties) -> ReturnValue {
++                // The legacy user-only tool must not bypass preview preflight,
++                // PSRAM limits, cancellation, or checked main-task UI delivery.
++                auto target = std::find_if(tools_.begin(), tools_.end(), [](const McpTool* tool) {
++                    return tool->name() == "self.screen.preview_image_url";
++                });
++                if (target == tools_.end()) throw std::runtime_error("Bounded preview is unavailable");
++                PropertyList forwarded = (*target)->properties();
++                for (auto& property : forwarded) {
++                    if (property.name() == "url") property.set_value(properties["url"].value<std::string>());
+                 }
+-                http->Close();
+-
+-                auto image = std::make_unique<LvglAllocatedImage>(data, content_length);
+-                display->SetPreviewImage(std::move(image));
++                (*target)->Call(forwarded);
+                 return true;
+             });
+ #endif // CONFIG_LV_USE_SNAPSHOT
+@@ -322,9 +295,13 @@ void McpServer::AddUserOnlyTool(const std::string& name, const std::string& desc
+ }
+ 
+ void McpServer::ParseMessage(const std::string& message) {
+-    cJSON* json = cJSON_Parse(message.c_str());
++    if (message.size() > 65536 || runtime_safety::ContainsJsonNul(message)) {
++        ESP_LOGW(TAG, "Rejected oversized or NUL-containing MCP message");
++        return;
++    }
++    cJSON* json = cJSON_ParseWithLength(message.data(), message.size());
+     if (json == nullptr) {
+-        ESP_LOGE(TAG, "Failed to parse MCP message: %s", message.c_str());
++        ESP_LOGE(TAG, "Failed to parse MCP message (%u bytes)", static_cast<unsigned>(message.size()));
+         return;
+     }
+     ParseMessage(json);
+@@ -444,12 +421,69 @@ void McpServer::ReplyResult(int id, const std::string& result) {
+ }
+ 
+ void McpServer::ReplyError(int id, const std::string& message) {
+-    std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
+-    payload += std::to_string(id);
+-    payload += ",\"error\":{\"message\":\"";
+-    payload += message;
+-    payload += "\"}}";
+-    Application::GetInstance().SendMcpMessage(payload);
++    auto root = cJSON_CreateObject();
++    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
++    cJSON_AddNumberToObject(root, "id", id);
++    auto error = cJSON_AddObjectToObject(root, "error");
++    cJSON_AddNumberToObject(error, "code", -32000);
++    cJSON_AddStringToObject(error, "message", message.c_str());
++    char* encoded = cJSON_PrintUnformatted(root);
++    if (encoded) Application::GetInstance().SendMcpMessage(encoded);
++    cJSON_free(encoded);
++    cJSON_Delete(root);
++}
++
++thread_local McpServer::WorkItem* McpServer::current_work_ = nullptr;
++
++bool McpServer::HasWorkContext() { return current_work_ != nullptr; }
++
++bool McpServer::WorkCancelled() {
++    return current_work_ && !current_work_->live(GetInstance().connection_generation(), esp_timer_get_time() / 1000);
++}
++void McpServer::DeferWorkCompletion(std::function<void()> action) {
++    if (!current_work_ || WorkCancelled()) throw std::runtime_error("MCP work cancelled or expired");
++    current_work_->completion = std::move(action);
++}
++bool McpServer::StartWorker() {
++    std::lock_guard<std::mutex> lock(worker_init_mutex_);
++    if (work_queue_) return true;
++    work_queue_ = xQueueCreate(1, sizeof(WorkItem*)); // One active + one pending, no unbounded threads.
++    if (!work_queue_) return false;
++    if (xTaskCreate([](void* context) { static_cast<McpServer*>(context)->WorkerLoop(); },
++                    "mcp_io", 12288, this, 3, nullptr) != pdPASS) {
++        vQueueDelete(work_queue_);
++        work_queue_ = nullptr;
++        return false;
++    }
++    return true;
++}
++void McpServer::WorkerLoop() {
++    while (true) {
++        WorkItem* raw = nullptr;
++        if (xQueueReceive(work_queue_, &raw, portMAX_DELAY) != pdTRUE) continue;
++        auto work = std::shared_ptr<WorkItem>(raw);
++        current_work_ = work.get();
++        std::string result, error;
++        try {
++            if (WorkCancelled()) throw std::runtime_error("MCP work cancelled or expired");
++            result = work->tool->Call(work->arguments);
++            if (WorkCancelled()) throw std::runtime_error("MCP work cancelled or expired");
++        } catch (const std::exception& e) { error = e.what(); }
++        current_work_ = nullptr;
++        Application::GetInstance().Schedule([this, work, result = std::move(result), error = std::move(error)]() {
++            if (work->generation != connection_generation()) return;
++            if (esp_timer_get_time() / 1000 >= work->deadline_ms) {
++                ReplyError(work->id, "MCP work timed out");
++                return;
++            }
++            if (!error.empty()) { ReplyError(work->id, error); return; }
++            try {
++                // UI effects and protocol replies belong to the app main task.
++                if (work->completion) work->completion();
++                ReplyResult(work->id, result);
++            } catch (const std::exception& e) { ReplyError(work->id, e.what()); }
++        });
++    }
+ }
+ 
+ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
+@@ -533,6 +567,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
+                     argument.set_value<int>(value->valueint);
+                     found = true;
+                 } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
++                    if (std::strlen(value->valuestring) > 4096) {
++                        ReplyError(id, "String argument exceeds firmware limit");
++                        return;
++                    }
+                     argument.set_value<std::string>(value->valuestring);
+                     found = true;
+                 }
+@@ -550,14 +588,27 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
+         return;
+     }
+ 
+-    // Use main thread to call the tool
+-    auto& app = Application::GetInstance();
+-    app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
+-        try {
+-            ReplyResult(id, (*tool_iter)->Call(arguments));
+-        } catch (const std::exception& e) {
+-            ESP_LOGE(TAG, "tools/call: %s", e.what());
+-            ReplyError(id, e.what());
++    auto* tool = *tool_iter; // Stable owned tool, never capture a vector iterator.
++    const unsigned generation = connection_generation();
++    const bool slow = tool_name == "self.camera.capture_photo" ||
++                      tool_name == "self.camera.take_photo" ||
++                      tool_name == "self.screen.preview_image_url" ||
++                      tool_name == "self.screen.preview_image" ||
++                      tool_name == "self.screen.capture_screenshot" ||
++                      tool_name == "self.screen.snapshot" ||
++                      tool_name == "self.audio.play_test_tone";
++    if (slow) {
++        if (!StartWorker()) { ReplyError(id, "MCP worker unavailable"); return; }
++        auto* work = new WorkItem{{generation, esp_timer_get_time() / 1000 + 10000}, id, tool, std::move(arguments), {}};
++        if (xQueueSend(work_queue_, &work, 0) != pdTRUE) {
++            delete work;
++            ReplyError(id, "MCP I/O worker busy; retry later");
+         }
++        return;
++    }
++    Application::GetInstance().Schedule([this, id, tool, generation, arguments = std::move(arguments)]() {
++        if (generation != connection_generation()) return;
++        try { ReplyResult(id, tool->Call(arguments)); }
++        catch (const std::exception& e) { ReplyError(id, e.what()); }
+     });
+ }
+diff --git a/main/mcp_server.h b/main/mcp_server.h
+index dacdd55..a8ff422 100644
+--- a/main/mcp_server.h
++++ b/main/mcp_server.h
+@@ -1,5 +1,7 @@
+ #ifndef MCP_SERVER_H
+ #define MCP_SERVER_H
++#include "runtime_safety.h"
++#include <mutex>
+ 
+ #include <string>
+ #include <vector>
+@@ -9,6 +11,10 @@
+ #include <optional>
+ #include <stdexcept>
+ #include <thread>
++#include <atomic>
++#include <freertos/FreeRTOS.h>
++#include <freertos/queue.h>
++#include <freertos/task.h>
+ #include <mbedtls/base64.h>
+ 
+ #include <cJSON.h>
+@@ -325,6 +331,11 @@ public:
+     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+     void ParseMessage(const cJSON* json);
+     void ParseMessage(const std::string& message);
++    void OnConnectionClosed() { ++connection_generation_; }
++    unsigned connection_generation() const { return connection_generation_.load(); }
++    static bool WorkCancelled();
++    static bool HasWorkContext();
++    static void DeferWorkCompletion(std::function<void()> action);
+ 
+ private:
+     McpServer();
+@@ -338,6 +349,19 @@ private:
+     void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
+     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
+ 
++    struct WorkItem : runtime_safety::WorkToken {
++        int id;
++        McpTool* tool;
++        PropertyList arguments;
++
++        std::function<void()> completion;
++    };
++    QueueHandle_t work_queue_ = nullptr;
++    std::mutex worker_init_mutex_;
++    std::atomic<unsigned> connection_generation_{0};
++    static thread_local WorkItem* current_work_;
++    bool StartWorker();
++    void WorkerLoop();
+     std::vector<McpTool*> tools_;
+ };
+ 
+diff --git a/main/ota.cc b/main/ota.cc
+index bcc0dc5..804a0c1 100644
+--- a/main/ota.cc
++++ b/main/ota.cc
+@@ -26,6 +26,9 @@
+ 
+ 
+ Ota::Ota() {
++    auto app_desc = esp_app_get_description();
++    current_version_ = app_desc->version;
++
+ #ifdef ESP_EFUSE_BLOCK_USR_DATA
+     // Read Serial Number from efuse user_data
+     uint8_t serial_number[33] = {0};
+diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
+index f0cc034..47b851b 100644
+--- a/main/protocols/websocket_protocol.cc
++++ b/main/protocols/websocket_protocol.cc
+@@ -3,6 +3,8 @@
+ #include "system_info.h"
+ #include "application.h"
+ #include "settings.h"
++#include "websocket_endpoint.h"
++#include "runtime_safety.h"
+ 
+ #include <cstring>
+ #include <cJSON.h>
+@@ -12,6 +14,37 @@
+ 
+ #define TAG "WS"
+ 
++namespace {
++
++std::string DescribeWebsocketEndpoint(const std::string& url) {
++    if (url.empty()) {
++        return "empty websocket_url";
++    }
++
++    auto scheme_end = url.find("://");
++    if (scheme_end == std::string::npos || scheme_end == 0) {
++        return "configured websocket endpoint";
++    }
++
++    auto authority_start = scheme_end + 3;
++    auto authority_end = url.find_first_of("/?#", authority_start);
++    std::string authority = url.substr(
++        authority_start,
++        authority_end == std::string::npos ? std::string::npos : authority_end - authority_start);
++    auto credentials_end = authority.rfind('@');
++    if (credentials_end != std::string::npos) {
++        authority = authority.substr(credentials_end + 1);
++    }
++
++    if (authority.empty()) {
++        return "configured websocket endpoint";
++    }
++
++    return url.substr(0, scheme_end) + "://" + authority;
++}
++
++}  // namespace
++
+ WebsocketProtocol::WebsocketProtocol() {
+     event_group_handle_ = xEventGroupCreate();
+ }
+@@ -63,7 +96,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
+     }
+ 
+     if (!websocket_->Send(text)) {
+-        ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
++        ESP_LOGE(TAG, "Failed to send text (length=%zu)", text.size());
+         SetError(Lang::Strings::SERVER_ERROR);
+         return false;
+     }
+@@ -77,12 +110,22 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
+ 
+ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
+     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
++    suppress_next_disconnect_notification_ = true;
+     websocket_.reset();
+ }
+ 
+ bool WebsocketProtocol::OpenAudioChannel() {
++    // Retire a failed client before installing callbacks on its replacement.
++    // A delayed hello from the old session must not satisfy this handshake.
++    if (websocket_ != nullptr) {
++        CloseAudioChannel(false);
++    }
++    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
++    session_id_.clear();
++    suppress_next_disconnect_notification_ = false;
+     Settings settings("websocket", false);
+-    std::string url = settings.GetString("url");
++    std::string url = GetEffectiveWebsocketUrl();
++    const std::string endpoint = DescribeWebsocketEndpoint(url);
+     std::string token = settings.GetString("token");
+     int version = settings.GetInt("version");
+     if (version != 0) {
+@@ -91,10 +134,16 @@ bool WebsocketProtocol::OpenAudioChannel() {
+ 
+     error_occurred_ = false;
+ 
++    if (url.empty()) {
++        SetError("HERMES endpoint error: websocket_url is missing or invalid. Check SD /config.json.");
++        return false;
++    }
++
+     auto network = Board::GetInstance().GetNetwork();
+     websocket_ = network->CreateWebSocket(1);
+     if (websocket_ == nullptr) {
+         ESP_LOGE(TAG, "Failed to create websocket");
++        SetError("HERMES endpoint error: cannot create websocket client.");
+         return false;
+     }
+ 
+@@ -112,44 +161,27 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     websocket_->OnData([this](const char* data, size_t len, bool binary) {
+         if (binary) {
+             if (on_incoming_audio_ != nullptr) {
+-                if (version_ == 2) {
+-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
+-                    bp2->version = ntohs(bp2->version);
+-                    bp2->type = ntohs(bp2->type);
+-                    bp2->timestamp = ntohl(bp2->timestamp);
+-                    bp2->payload_size = ntohl(bp2->payload_size);
+-                    auto payload = (uint8_t*)bp2->payload;
+-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+-                        .sample_rate = server_sample_rate_,
+-                        .frame_duration = server_frame_duration_,
+-                        .timestamp = bp2->timestamp,
+-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
+-                    }));
+-                } else if (version_ == 3) {
+-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
+-                    bp3->type = bp3->type;
+-                    bp3->payload_size = ntohs(bp3->payload_size);
+-                    auto payload = (uint8_t*)bp3->payload;
+-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+-                        .sample_rate = server_sample_rate_,
+-                        .frame_duration = server_frame_duration_,
+-                        .timestamp = 0,
+-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
+-                    }));
+-                } else {
+-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+-                        .sample_rate = server_sample_rate_,
+-                        .frame_duration = server_frame_duration_,
+-                        .timestamp = 0,
+-                        .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+-                    }));
++                runtime_safety::BinaryAudioView frame;
++                if (!runtime_safety::ParseBinaryAudio(data, len, version_, frame)) {
++                    ESP_LOGW(TAG, "Invalid or oversized binary audio frame");
++                    return;
+                 }
++                on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
++                    .sample_rate = server_sample_rate_,
++                    .frame_duration = server_frame_duration_,
++                    .timestamp = frame.timestamp,
++                    .payload = std::vector<uint8_t>(frame.payload, frame.payload + frame.size)
++                }));
+             }
+         } else {
+-            // Parse JSON data
+-            auto root = cJSON_Parse(data);
+-            auto type = cJSON_GetObjectItem(root, "type");
+-            if (cJSON_IsString(type)) {
++            // WebSocket text is length-delimited, not necessarily NUL-terminated.
++            if (!data || len > 65536 || runtime_safety::ContainsJsonNul(std::string_view(data, len))) {
++                ESP_LOGW(TAG, "Invalid or oversized JSON frame");
++                return;
++            }
++            auto root = cJSON_ParseWithLength(data, len);
++            auto type = cJSON_IsObject(root) ? cJSON_GetObjectItem(root, "type") : nullptr;
++            if (cJSON_IsString(type) && type->valuestring != nullptr) {
+                 if (strcmp(type->valuestring, "hello") == 0) {
+                     ParseServerHello(root);
+                 } else {
+@@ -158,7 +190,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
+                     }
+                 }
+             } else {
+-                ESP_LOGE(TAG, "Missing message type, data: %s", data);
++                ESP_LOGE(TAG, "Invalid JSON message or missing/string-invalid type (length=%zu)", len);
+             }
+             cJSON_Delete(root);
+         }
+@@ -166,16 +198,21 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     });
+ 
+     websocket_->OnDisconnected([this]() {
++        const bool expected_disconnect = suppress_next_disconnect_notification_;
++        suppress_next_disconnect_notification_ = false;
+         ESP_LOGI(TAG, "Websocket disconnected");
+         if (on_audio_channel_closed_ != nullptr) {
+             on_audio_channel_closed_();
+         }
++        if (!expected_disconnect && on_disconnected_ != nullptr) {
++            on_disconnected_();
++        }
+     });
+ 
+-    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
++    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", endpoint.c_str(), version_);
+     if (!websocket_->Connect(url.c_str())) {
+         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
++        SetError("HERMES endpoint error: cannot connect to " + endpoint + ". Start ai-server and check Wi-Fi.");
+         return false;
+     }
+ 
+@@ -189,7 +226,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
+     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
+         ESP_LOGE(TAG, "Failed to receive server hello");
+-        SetError(Lang::Strings::SERVER_TIMEOUT);
++        SetError("HERMES endpoint timeout: no hello from " + endpoint + ". Check ai-server bridge.");
+         return false;
+     }
+ 
+@@ -205,6 +242,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
+     cJSON* root = cJSON_CreateObject();
+     cJSON_AddStringToObject(root, "type", "hello");
+     cJSON_AddNumberToObject(root, "version", version_);
++    Settings hermes_settings("hermes", false);
++    cJSON_AddStringToObject(root, "tts_provider",
++                            hermes_settings.GetBool("tts_hermes", false) ? "hermes" : "sanotts");
+     cJSON* features = cJSON_CreateObject();
+ #if CONFIG_USE_SERVER_AEC
+     cJSON_AddBoolToObject(features, "aec", true);
+@@ -227,8 +267,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
+ 
+ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+     auto transport = cJSON_GetObjectItem(root, "transport");
+-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
+-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
++    if (!cJSON_IsString(transport) || transport->valuestring == nullptr ||
++        strcmp(transport->valuestring, "websocket") != 0) {
++        ESP_LOGE(TAG, "Missing, invalid or unsupported websocket transport");
+         return;
+     }
+ 
+diff --git a/main/protocols/websocket_protocol.h b/main/protocols/websocket_protocol.h
+index 48bbc00..3558498 100644
+--- a/main/protocols/websocket_protocol.h
++++ b/main/protocols/websocket_protocol.h
+@@ -25,6 +25,7 @@ private:
+     EventGroupHandle_t event_group_handle_;
+     std::unique_ptr<WebSocket> websocket_;
+     int version_ = 1;
++    bool suppress_next_disconnect_notification_ = false;
+ 
+     void ParseServerHello(const cJSON* root);
+     bool SendText(const std::string& text) override;
+diff --git a/main/runtime_safety.h b/main/runtime_safety.h
+new file mode 100644
+index 0000000..b09e63f
+--- /dev/null
++++ b/main/runtime_safety.h
+@@ -0,0 +1,188 @@
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include "websocket_endpoint_policy.h"
++
++namespace runtime_safety {
++// One coherent state prevents a concurrent abort from reopening admission while
++// a start callback is resetting the decoder. Reset must happen between Begin/Admit.
++class TtsAdmission {
++    std::atomic<unsigned> state_{0}; // generation above two bits: stopped/preparing/accepted
++    unsigned Advance(unsigned phase) {
++        unsigned old = state_.load(), next;
++        do { next = (((old >> 2) + 1) << 2) | phase; }
++        while (!state_.compare_exchange_weak(old, next));
++        return next >> 2;
++    }
++public:
++    unsigned Begin() { return Advance(1); }
++    bool Admit(unsigned generation) {
++        unsigned expected = (generation << 2) | 1;
++        return state_.compare_exchange_strong(expected, (generation << 2) | 2);
++    }
++    unsigned Stop() { return state_.fetch_and(~3u) >> 2; }
++    void Cancel() { (void)Advance(0); }
++    bool accepts() const { return (state_.load() & 3) == 2; }
++    unsigned generation() const { return state_.load() >> 2; }
++};
++struct WorkToken {
++    unsigned generation = 0;
++    int64_t deadline_ms = 0;
++    bool live(unsigned current_generation, int64_t now_ms) const {
++        return generation == current_generation && now_ms < deadline_ms;
++    }
++};
++template<class F> struct ScopeExit {
++    F fn;
++    explicit ScopeExit(F f) : fn(f) {}
++    ~ScopeExit() { fn(); }
++    ScopeExit(const ScopeExit&) = delete;
++};
++template<class Owner> class OwnedLock {
++    Owner* owner_;
++    bool acquired_;
++public:
++    OwnedLock(Owner* owner, int timeout_ms) : owner_(owner), acquired_(owner && owner->Lock(timeout_ms)) {}
++    ~OwnedLock() { Release(); }
++    explicit operator bool() const { return acquired_; }
++    void Release() { if (acquired_) { owner_->Unlock(); acquired_ = false; } }
++    OwnedLock(const OwnedLock&) = delete;
++    OwnedLock& operator=(const OwnedLock&) = delete;
++};
++// Failed reads are owned by the reading task: another task's successful read
++// cannot authorize an RMW based on fabricated data. Fixed storage avoids allocation
++// on the failure path; overflow conservatively blocks writes until restart.
++class FailedReadGate {
++    std::array<uintptr_t, 16> tasks_{};
++    bool overflow_ = false;
++public:
++    bool may_write(uintptr_t task) const { return !overflow_ && std::find(tasks_.begin(), tasks_.end(), task) == tasks_.end(); }
++    void fail(uintptr_t task) {
++        if (!may_write(task)) return;
++        auto slot = std::find(tasks_.begin(), tasks_.end(), uintptr_t(0));
++        if (slot == tasks_.end() || task == 0) overflow_ = true;
++        else *slot = task;
++    }
++    void recover(uintptr_t task) { for (auto& failed : tasks_) if (failed == task) failed = 0; }
++};
++inline bool ContainsJsonNul(std::string_view json) {
++    for (size_t p = 0; p < json.size(); ++p) {
++        if (json[p] == '\0') return true;
++        if (json[p] == '\\' && p + 1 < json.size()) {
++            ++p; // skip escaped backslash and quoted characters, but reject decoded NUL
++            if (json[p] == 'u' && json.substr(p + 1, 4) == "0000") return true;
++        }
++    }
++    return false;
++}
++struct BinaryAudioView {
++    const uint8_t* payload = nullptr;
++    size_t size = 0;
++    uint32_t timestamp = 0;
++};
++inline bool ParseBinaryAudio(const char* data, size_t len, int version, BinaryAudioView& out) {
++    out = {};
++    if (!data || !len || len > 16384 + 16) return false;
++    const auto* bytes = reinterpret_cast<const uint8_t*>(data);
++    const auto be32 = [](const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; };
++    size_t header = 0, payload = len;
++    uint32_t timestamp = 0;
++    if (version == 2) {
++        header = 16;
++        if (len < header || bytes[0] != 0 || bytes[1] != 2 || bytes[2] != 0 || bytes[3] != 0) return false;
++        timestamp = be32(bytes + 8); payload = be32(bytes + 12);
++    } else if (version == 3) {
++        header = 4;
++        if (len < header || bytes[0] != 0) return false;
++        payload = (size_t(bytes[2]) << 8) | bytes[3];
++    }
++    if (!payload || payload > 16384 || payload != len - header) return false;
++    out = {bytes + header, payload, timestamp};
++    return true;
++}
++inline bool ValidCameraBuffer(size_t index, size_t count, size_t used, size_t capacity, size_t expected) {
++    return index < count && used > 0 && used <= capacity && used <= 2 * 1024 * 1024 && (!expected || used == expected);
++}
++inline bool ValidCredential(std::string_view value) {
++    // Spaces are credential bytes, not formatting. Reject controls, never trim.
++    for (unsigned char c : value) if (c < 0x20 || c == 0x7f) return false;
++    return true;
++}
++inline std::string SelectWebsocketUrl(const std::string& override_url, const std::string& legacy_url) {
++    const auto& selected = override_url.empty() ? legacy_url : override_url;
++    return ValidWebsocketUrl(selected) ? selected : std::string();
++}
++inline std::string WebsocketScheme(std::string_view url) {
++    if (!ValidWebsocketUrl(url)) return "";
++    return url.substr(0, 5) == "ws://" ? "ws" : "wss";
++}
++inline std::string WebsocketHost(std::string_view url) {
++    auto start = url.find("://");
++    if (start == std::string_view::npos) return "";
++    start += 3;
++    auto authority = url.substr(start, url.find_first_of("/?#", start) - start);
++    auto at = authority.rfind('@');
++    if (at != std::string_view::npos) authority.remove_prefix(at + 1);
++    if (authority.empty()) return "";
++    if (authority.front() == '[') {
++        auto end = authority.find(']');
++        return end == std::string_view::npos ? "" : std::string(authority.substr(0, end + 1));
++    }
++    return std::string(authority.substr(0, authority.find(':')));
++}
++
++inline bool PreviewDimensions(const uint8_t* bytes, size_t length, size_t& width, size_t& height) {
++    width = height = 0;
++    if (!bytes) return false;
++    const std::array<uint8_t, 8> png_signature{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
++    if (length >= 33 && std::equal(png_signature.begin(), png_signature.end(), bytes)) {
++        if (bytes[8] || bytes[9] || bytes[10] || bytes[11] != 13 ||
++            bytes[12] != 'I' || bytes[13] != 'H' || bytes[14] != 'D' || bytes[15] != 'R') return false;
++        auto be32 = [](const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
++                                               (uint32_t(p[2]) << 8) | p[3]; };
++        width = be32(bytes + 16); height = be32(bytes + 20);
++    } else if (length >= 4 && bytes[0] == 0xff && bytes[1] == 0xd8) {
++        size_t p = 2;
++        while (p + 4 <= length) {
++            if (bytes[p++] != 0xff) return false;
++            while (p < length && bytes[p] == 0xff) ++p;
++            if (p >= length) return false;
++            const uint8_t marker = bytes[p++];
++            if (marker == 0xd9 || marker == 0xda) return false;
++            if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
++            if (p + 2 > length) return false;
++            const size_t segment = (size_t(bytes[p]) << 8) | bytes[p + 1];
++            if (segment < 2 || segment > length - p) return false;
++            if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
++                if (segment < 8) return false;
++                height = (size_t(bytes[p + 3]) << 8) | bytes[p + 4];
++                width = (size_t(bytes[p + 5]) << 8) | bytes[p + 6];
++                break;
++            }
++            p += segment;
++        }
++    }
++    // Bound both axes and decoded allocation BEFORE invoking a decoder.
++    return width > 0 && height > 0 && width <= 1024 && height <= 1024 && width * height <= 320 * 240;
++}
++
++struct VolumeLease {
++    std::string owner;
++    int saved_volume = 70;
++    int64_t expires_ms = 0;
++    bool active() const { return !owner.empty(); }
++    bool expired(int64_t now) const { return active() && now >= expires_ms; }
++    bool accepts(const std::string& id) const { return !active() || owner == id; }
++    void acquire(const std::string& id, int current_volume, int duration_ms, int64_t now) {
++        if (!active()) saved_volume = current_volume;
++        owner = id; expires_ms = now + duration_ms;
++    }
++    void clear() { owner.clear(); expires_ms = 0; }
++};
++}  // namespace runtime_safety
+diff --git a/main/websocket_endpoint.h b/main/websocket_endpoint.h
+new file mode 100644
+index 0000000..651c145
+--- /dev/null
++++ b/main/websocket_endpoint.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <settings.h>
++#include "runtime_safety.h"
++
++// One policy for launcher checks, diagnostics, OTA bypass and connection.
++// A nonempty invalid override fails closed, even if legacy NVS is valid.
++// Only a valid legacy url-only endpoint is migrated; never log its contents.
++inline std::string GetEffectiveWebsocketUrl() {
++    Settings settings("websocket", true);
++    const auto override_url = settings.GetString("url_override", "");
++    const auto legacy_url = settings.GetString("url", "");
++    const auto selected_url = runtime_safety::SelectWebsocketUrl(override_url, legacy_url);
++    if (override_url.empty() && !selected_url.empty()) {
++        settings.SetString("url_override", selected_url);
++    }
++    return selected_url;
++}
+diff --git a/main/websocket_endpoint_policy.h b/main/websocket_endpoint_policy.h
+new file mode 100644
+index 0000000..187487d
+--- /dev/null
++++ b/main/websocket_endpoint_policy.h
+@@ -0,0 +1,164 @@
++#pragma once
++
++#include <cstddef>
++#include <string_view>
++
++namespace runtime_safety {
++inline constexpr std::size_t kMaxWebsocketUrlLength = 2048;
++
++namespace websocket_url_detail {
++inline bool IsDigit(unsigned char c) { return c >= '0' && c <= '9'; }
++inline bool IsAlpha(unsigned char c) {
++    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
++}
++inline int HexValue(unsigned char c) {
++    if (IsDigit(c)) return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++}
++
++inline bool ValidIpv4(std::string_view address) {
++    std::size_t position = 0;
++    for (unsigned part = 0; part < 4; ++part) {
++        const auto end = address.find('.', position);
++        const auto octet = address.substr(position, end == std::string_view::npos ? end : end - position);
++        if (octet.empty() || octet.size() > 3 || (octet.size() > 1 && octet.front() == '0')) return false;
++        unsigned value = 0;
++        for (unsigned char c : octet) {
++            if (!IsDigit(c)) return false;
++            value = value * 10 + (c - '0');
++        }
++        if (value > 255) return false;
++        if (part == 3) return end == std::string_view::npos;
++        if (end == std::string_view::npos) return false;
++        position = end + 1;
++    }
++    return false;
++}
++
++// RFC 4291 groups, one optional ::, and an optional final dotted IPv4 tail.
++// Pure parsing: no inet_pton, DNS lookup, platform headers, or SDK dependencies.
++inline bool ValidIpv6(std::string_view address) {
++    if (address.empty()) return false;
++    std::size_t position = 0;
++    unsigned groups = 0;
++    bool compressed = false;
++    if (address.front() == ':') {
++        if (address.size() < 2 || address[1] != ':') return false;
++        compressed = true;
++        position = 2;
++    }
++    while (position < address.size()) {
++        const auto end = address.find(':', position);
++        const auto group = address.substr(position, end == std::string_view::npos ? end : end - position);
++        if (group.empty()) return false;
++        if (group.find('.') != std::string_view::npos) {
++            if (end != std::string_view::npos || !ValidIpv4(group)) return false;
++            groups += 2;
++        } else {
++            if (group.size() > 4) return false;
++            for (unsigned char c : group) if (HexValue(c) < 0) return false;
++            ++groups;
++        }
++        if (groups > 8) return false;
++        if (end == std::string_view::npos) break;
++        position = end + 1;
++        if (position == address.size()) return false; // A single trailing colon.
++        if (address[position] == ':') {
++            if (compressed) return false;
++            compressed = true;
++            ++position;
++        }
++    }
++    // Compression must replace at least one group (including the all-zero ::).
++    return compressed ? groups < 8 : groups == 8;
++}
++
++inline bool ValidDnsOrIpv4(std::string_view host) {
++    if (host.empty()) return false;
++    bool numeric = true;
++    for (unsigned char c : host) if (!IsDigit(c) && c != '.') numeric = false;
++    // Do not reinterpret malformed or short-form dotted IPv4 as DNS.
++    if (numeric && host.find('.') != std::string_view::npos) return ValidIpv4(host);
++    if (host.back() == '.') host.remove_suffix(1); // Absolute DNS names are legitimate.
++    if (host.empty() || host.size() > 253) return false;
++    std::size_t position = 0;
++    while (position < host.size()) {
++        const auto end = host.find('.', position);
++        const auto label = host.substr(position, end == std::string_view::npos ? end : end - position);
++        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-') return false;
++        for (unsigned char c : label) if (!IsAlpha(c) && !IsDigit(c) && c != '-') return false;
++        if (end == std::string_view::npos) return true;
++        position = end + 1;
++    }
++    return false; // Empty final label, e.g. two final dots.
++}
++
++inline bool ValidPort(std::string_view port) {
++    if (port.empty()) return false;
++    unsigned value = 0;
++    for (unsigned char c : port) {
++        if (!IsDigit(c)) return false;
++        value = value * 10 + (c - '0');
++        if (value > 65535) return false; // Bound before another multiplication.
++    }
++    return value != 0;
++}
++
++inline bool ValidAuthority(std::string_view authority) {
++    if (authority.empty() || authority.find('@') != std::string_view::npos) return false;
++    if (authority.front() == '[') {
++        const auto close = authority.find(']');
++        if (close == std::string_view::npos || !ValidIpv6(authority.substr(1, close - 1))) return false;
++        const auto tail = authority.substr(close + 1);
++        return tail.empty() || (tail.front() == ':' && ValidPort(tail.substr(1)));
++    }
++    const auto colon = authority.find(':');
++    if (colon == std::string_view::npos) return ValidDnsOrIpv4(authority);
++    return ValidDnsOrIpv4(authority.substr(0, colon)) && ValidPort(authority.substr(colon + 1));
++}
++
++inline bool IsResourceCharacter(unsigned char c) {
++    if (IsAlpha(c) || IsDigit(c)) return true;
++    // RFC 3986 pchar, plus path separators and query delimiters.
++    return std::string_view("-._~!$&'()*+,;=:@/?").find(static_cast<char>(c)) != std::string_view::npos;
++}
++} // namespace websocket_url_detail
++
++// Validate the original bytes; never trim URLs or normalize credential bytes.
++// Percent-encoded spaces/data in path/query are allowed, but decoded controls are not.
++inline bool ValidWebsocketUrl(std::string_view url) {
++    if (url.empty() || url.size() > kMaxWebsocketUrlLength) return false;
++    std::size_t start = 0;
++    if (url.substr(0, 5) == "ws://") start = 5;
++    else if (url.substr(0, 6) == "wss://") start = 6;
++    else return false;
++
++    for (std::size_t position = 0; position < url.size(); ++position) {
++        const auto c = static_cast<unsigned char>(url[position]);
++        if (c <= 0x20 || c == 0x7f || c == '\\' || c == '#') return false;
++        if (c == '%') {
++            if (url.size() - position < 3) return false;
++            const int high = websocket_url_detail::HexValue(url[position + 1]);
++            const int low = websocket_url_detail::HexValue(url[position + 2]);
++            if (high < 0 || low < 0) return false;
++            const int decoded = high * 16 + low;
++            if (decoded < 0x20 || decoded == 0x7f) return false;
++            position += 2;
++        }
++    }
++
++    const auto end = url.find_first_of("/?", start);
++    if (!websocket_url_detail::ValidAuthority(url.substr(start, end == std::string_view::npos ? end : end - start))) {
++        return false;
++    }
++    if (end != std::string_view::npos) {
++        for (std::size_t position = end; position < url.size(); ++position) {
++            if (url[position] == '%') position += 2; // Already checked above.
++            else if (!websocket_url_detail::IsResourceCharacter(url[position])) return false;
++        }
++    }
++    return true;
++}
++} // namespace runtime_safety

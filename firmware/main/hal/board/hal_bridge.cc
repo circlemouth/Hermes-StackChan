@@ -109,13 +109,10 @@ lv_disp_t* display_get_lvgl_display()
     return display->GetLvglDisplay();
 }
 
-void disply_lvgl_lock()
+bool disply_lvgl_lock(int timeout_ms)
 {
     auto* display = get_stackchan_display();
-    if (display == nullptr) {
-        return;
-    }
-    display->LvglLock();
+    return display && display->LvglLock(timeout_ms);
 }
 
 void disply_lvgl_unlock()

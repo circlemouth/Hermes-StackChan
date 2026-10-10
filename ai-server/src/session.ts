@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto'
 import type WebSocket from 'ws'
 import { createInputOpusDecoder, decodeOpusFrames, encodeWavToOpusFrames, extractOpusPayload, pcmToWav, wrapOpusPayload, INPUT_SAMPLE_RATE, INPUT_FRAME_DURATION_MS, OUTPUT_SAMPLE_RATE, OUTPUT_FRAME_DURATION_MS, type InputOpusDecoder } from './audio.js'
-import { HermesClient, type HermesPromptStreamEvent } from './hermes.js'
+import { HermesClient, type HermesPromptStreamEvent, type HermesTurnOptions } from './hermes.js'
 import { transcribeWithHermes, synthesizeWithHermes } from './hermes_audio.js'
 import { synthesizeWithSanoTts } from './sanotts_audio.js'
-import { readSpeakerVolumeAck } from './speaker_volume_ack.js'
+import { readSpeakerVolumeAck, readSpeakerVolumeAckRecord } from './speaker_volume_ack.js'
 import { registerDeviceSession, type StackChanBridgeStatus } from './device_control.js'
 import { extractFirstDisplayImage, resolveDisplayImageSource, stripMediaForSpeech } from './media.js'
 import { elapsedMs, nowMs, withTiming } from './timing.js'
@@ -253,12 +253,14 @@ const DEFAULT_IGNORED_SHORT_TRANSCRIPTS = new Set([
     'あ', 'あっ', 'あー',
     'え', 'えっ', 'えー',
     'お', 'おっ',
-    'はい', 'うん', 'ん',
-    '了解', 'なるほど', 'わかった', 'OK', 'オーケー',
+    'ん',
     'はは', 'ハハ', 'ふふ', 'フフ',
     'ちっ', 'チッ', 'ふっ', 'フッ', 'くっ', 'クッ',
 ])
-const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー', 'お', 'おっ', 'うん', 'ん', 'はい', 'はは', 'ハハ', 'ふふ', 'フフ', 'ちっ', 'チッ', 'ふっ', 'フッ', 'くっ', 'クッ'])
+const DEFAULT_IGNORED_TIMEOUT_TRANSCRIPTS = new Set(['あ', 'あっ', 'あー', 'え', 'えっ', 'えー', 'お', 'おっ', 'ん', 'はは', 'ハハ', 'ふふ', 'フフ', 'ちっ', 'チッ', 'ふっ', 'フッ', 'くっ', 'クッ'])
+const TURN_TIMEOUT_MS = readEnvInt('STACKCHAN_TURN_TIMEOUT_MS', 180_000, 1000, 600_000)
+const SPEAKER_LEASE_MS = 30_000
+const SPEAKER_LEASE_RENEW_MS = 10_000
 
 type FastAckCacheEntry = {
     text: string
@@ -333,8 +335,8 @@ type PendingMcpRequest = {
 }
 
 type HermesSessionClient = {
-    submitPrompt(prompt: string): Promise<string>
-    streamPrompt?(prompt: string): AsyncIterable<HermesPromptStreamEvent>
+    submitPrompt(prompt: string, options?: HermesTurnOptions): Promise<string>
+    streamPrompt?(prompt: string, options?: HermesTurnOptions): AsyncIterable<HermesPromptStreamEvent>
     interrupt(): Promise<void>
     dispose(): Promise<void>
 }
@@ -353,6 +355,12 @@ type TtsPlayback = {
     localOutputChecked: boolean
     localOutputTarget?: string
     m5SpeakerMutedForLocalOutput: boolean
+    m5AdmissionNeedsReset?: boolean
+    speakerLeaseId?: string
+    speakerLeaseTimer?: ReturnType<typeof setInterval>
+    localOutputController?: AbortController
+    localSegmentStreaming?: boolean
+    localSegmentFailed?: boolean
 }
 
 type SynthesizedSegment = {
@@ -365,7 +373,7 @@ type PrefetchedSegment = {
     promise: Promise<SynthesizedSegment>
 }
 
-type SessionDeps = {
+export type SessionDeps = {
     hermes?: HermesSessionClient
     registerDeviceSession?: typeof registerDeviceSession
     decodeOpusFrames?: typeof decodeOpusFrames
@@ -377,6 +385,7 @@ type SessionDeps = {
     synthesizeSanoText?: typeof synthesizeWithSanoTts
     synthesizeHermesText?: typeof synthesizeWithHermes
     postTtsCooldownMs?: number
+    turnTimeoutMs?: number
     localVadConfig?: LocalRmsVadConfig
     bargeInConfig?: BargeInConfig
     speechSegmentationConfig?: SpeechSegmentationConfig
@@ -398,7 +407,8 @@ export class Session {
     private version = 3
     private opusFrames: Buffer[] = []
     private readonly hermes: HermesSessionClient
-    private readonly unregisterDeviceSession: () => void
+    private unregisterDeviceSession: () => void = () => undefined
+    private readonly registerDeviceSessionFn: typeof registerDeviceSession
     private readonly decodeOpusFramesFn: typeof decodeOpusFrames
     private readonly createInputOpusDecoderFn: typeof createInputOpusDecoder
     private readonly decodeOpusFrameFn?: (opus: Buffer) => Buffer
@@ -429,6 +439,13 @@ export class Session {
     private bargeInDecodeFailed = false
     private bargeInDecodeFailures = 0
     private processingTurn?: AbortController
+    private producerEpoch = 0
+    private hermesRetirement: Promise<void> = Promise.resolve()
+    private readonly turnDeadlines = new WeakMap<AbortController, number>()
+    private readonly turnTimeoutMs: number
+    private bargeInFrames: Buffer[] = []
+    private cooldownFrames: Buffer[] = []
+    private installingCaptureFrames = false
     private activeTtsPlayback?: TtsPlayback
     private localSpeakerOwner?: TtsPlayback
     private localSpeakerOperations: Promise<void> = Promise.resolve()
@@ -460,6 +477,7 @@ export class Session {
         this.synthesizeSanoTextFn = deps.synthesizeSanoText ?? deps.synthesizeText ?? synthesizeWithSanoTts
         this.synthesizeHermesTextFn = deps.synthesizeHermesText ?? deps.synthesizeText ?? synthesizeWithHermes
         this.postTtsCooldownMs = deps.postTtsCooldownMs ?? POST_TTS_COOLDOWN_MS
+        this.turnTimeoutMs = deps.turnTimeoutMs ?? TURN_TIMEOUT_MS
         this.localVadConfig = deps.localVadConfig ?? readLocalRmsVadConfig()
         this.localVad = new LocalRmsVad(this.localVadConfig)
         this.bargeInConfig = { ...(deps.bargeInConfig ?? BARGE_IN_CONFIG) }
@@ -478,7 +496,7 @@ export class Session {
         if (typeof deps.autoLedEnabled === 'boolean') this.autoLedConfig.enabled = deps.autoLedEnabled
         this.streamingDecoder = this.createInputOpusDecoderFn()
         this.bargeInDecoder = this.createInputOpusDecoderFn()
-        this.unregisterDeviceSession = (deps.registerDeviceSession ?? registerDeviceSession)(this)
+        this.registerDeviceSessionFn = deps.registerDeviceSession ?? registerDeviceSession
     }
 
     close(): void {
@@ -487,6 +505,11 @@ export class Session {
         this.cancelProcessingTurn()
         this.cancelFastAckWarmup()
         this.followupQueue = []
+        this.cooldownFrames = []
+        // Firmware restores on disconnect/lease expiry; this closed session
+        // cannot retain or reacquire volume ownership.
+        if (this.localSpeakerOwner) this.localSpeakerOwner.m5SpeakerMutedForLocalOutput = false
+        this.localSpeakerOwner = undefined
         this.clearTimers()
         this.unregisterDeviceSession()
         this.streamingDecoder.dispose()
@@ -496,7 +519,9 @@ export class Session {
             pending.reject(new Error('StackChan WebSocket disconnected'))
             this.pendingMcp.delete(id)
         }
-        void this.hermes.dispose()
+        void Promise.resolve().then(() => this.hermes.dispose()).catch(() => {
+            console.warn(`[session ${this.sessionId}] Hermes cleanup failed; local session is closed`)
+        })
     }
 
     handleMessage(data: Buffer | string): void {
@@ -531,6 +556,14 @@ export class Session {
             return
         }
 
+        if (this.state === 'idle' && Date.now() < this.cooldownUntil) {
+            // Older firmware already displays Listening after tts.stop. Preserve
+            // its input until our cooldown ends instead of losing the next word.
+            this.cooldownFrames.push(Buffer.from(payload))
+            const limit = Math.ceil(MAX_RECORDING_MS / INPUT_FRAME_DURATION_MS)
+            if (this.cooldownFrames.length > limit) this.cooldownFrames.shift()
+            return
+        }
         if (this.state !== 'listening') return
         this.handleListeningPayload(payload)
     }
@@ -597,6 +630,8 @@ export class Session {
         if (result.utteranceEnded) {
             console.log(`[session ${this.sessionId}] vad silence ended speechMs=${result.speechMs} silenceMs=${result.silenceMs}`)
             this.triggerProcess('local-vad')
+        } else if (!this.installingCaptureFrames) {
+            this.drainFollowupQueue()
         }
     }
 
@@ -642,6 +677,7 @@ export class Session {
     }
 
     private resetBargeInDetector(): void {
+        this.bargeInFrames = []
         this.bargeInVad.reset()
         this.recreateBargeInDecoder()
         this.bargeInDecodeFailed = false
@@ -669,6 +705,7 @@ export class Session {
         } catch (error) {
             this.bargeInDecodeFailures += 1
             this.bargeInVad.reset()
+            this.bargeInFrames = []
             this.recreateBargeInDecoder()
             if (this.bargeInDecodeFailures >= BARGE_IN_DECODE_FAILURE_LIMIT) {
                 this.bargeInDecodeFailed = true
@@ -680,11 +717,14 @@ export class Session {
         }
         this.bargeInDecodeFailures = 0
 
+        this.bargeInFrames.push(Buffer.from(payload))
+        const limit = Math.ceil((this.bargeInConfig.startSpeechMs + this.bargeInConfig.minSpeechMs + 240) / INPUT_FRAME_DURATION_MS)
+        if (this.bargeInFrames.length > limit) this.bargeInFrames.shift()
         const result = this.bargeInVad.processPcm(pcm)
         if (!result.inSpeech || result.speechMs < this.bargeInConfig.minSpeechMs) return false
 
         console.log(`[session ${this.sessionId}] barge-in detected rms=${result.rms.toFixed(4)} speechMs=${result.speechMs}`)
-        this.handleBargeIn(payload)
+        this.handleBargeIn(this.bargeInFrames.splice(0))
         return true
     }
 
@@ -692,7 +732,54 @@ export class Session {
         this.cancelProcessingTurn()
         const turn = new AbortController()
         this.processingTurn = turn
+        const epoch = ++this.producerEpoch
+        this.turnDeadlines.set(turn, Date.now() + this.turnTimeoutMs)
+        const timer = setTimeout(() => {
+            if (this.processingTurn !== turn || this.closed) return
+            this.sendProcessingErrorAlert(new Error('Conversation deadline exceeded'))
+            this.cancelProcessingTurn()
+            const retirement = this.interruptHermes()
+            this.state = 'idle'
+            this.cooldownUntil = 0
+            void retirement.then(() => {
+                if (this.closed || this.producerEpoch !== epoch || this.state !== 'idle') return
+                this.drainFollowupQueue()
+                if (this.state === 'idle' && this.shouldAutoResumeListening()) this.startListening('turn-timeout')
+            })
+        }, this.turnTimeoutMs)
+        turn.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
         return turn
+    }
+
+    private interruptHermes(): Promise<void> {
+        // Invoke synchronously so an RPC client quarantines its generation now;
+        // its bounded retirement must settle before a subsequent producer.
+        try {
+            this.hermesRetirement = this.hermes.interrupt().catch(() => {
+                console.warn(`[session ${this.sessionId}] Hermes interruption cleanup failed`)
+            })
+        } catch {
+            this.hermesRetirement = Promise.resolve()
+        }
+        return this.hermesRetirement
+    }
+
+    private turnOptions(turn: AbortController): HermesTurnOptions {
+        return { signal: turn.signal, deadline: this.turnDeadlines.get(turn) }
+    }
+
+    private finishProcessingTurn(turn: AbortController, source: string): void {
+        if (this.processingTurn !== turn || this.closed) return
+        this.processingTurn = undefined
+        this.followupRunning = false
+        turn.abort()
+        this.state = 'idle'
+        this.setAutoLedState('idle')
+        // Accepted notifications take priority over returning to quiet listening.
+        this.drainFollowupQueue()
+        if (this.state !== 'idle' || !this.shouldAutoResumeListening()) return
+        if (Date.now() < this.cooldownUntil) this.delayListeningUntilCooldownEnds(source)
+        else this.startListening(source)
     }
 
     private isProcessingTurnActive(turn: AbortController): boolean {
@@ -712,6 +799,7 @@ export class Session {
         if (!playback) return
         this.activeTtsPlayback = undefined
         playback.interrupted = true
+        if (playback.speakerLeaseTimer) clearInterval(playback.speakerLeaseTimer)
         playback.controller.abort()
         this.sendTtsStopOnce(playback.generation)
         this.ttsStreaming = false
@@ -725,7 +813,7 @@ export class Session {
         warmup?.abort()
     }
 
-    private handleBargeIn(firstPayload: Buffer): void {
+    private handleBargeIn(firstPayloads: Buffer[]): void {
         this.cancelProcessingTurn()
         this.cancelFastAckWarmup()
         const interruptedGeneration = this.ttsGeneration
@@ -736,12 +824,9 @@ export class Session {
         this.clearTimers()
         this.resetCapture()
         this.resetBargeInDetector()
-        void this.hermes.interrupt().catch((error) => {
-            console.error(`[session ${this.sessionId}] Hermes interrupt error:`, error)
-        })
-        this.startListening('barge-in')
+        void this.interruptHermes()
+        this.startListening('barge-in', firstPayloads)
         this.setAutoLedState('listening')
-        this.handleListeningPayload(firstPayload)
     }
 
     private triggerProcess(reason: 'local-vad' | 'listen-stop' | 'max-duration' | 'arrival-gap', force = false): void {
@@ -756,6 +841,7 @@ export class Session {
             this.resetCapture()
             this.state = 'idle'
             this.setAutoLedState('idle')
+            this.drainFollowupQueue()
             return
         }
         const pcmBytes = this.pcmChunks.reduce((sum, chunk) => sum + chunk.length, 0)
@@ -787,26 +873,7 @@ export class Session {
                 })
                 if (this.isProcessingTurnActive(turn)) this.sendProcessingErrorAlert(err)
             }
-        }).finally(() => {
-            if (this.processingTurn !== turn || turn.signal.aborted || this.closed) return
-            if (this.state === 'processing') {
-                if (this.shouldAutoResumeListening()) {
-                    this.state = 'idle'
-                    this.setAutoLedState('idle')
-                    if (Date.now() < this.cooldownUntil) {
-                        this.delayListeningUntilCooldownEnds('post-tts')
-                    } else {
-                        this.startListening('post-tts')
-                    }
-                } else {
-                    this.state = 'idle'
-                    this.setAutoLedState('idle')
-                }
-            }
-            if (this.processingTurn === turn) this.processingTurn = undefined
-            turn.abort()
-            this.drainFollowupQueue()
-        })
+        }).finally(() => this.finishProcessingTurn(turn, 'post-tts'))
     }
 
     private shouldAutoResumeListening(): boolean {
@@ -815,7 +882,9 @@ export class Session {
             !this.closed
     }
 
-    private startListening(source: string): void {
+    private startListening(source: string, initialFrames: Buffer[] = []): void {
+        this.producerEpoch += 1
+        if (this.processingTurn) void this.interruptHermes()
         this.cancelProcessingTurn()
         this.clearTimers()
         this.state = 'listening'
@@ -825,7 +894,16 @@ export class Session {
             console.log(`[session ${this.sessionId}] local vad disabled, using arrival-gap timeout`)
         }
         this.armMaxDurationTimer()
+        const buffered = [...initialFrames, ...this.cooldownFrames.splice(0)]
+        this.installingCaptureFrames = true
+        try {
+            for (const payload of buffered) {
+                if (this.state !== 'listening') break
+                this.handleListeningPayload(payload)
+            }
+        } finally { this.installingCaptureFrames = false }
         console.log(`[session ${this.sessionId}] listening started (${source})`)
+        this.drainFollowupQueue()
     }
 
     private armMaxDurationTimer(): void {
@@ -873,6 +951,7 @@ export class Session {
                     frame_duration: OUTPUT_FRAME_DURATION_MS,
                 },
             })
+            if (!this.helloReceived) this.unregisterDeviceSession = this.registerDeviceSessionFn(this)
             this.helloReceived = true
             console.log(`[session ${this.sessionId}] hello, protocol version=${this.version}, tts=${this.ttsProvider}`)
             if (FAST_ACK_ENABLED && !this.diagnosticVoicePaused) void this.warmFastAck()
@@ -892,8 +971,9 @@ export class Session {
                         console.log(`[session ${this.sessionId}] listen start already active (${source})`)
                         return
                     }
-                    this.delayListeningUntilCooldownEnds(source)
-                    return
+                    // An explicit device listen.start means its UI/microphone
+                    // are ready now. Accept immediately rather than discard input.
+                    this.cooldownUntil = 0
                 }
                 this.startListening(source)
             } else if (listenState === 'stop') {
@@ -913,10 +993,9 @@ export class Session {
             this.resetCapture()
             this.resetBargeInDetector()
             this.followupQueue = []
+            this.cooldownFrames = []
             this.setAutoLedState('idle')
-            void this.hermes.interrupt().catch((error) => {
-                console.error(`[session ${this.sessionId}] Hermes interrupt error:`, error)
-            })
+            void this.interruptHermes()
             return
         }
 
@@ -962,7 +1041,7 @@ export class Session {
         const wavForStt = pcmToWav(pcm, INPUT_SAMPLE_RATE)
         const text = await withTiming(
             `session:${this.sessionId}:stt`,
-            () => this.transcribeWavFn(wavForStt),
+            () => this.transcribeWavFn(wavForStt, this.turnOptions(turn)),
             { pcmBytes: pcm.length },
         )
         if (!this.isProcessingTurnActive(turn)) return
@@ -1001,14 +1080,10 @@ export class Session {
     async enqueueFollowup(prompt: string): Promise<void> {
         if (this.diagnosticVoicePaused) throw new Error('StackChan diagnostic voice pause is enabled')
         const cleanPrompt = prompt.trim()
-        if (!cleanPrompt || this.closed) return
+        if (this.closed) throw new Error('StackChan session is closed')
+        if (!cleanPrompt) throw new Error('Follow-up prompt is empty')
+        if (this.followupQueue.length >= 32) throw new Error('StackChan follow-up queue is full')
         this.followupQueue.push(cleanPrompt)
-        if (this.state === 'listening') {
-            this.clearTimers()
-            this.resetCapture()
-            this.state = 'idle'
-            this.setAutoLedState('idle')
-        }
         this.drainFollowupQueue()
     }
 
@@ -1052,7 +1127,17 @@ export class Session {
     }
 
     private drainFollowupQueue(): void {
-        if (this.diagnosticVoicePaused || this.closed || this.followupRunning || this.state !== 'idle') return
+        if (this.diagnosticVoicePaused || this.closed || this.followupRunning || this.state === 'processing') return
+        const capturing = this.shouldUseLocalVad()
+            ? this.pcmChunks.length > 0 || this.currentSpeechMs > 0 || this.localVad.hasCandidateSpeech()
+            : this.opusFrames.length > 0
+        // Implicit old-device input is already human capture even while the
+        // post-TTS timer keeps state idle. Do not steal its remaining frames.
+        if (this.cooldownFrames.length > 0 || (this.state === 'listening' && capturing)) return
+        if (this.followupQueue.length === 0) return
+        this.clearTimers()
+        this.resetCapture()
+        this.state = 'idle'
         const prompt = this.followupQueue.shift()
         if (!prompt) return
 
@@ -1071,24 +1156,7 @@ export class Session {
                 })
                 if (this.isProcessingTurnActive(turn)) this.sendProcessingErrorAlert(err)
             }
-        }).finally(() => {
-            if (this.processingTurn !== turn || turn.signal.aborted || this.closed) return
-            this.followupRunning = false
-            if (this.state === 'processing') {
-                this.state = 'idle'
-                this.setAutoLedState('idle')
-                if (this.shouldAutoResumeListening()) {
-                    if (Date.now() < this.cooldownUntil) {
-                        this.delayListeningUntilCooldownEnds('post-followup')
-                    } else {
-                        this.startListening('post-followup')
-                    }
-                }
-            }
-            if (this.processingTurn === turn) this.processingTurn = undefined
-            turn.abort()
-            this.drainFollowupQueue()
-        })
+        }).finally(() => this.finishProcessingTurn(turn, 'post-followup'))
     }
 
     private async processFollowup(prompt: string, turn: AbortController): Promise<void> {
@@ -1111,6 +1179,8 @@ export class Session {
     }
 
     private async speakHermesReply(prompt: string, llmLabel: string, ttsLabel: string, turn: AbortController): Promise<string> {
+        await this.hermesRetirement
+        if (!this.isProcessingTurnActive(turn)) return ''
         const hermesPrompt = stackChanVoicePrompt(prompt)
         if (this.hermes.streamPrompt && readEnvBool('STACKCHAN_STREAM_LLM_TTS', true)) {
             return await this.speakHermesReplyStreaming(hermesPrompt, llmLabel, ttsLabel, turn)
@@ -1125,7 +1195,7 @@ export class Session {
         try {
             reply = await withTiming(
                 `session:${this.sessionId}:${llmLabel}`,
-                () => this.hermes.submitPrompt(prompt),
+                () => this.hermes.submitPrompt(prompt, this.turnOptions(turn)),
                 { textLength: prompt.length },
             )
         } finally {
@@ -1155,7 +1225,7 @@ export class Session {
         let streamCompleted = false
 
         try {
-            for await (const event of streamPrompt.call(this.hermes, prompt)) {
+            for await (const event of streamPrompt.call(this.hermes, prompt, this.turnOptions(turn))) {
                 if (event.type === 'delta') {
                     reply += event.text
                 } else if (event.type === 'complete' && event.text) {
@@ -1181,9 +1251,7 @@ export class Session {
                     spokenSegments >= this.speechSegmentationConfig.maxSegments
                 ) {
                     console.log(`[session ${this.sessionId}] stopping LLM stream after spoken segment limit (${spokenSegments})`)
-                    void this.hermes.interrupt().catch((error) => {
-                        console.error(`[session ${this.sessionId}] Hermes interrupt after speech limit error:`, error)
-                    })
+                    void this.interruptHermes()
                     break
                 }
             }
@@ -1224,7 +1292,7 @@ export class Session {
         let wav: Buffer
         try {
             wav = this.ttsProvider === 'hermes'
-                ? await this.synthesizeHermesTextFn(speechText)
+                ? await this.synthesizeHermesTextFn(speechText, { signal, deadline: this.processingTurn ? this.turnDeadlines.get(this.processingTurn) : undefined })
                 : await this.synthesizeSanoTextFn(speechText, { signal })
             signal.throwIfAborted()
             console.log(`[timing] done ${synthesisLabel} elapsed=${elapsedMs(synthesisStartMs)}`)
@@ -1420,20 +1488,27 @@ export class Session {
             return
         }
         onFramesReady?.()
+        await this.prepareSegmentOutput(playback)
+        if (!this.isTtsPlaybackActive(playback)) { playback.interrupted = true; return }
         const localPlayback = this.startLocalSegmentPlayback(playback, audio.wav)
+        localPlayback.catch(() => undefined)
         const leadSilenceFrames = Math.ceil(leadSilenceMs / OUTPUT_FRAME_DURATION_MS)
-        for (let frameIndex = 0; frameIndex < audio.opusFrames.length; frameIndex++) {
-            const frame = audio.opusFrames[frameIndex]
+        const frames = audio.opusFrames
+        for (let frameIndex = 0; frameIndex < frames.length; frameIndex++) {
+            const frame = frames[frameIndex]
             if (!this.isTtsPlaybackActive(playback)) {
                 playback.interrupted = true
                 break
             }
+            if (playback.localSegmentFailed) break
             this.sendBinary(wrapOpusPayload(frame, this.version))
             playback.streamedFrames += 1
             this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
-        await localPlayback
+        const localSucceeded = await localPlayback
+        playback.localSegmentStreaming = false
+        if ((!localSucceeded || playback.localSegmentFailed) && this.isTtsPlaybackActive(playback)) await this.replayFailedLocalSegment(playback, frames)
         if (!this.isTtsPlaybackActive(playback)) {
             playback.interrupted = true
             return
@@ -1461,7 +1536,10 @@ export class Session {
             playback.interrupted = true
             return
         }
+        await this.prepareSegmentOutput(playback)
+        if (!this.isTtsPlaybackActive(playback)) { playback.interrupted = true; return }
         const localPlayback = this.startLocalSegmentPlayback(playback, wav)
+        localPlayback.catch(() => undefined)
         const frames = playback.localOutputTarget && localOpusFrames ? localOpusFrames : opusFrames
         const leadSilenceFrames = !playback.localOutputTarget && index === 0 && playback.streamedFrames === 0
             ? Math.ceil(TTS_PREROLL_MS / OUTPUT_FRAME_DURATION_MS)
@@ -1472,18 +1550,44 @@ export class Session {
                 playback.interrupted = true
                 break
             }
+            if (playback.localSegmentFailed) break
             this.sendBinary(wrapOpusPayload(frame, this.version))
             playback.streamedFrames += 1
             this.logTtsFrameMilestones(playback, frameIndex >= leadSilenceFrames)
             await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
         }
-        await localPlayback
+        const localSucceeded = await localPlayback
+        playback.localSegmentStreaming = false
+        if ((!localSucceeded || playback.localSegmentFailed) && this.isTtsPlaybackActive(playback)) await this.replayFailedLocalSegment(playback, frames)
         if (!this.isTtsPlaybackActive(playback)) {
             playback.interrupted = true
             return
         }
         playback.segmentCount += 1
         this.sendJson({ type: 'tts', state: 'sentence_end', text: segment, index })
+    }
+
+    private async prepareSegmentOutput(playback: TtsPlayback): Promise<void> {
+        // Reserve the segment before yielding: a concurrent renewal failure must
+        // either be handled here (no frames sent yet), or stop/replay this segment.
+        playback.localSegmentStreaming = true
+        playback.localSegmentFailed = false
+        await this.localSpeakerOperations
+        if (!this.isTtsPlaybackActive(playback)) return
+        if (!playback.localOutputTarget) {
+            await this.restoreM5SpeakerAfterLocalOutput(playback)
+            if (playback.m5SpeakerMutedForLocalOutput || this.localSpeakerOwner) {
+                throw new Error('M5 speaker restoration unverified; cannot emit fallback audio')
+            }
+            if (!this.isTtsPlaybackActive(playback)) return
+            if (playback.m5AdmissionNeedsReset) {
+                this.sendJson({ type: 'tts', state: 'start', reset: true })
+                playback.m5AdmissionNeedsReset = false
+            }
+            // Any failure before this verified fallback gate is now recovered.
+            // Failures after returning keep the flag and trigger whole replay.
+            playback.localSegmentFailed = false
+        }
     }
 
     private queueLocalSpeakerOperation(operation: () => Promise<void>): Promise<void> {
@@ -1496,6 +1600,11 @@ export class Session {
     private async prepareLocalTtsOutput(playback: TtsPlayback): Promise<void> {
         if (playback.localOutputChecked || !this.isTtsPlaybackActive(playback)) return
         playback.localOutputChecked = true
+        await this.localSpeakerOperations
+        if (this.localSpeakerOwner && this.localSpeakerOwner !== playback) {
+            await this.restoreM5SpeakerAfterLocalOutput(this.localSpeakerOwner)
+            if (this.localSpeakerOwner) throw new Error('Previous speaker lease restoration is unverified')
+        }
         if (!this.localTtsOutputConfig.enabled) {
             await this.localSpeakerOperations
             return
@@ -1515,52 +1624,133 @@ export class Session {
                 this.localSpeakerOwner = playback
                 // The device may have applied mute even if its ACK fails/is late.
                 playback.m5SpeakerMutedForLocalOutput = true
+                playback.speakerLeaseId ??= `${this.sessionId}:${playback.generation}`
                 const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
                     volume: 0,
                     permanent: false,
+                    lease_id: playback.speakerLeaseId,
+                    lease_ms: SPEAKER_LEASE_MS,
                 }, { automatic: true, waitForResponse: true })
-                if (readSpeakerVolumeAck(result) !== 0) throw new Error('M5 mute acknowledgement unverified')
+                if (readSpeakerVolumeAck(result) !== 0 || !this.speakerLeaseAckMatches(result, playback)) throw new Error('M5 mute acknowledgement unverified')
             })
             if (!this.isTtsPlaybackActive(playback)) return
             playback.localOutputTarget = target
+            playback.localOutputController = new AbortController()
+            this.startSpeakerLeaseRenewal(playback)
             console.log(`[session ${this.sessionId}] local TTS output active target=${target}; M5 speaker muted temporarily`)
         } catch {
             if (!this.isTtsPlaybackActive(playback)) return
             console.warn(`[session ${this.sessionId}] local TTS output setup failed; using M5 speaker`)
             await this.restoreM5SpeakerAfterLocalOutput(playback)
             await this.localSpeakerOperations
+            if (playback.m5SpeakerMutedForLocalOutput) throw new Error('M5 speaker restoration unverified; temporary lease will expire')
         }
     }
 
-    private startLocalSegmentPlayback(playback: TtsPlayback, wav: Buffer): Promise<void> {
+    private speakerLeaseAckMatches(result: unknown, playback: TtsPlayback): boolean {
+        return readSpeakerVolumeAckRecord(result)?.['lease_id'] === playback.speakerLeaseId
+    }
+
+    private startSpeakerLeaseRenewal(playback: TtsPlayback): void {
+        let renewing = false
+        playback.speakerLeaseTimer = setInterval(() => {
+            if (renewing || !this.isTtsPlaybackActive(playback) || this.localSpeakerOwner !== playback) return
+            renewing = true
+            void this.queueLocalSpeakerOperation(async () => {
+                if (!this.isTtsPlaybackActive(playback) || this.localSpeakerOwner !== playback) return
+                const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                    volume: 0, permanent: false, lease_id: playback.speakerLeaseId, lease_ms: SPEAKER_LEASE_MS,
+                }, { automatic: true, waitForResponse: true })
+                if (readSpeakerVolumeAck(result) !== 0 || !this.speakerLeaseAckMatches(result, playback)) throw new Error('Speaker lease renewal unverified')
+            }).catch(async () => {
+                playback.localOutputTarget = undefined
+                playback.localSegmentFailed = true
+                playback.localOutputController?.abort()
+                // A running segment coordinates reap/flush/restore/replay itself.
+                if (!playback.localSegmentStreaming) {
+                    await this.restoreM5SpeakerAfterLocalOutput(playback)
+                    if (playback.m5SpeakerMutedForLocalOutput) playback.controller.abort()
+                }
+            }).finally(() => { renewing = false })
+        }, SPEAKER_LEASE_RENEW_MS)
+    }
+
+    private startLocalSegmentPlayback(playback: TtsPlayback, wav: Buffer): Promise<boolean> {
         const target = playback.localOutputTarget
-        if (!target || !this.isTtsPlaybackActive(playback)) return Promise.resolve()
-        return playWavOnLocalTarget(target, wav, { signal: playback.controller.signal }).catch(async () => {
-            if (!this.isTtsPlaybackActive(playback)) return
-            console.warn(`[session ${this.sessionId}] local TTS playback failed; restoring M5 speaker`)
+        if (!target || !this.isTtsPlaybackActive(playback)) return Promise.resolve(true)
+        return playWavOnLocalTarget(target, wav, { signal: playback.localOutputController
+            ? AbortSignal.any([playback.controller.signal, playback.localOutputController.signal])
+            : playback.controller.signal }).then(() => true).catch(async () => {
+            if (!this.isTtsPlaybackActive(playback)) return true
+            console.warn(`[session ${this.sessionId}] local TTS playback failed; coordinating M5 replay`)
             playback.localOutputTarget = undefined
-            await this.restoreM5SpeakerAfterLocalOutput(playback)
+            playback.localSegmentFailed = true
+            return false
         })
+    }
+
+    private async replayFailedLocalSegment(playback: TtsPlayback, frames: Buffer[]): Promise<void> {
+        // Discard the muted avatar suffix before unmuting. Firmware processes
+        // reset admission synchronously; restore ACK orders the replay after it.
+        this.sendJson({ type: 'tts', state: 'start', reset: true })
+        await this.restoreM5SpeakerAfterLocalOutput(playback)
+        if (playback.m5SpeakerMutedForLocalOutput) throw new Error('M5 fallback unavailable until speaker lease expires')
+        if (!this.isTtsPlaybackActive(playback)) return
+        // Restoration retires the muted hardware-output epoch. Open a fresh
+        // admission epoch only after its ACK, never while an old player can run.
+        this.sendJson({ type: 'tts', state: 'start', reset: true })
+        playback.m5AdmissionNeedsReset = false
+        // The failed external player's position is unknown: replay one full sentence.
+        for (const frame of frames) {
+            if (!this.isTtsPlaybackActive(playback)) return
+            this.sendBinary(wrapOpusPayload(frame, this.version))
+            playback.streamedFrames += 1
+            await new Promise(resolve => setTimeout(resolve, OUTPUT_FRAME_DURATION_MS))
+        }
+    }
+
+    private noteSpeakerLeaseReleased(playback: TtsPlayback): void {
+        playback.m5SpeakerMutedForLocalOutput = false
+        this.localSpeakerOwner = undefined
+        // An older owner's deferred restoration can also retire the current
+        // turn's admission. Reopen only at its verified fallback emission gate.
+        if (this.activeTtsPlayback) this.activeTtsPlayback.m5AdmissionNeedsReset = true
     }
 
     private async restoreM5SpeakerAfterLocalOutput(playback: TtsPlayback): Promise<void> {
         if (!playback.m5SpeakerMutedForLocalOutput || this.localSpeakerOwner !== playback) return
         await this.queueLocalSpeakerOperation(async () => {
             if (!playback.m5SpeakerMutedForLocalOutput || this.localSpeakerOwner !== playback) return
-            playback.m5SpeakerMutedForLocalOutput = false
-            this.localSpeakerOwner = undefined
-            if (this.closed) return
-            try {
-                const volume = this.localTtsOutputConfig.fallbackM5Volume
-                const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
-                    volume,
-                    permanent: false,
-                }, { automatic: true, waitForResponse: true })
-                if (readSpeakerVolumeAck(result) !== volume) throw new Error('M5 restore acknowledgement unverified')
-                console.log(`[session ${this.sessionId}] M5 speaker restored volume=${volume}`)
-            } catch {
-                if (!this.closed) console.warn(`[session ${this.sessionId}] failed to restore M5 speaker after local TTS`)
+            if (playback.speakerLeaseTimer) clearInterval(playback.speakerLeaseTimer)
+            if (this.closed) return // Device disconnect/expiry owns recovery now.
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const result = await this.callRobotToolInternal('self.robot.set_speaker_volume', {
+                        volume: this.localTtsOutputConfig.fallbackM5Volume,
+                        permanent: false,
+                        lease_id: playback.speakerLeaseId,
+                    }, { automatic: true, waitForResponse: true })
+                    const restored = readSpeakerVolumeAck(result)
+                    if (restored === undefined || !this.speakerLeaseAckMatches(result, playback)) throw new Error('M5 restore acknowledgement unverified')
+                    this.noteSpeakerLeaseReleased(playback)
+                    console.log(`[session ${this.sessionId}] M5 speaker restored volume=${restored}`)
+                    return
+                } catch {
+                    if (this.closed) return
+                }
             }
+            // Expiry/disconnect/permanent user settings may have already released
+            // the lease. Verify that fact without reapplying any fallback volume.
+            try {
+                const status = readSpeakerVolumeAckRecord(await this.callRobotToolInternal('self.robot.get_status', {}, {
+                    automatic: true, waitForResponse: true,
+                }))
+                if (status?.['lease_active'] === false) {
+                    this.noteSpeakerLeaseReleased(playback)
+                    return
+                }
+            } catch { /* Unverified state retains responsibility; no blind unmute. */ }
+            console.warn(`[session ${this.sessionId}] M5 restore unverified; bounded device lease retains recovery responsibility`)
         })
     }
 

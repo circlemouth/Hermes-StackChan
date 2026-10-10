@@ -53,6 +53,7 @@ public:
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
+    bool TrySetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms);
     void SetPreviewImageForDuration(std::unique_ptr<LvglImage> image, int duration_ms);
     virtual void UpdateStatusBar(bool update_all = false) override;
     virtual void SetupUI() override;
@@ -62,7 +63,7 @@ public:
 
     void ResetForHermesHandoffLocked();
     void ResetForHermesHandoff();
-    void LvglLock();
+    bool LvglLock(int timeout_ms = 0);
     void LvglUnlock();
     lv_disp_t* GetLvglDisplay();
 };

@@ -45,7 +45,7 @@ bool is_hermes_runtime_initialized();
 void set_hermes_mode(bool mode);
 void toggle_hermes_chat_state();
 
-void disply_lvgl_lock();
+bool disply_lvgl_lock(int timeout_ms = 0);
 void disply_lvgl_unlock();
 lv_disp_t* display_get_lvgl_display();
 

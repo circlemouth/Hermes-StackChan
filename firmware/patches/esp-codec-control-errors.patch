@@ -1,0 +1,235 @@
+diff --git a/esp_codec_dev.c b/esp_codec_dev.c
+--- a/esp_codec_dev.c
++++ b/esp_codec_dev.c
+@@ -112,17 +112,27 @@
+     return 0.0;
+ }
+ 
+-static void _update_codec_setting(codec_dev_t *dev)
++static int _update_codec_setting(codec_dev_t *dev)
+ {
+     esp_codec_dev_handle_t h = (esp_codec_dev_handle_t) dev;
+     if (dev->output_opened) {
+-        esp_codec_dev_set_out_vol(h, dev->volume);
+-        esp_codec_dev_set_out_mute(h, dev->muted);
+-    }
+-    if (dev->input_opened) {
+-        esp_codec_dev_set_in_gain(h, dev->mic_gain);
+-        esp_codec_dev_set_in_mute(h, dev->mic_muted);
+-    }
++        // Preserve a staged hardware mute before applying the stored volume.
++        int ret = esp_codec_dev_set_out_mute(h, dev->muted);
++        if (ret != ESP_CODEC_DEV_OK) return ret;
++        ret = esp_codec_dev_set_out_vol(h, dev->volume);
++        if (ret != ESP_CODEC_DEV_OK) return ret;
++    }
++    if (dev->input_opened && dev->codec_if) {
++        if (dev->codec_if->set_mic_gain) {
++            int ret = esp_codec_dev_set_in_gain(h, dev->mic_gain);
++            if (ret != ESP_CODEC_DEV_OK) return ret;
++        }
++        if (dev->codec_if->mute_mic) {
++            int ret = esp_codec_dev_set_in_mute(h, dev->mic_muted);
++            if (ret != ESP_CODEC_DEV_OK) return ret;
++        }
++    }
++    return ESP_CODEC_DEV_OK;
+ }
+ 
+ esp_codec_dev_handle_t esp_codec_dev_new(esp_codec_dev_cfg_t *cfg)
+@@ -175,23 +185,35 @@
+     }
+     const audio_codec_if_t *codec = dev->codec_if;
+     const audio_codec_data_if_t *data_if = dev->data_if;
++    int ret = ESP_CODEC_DEV_OK;
+     if (data_if->set_fmt) {
+-        data_if->set_fmt(data_if, dev->dev_caps, fs);
++        ret = data_if->set_fmt(data_if, dev->dev_caps, fs);
++        if (ret != ESP_CODEC_DEV_OK) {
++            esp_codec_dev_close(handle);
++            return ret;
++        }
+     }
+     if (data_if->enable) {
+-        data_if->enable(data_if, dev->dev_caps, true);
++        ret = data_if->enable(data_if, dev->dev_caps, true);
++        if (ret != ESP_CODEC_DEV_OK) {
++            esp_codec_dev_close(handle);
++            return ret;
++        }
+     }
+     if (codec) {
+-        // TODO not set codec fs
+         if (codec->set_fs) {
+-            if (codec->set_fs(codec, fs) != 0) {
+-                return ESP_CODEC_DEV_NOT_SUPPORT;
++            ret = codec->set_fs(codec, fs);
++            if (ret != ESP_CODEC_DEV_OK) {
++                esp_codec_dev_close(handle);
++                return ret;
+             }
+         }
+         if (codec->enable) {
+-            if (codec->enable(codec, true) != ESP_CODEC_DEV_OK) {
++            ret = codec->enable(codec, true);
++            if (ret != ESP_CODEC_DEV_OK) {
+                 ESP_LOGE(TAG, "Fail to enable codec");
+-                return ESP_CODEC_DEV_DRV_ERR;
++                esp_codec_dev_close(handle);
++                return ret;
+             }
+         }
+     }
+@@ -203,11 +225,19 @@
+             }
+         }
+         if (dev->sw_vol) {
+-            dev->sw_vol->open(dev->sw_vol, fs, VOL_TRANSITION_TIME);
++            ret = dev->sw_vol->open(dev->sw_vol, fs, VOL_TRANSITION_TIME);
++            if (ret != ESP_CODEC_DEV_OK) {
++                esp_codec_dev_close(handle);
++                return ret;
++            }
+         }
+     }
+     // update settings to avoid lost after re-enable
+-    _update_codec_setting(dev);
++    int setting_ret = _update_codec_setting(dev);
++    if (setting_ret != ESP_CODEC_DEV_OK) {
++        esp_codec_dev_close(handle);
++        return setting_ret;
++    }
+     ESP_LOGI(TAG, "Open codec device OK");
+     return ESP_CODEC_DEV_OK;
+ }
+@@ -318,17 +348,16 @@
+     }
+     const audio_codec_if_t *codec = dev->codec_if;
+     float db_value = _get_vol_db(&dev->vol_curve, volume);
+-    dev->volume = volume;
+-    // Prefer to use software volume setting
++    // Prefer to use software volume setting, but never cache a failed change.
+     if (dev->sw_vol) {
+-        dev->sw_vol->set_vol(dev->sw_vol, db_value);
+-        return ESP_CODEC_DEV_OK;
+-    }
+-    if (codec && codec->set_vol) {
+-        codec->set_vol(codec, db_value);
+-        return ESP_CODEC_DEV_OK;
+-    }
+-    return ESP_CODEC_DEV_NOT_SUPPORT;
++        ret = dev->sw_vol->set_vol(dev->sw_vol, db_value);
++    } else if (codec && codec->set_vol) {
++        ret = codec->set_vol(codec, db_value);
++    } else {
++        return ESP_CODEC_DEV_NOT_SUPPORT;
++    }
++    if (ret == ESP_CODEC_DEV_OK) dev->volume = volume;
++    return ret;
+ }
+ 
+ int esp_codec_dev_set_vol_handler(esp_codec_dev_handle_t handle, const audio_codec_vol_if_t *vol_handler)
+@@ -375,21 +404,20 @@
+         return ESP_CODEC_DEV_INVALID_ARG;
+     }
+     int ret = _verify_codec_setting(dev, true);
+-    if (ret != ESP_CODEC_DEV_OK) {
+-        return ret;
+-    }
+-    const audio_codec_if_t *codec = dev->codec_if;
+-    dev->muted = mute;
++    if (ret != ESP_CODEC_DEV_OK) return ret;
++    const audio_codec_if_t *codec = dev->codec_if;
+     if (codec && codec->mute) {
+-        codec->mute(codec, mute);
+-        return ESP_CODEC_DEV_OK;
+-    }
+-    // When codec not support mute set volume instead
+-    if (dev->sw_vol) {
++        // Hardware mute must be stageable before opening DMA-backed output.
++        // The hardware driver's return still decides whether it actually worked.
++        ret = codec->mute(codec, mute);
++    } else {
++        if (!dev->output_opened) return ESP_CODEC_DEV_WRONG_STATE;
++        if (!dev->sw_vol) return ESP_CODEC_DEV_NOT_SUPPORT;
+         float db_value = mute ? -100.0 : _get_vol_db(&dev->vol_curve, dev->volume);
+-        dev->sw_vol->set_vol(dev->sw_vol, db_value);
+-    }
+-    return ESP_CODEC_DEV_NOT_SUPPORT;
++        ret = dev->sw_vol->set_vol(dev->sw_vol, db_value);
++    }
++    if (ret == ESP_CODEC_DEV_OK) dev->muted = mute;
++    return ret;
+ }
+ 
+ int esp_codec_dev_get_out_mute(esp_codec_dev_handle_t handle, bool *muted)
+@@ -418,9 +446,9 @@
+     }
+     const audio_codec_if_t *codec = dev->codec_if;
+     if (codec && codec->set_mic_gain) {
+-        codec->set_mic_gain(codec, (int) db);
+-        dev->mic_gain = db;
+-        return ESP_CODEC_DEV_OK;
++        ret = codec->set_mic_gain(codec, (int) db);
++        if (ret == ESP_CODEC_DEV_OK) dev->mic_gain = db;
++        return ret;
+     }
+     return ESP_CODEC_DEV_NOT_SUPPORT;
+ }
+@@ -437,8 +465,7 @@
+     }
+     const audio_codec_if_t *codec = dev->codec_if;
+     if (codec && codec->set_mic_channel_gain) {
+-        codec->set_mic_channel_gain(codec, channel_mask, (int) db);
+-        return ESP_CODEC_DEV_OK;
++        return codec->set_mic_channel_gain(codec, channel_mask, (int) db);
+     }
+     return ESP_CODEC_DEV_NOT_SUPPORT;
+ }
+@@ -469,9 +496,9 @@
+     }
+     const audio_codec_if_t *codec = dev->codec_if;
+     if (codec && codec->mute_mic) {
+-        codec->mute_mic(codec, mute);
+-        dev->mic_muted = mute;
+-        return ESP_CODEC_DEV_OK;
++        ret = codec->mute_mic(codec, mute);
++        if (ret == ESP_CODEC_DEV_OK) dev->mic_muted = mute;
++        return ret;
+     }
+     return ESP_CODEC_DEV_NOT_SUPPORT;
+ }
+@@ -509,21 +536,23 @@
+     if (dev->output_opened == false && dev->input_opened == false) {
+         return ESP_CODEC_DEV_OK;
+     }
+-    const audio_codec_if_t *codec = dev->codec_if;
+-    if (dev->disable_when_closed && codec) {
+-        if (codec->enable) {
+-            codec->enable(codec, false);
+-        }
++    int ret = ESP_CODEC_DEV_OK;
++    const audio_codec_if_t *codec = dev->codec_if;
++    if (dev->disable_when_closed && codec && codec->enable) {
++        ret = codec->enable(codec, false);
+     }
+     const audio_codec_data_if_t *data_if = dev->data_if;
+     if (data_if->enable) {
+-        data_if->enable(data_if, dev->dev_caps, false);
++        int result = data_if->enable(data_if, dev->dev_caps, false);
++        if (ret == ESP_CODEC_DEV_OK) ret = result;
+     }
+     if (dev->sw_vol) {
+-        dev->sw_vol->close(dev->sw_vol);
+-    }
+-    dev->output_opened = dev->input_opened = false;
+-    return ESP_CODEC_DEV_OK;
++        int result = dev->sw_vol->close(dev->sw_vol);
++        if (ret == ESP_CODEC_DEV_OK) ret = result;
++    }
++    // Retain ownership on partial close so a caller can retry verified cleanup.
++    if (ret == ESP_CODEC_DEV_OK) dev->output_opened = dev->input_opened = false;
++    return ret;
+ }
+ 
+ void esp_codec_dev_delete(esp_codec_dev_handle_t handle)

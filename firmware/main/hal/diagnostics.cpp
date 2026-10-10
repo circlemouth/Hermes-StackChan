@@ -10,7 +10,7 @@
 #include <esp_log.h>
 #include <esp_system.h>
 #include <esp_timer.h>
-#include <settings.h>
+#include <websocket_endpoint.h>
 #include <sdkconfig.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -98,15 +98,14 @@ bool sendReply(Command command, bool ok, const char* result, bool status = false
             cJSON_AddNumberToObject(stacks, "app_main", uxTaskGetStackHighWaterMark(main_task));
             cJSON_AddNumberToObject(stacks, "sc_diag_usb", uxTaskGetStackHighWaterMark(usb_task));
         }
-        Settings settings("websocket", false);
-        auto url = settings.GetString("url_override", "");
-        if (url.empty()) url = settings.GetString("url", "");
-        const auto endpoint = redactedEndpoint(url);
+        const auto url = GetEffectiveWebsocketUrl();
+        const auto scheme = runtime_safety::WebsocketScheme(url);
+        const auto host = runtime_safety::WebsocketHost(url);
         cJSON* network = cJSON_AddObjectToObject(root, "network");
         if (network) {
             cJSON_AddBoolToObject(network, "connected", GetHAL().getWifiStatus() != WifiStatus::None);
-            cJSON_AddStringToObject(network, "scheme", endpoint.scheme.c_str());
-            cJSON_AddStringToObject(network, "host", endpoint.host.c_str());
+            cJSON_AddStringToObject(network, "scheme", scheme.c_str());
+            cJSON_AddStringToObject(network, "host", host.c_str());
         }
         if (!hermes.load()) cJSON_AddBoolToObject(root, "sd_confirmation_active", setup_app->diagnosticsSdPromptActive());
     }

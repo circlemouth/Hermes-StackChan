@@ -54,6 +54,7 @@ const TOOL_MAP: Record<StackChanToolName, string> = {
 }
 
 let activeSession: StackChanDeviceSession | null = null
+const deviceSessions = new Set<StackChanDeviceSession>()
 let serverStarted = false
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -231,10 +232,18 @@ async function callStackChanTool(name: StackChanToolName, args: Record<string, u
 }
 
 export function registerDeviceSession(session: StackChanDeviceSession): () => void {
-    activeSession = session
+    deviceSessions.add(session)
+    // First negotiated device owns control until it disconnects. A diagnostic
+    // connection or second robot cannot silently steal another robot's tools.
+    activeSession ??= session
     return () => {
-        if (activeSession === session) activeSession = null
+        deviceSessions.delete(session)
+        if (activeSession === session) activeSession = deviceSessions.values().next().value ?? null
     }
+}
+
+export function getDeviceBridgeStatus(): StackChanBridgeStatus | { connected: false; readyForPrompt: false; reason: string } {
+    return activeSession?.getBridgeStatus() ?? { connected: false, readyForPrompt: false, reason: 'no_device_session' }
 }
 
 export function startDeviceControlServer(port: number, host = '127.0.0.1'): void {
@@ -246,11 +255,7 @@ export function startDeviceControlServer(port: number, host = '127.0.0.1'): void
         if (req.method === 'GET' && pathname === '/internal/status') {
             sendJson(res, 200, {
                 success: true,
-                result: activeSession?.getBridgeStatus() ?? {
-                    connected: false,
-                    readyForPrompt: false,
-                    reason: 'no_device_session',
-                },
+                result: getDeviceBridgeStatus(),
             })
             return
         }

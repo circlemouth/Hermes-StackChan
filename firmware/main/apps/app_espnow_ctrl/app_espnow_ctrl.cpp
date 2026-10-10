@@ -69,6 +69,7 @@ void AppEspnowControl::onOpen()
 
     // Normal avatar
     LvglLockGuard lock;
+    if (!lock) return;
 
     auto& stackchan = GetStackChan();
 
@@ -91,19 +92,20 @@ void AppEspnowControl::onOpen()
 
 bool AppEspnowControl::start_startup_page()
 {
-    GetHAL().lvglLock();
+    if (!GetHAL().lvglLock()) return false;
     auto page = std::make_unique<view::EspnowRoleSelectorPage>();
     GetHAL().lvglUnlock();
     while (1) {
         GetHAL().delay(50);
         LvglLockGuard lock;
+    if (!lock) continue;
         if (page->isSelected()) {
             break;
         }
     }
 
     bool is_advanced = false;
-    GetHAL().lvglLock();
+    if (!GetHAL().lvglLock()) return false;
     if (page->selectedIndex() == 0) {
         _is_receiver = true;
     } else if (page->selectedIndex() == 1) {
@@ -234,6 +236,7 @@ void handle_send_pose()
 void AppEspnowControl::onRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
 
     if (_is_receiver) {
         handle_received_data();
@@ -252,6 +255,7 @@ void AppEspnowControl::onClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     view::destroy_home_indicator();
     view::destroy_status_bar();

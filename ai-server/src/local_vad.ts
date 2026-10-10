@@ -112,6 +112,10 @@ export class LocalRmsVad {
         this.lastRms = 0
     }
 
+    hasCandidateSpeech(): boolean {
+        return this.speechRunMs > 0 || (this.pending.length > 0 && rmsNormalized(this.pending) >= this.config.rmsThreshold)
+    }
+
     processPcm(pcm: Buffer): LocalRmsVadResult {
         if (!this.config.enabled || pcm.length === 0) {
             return { ...EMPTY_RESULT, inSpeech: this.started, speechMs: this.activeSpeechMs, silenceMs: this.silenceRunMs }

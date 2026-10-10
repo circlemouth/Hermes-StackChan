@@ -11,7 +11,7 @@
 #include <mooncake_log.h>
 #include <hal/hal.h>
 #include <assets/assets.h>
-#include <settings.h>
+#include <websocket_endpoint.h>
 #include <memory>
 
 using namespace smooth_ui_toolkit::lvgl_cpp;
@@ -49,12 +49,7 @@ void WifiSetupWorker::update()
 
 static std::string get_websocket_url()
 {
-    Settings ws_settings("websocket", false);
-    std::string url = ws_settings.GetString("url_override", "");
-    if (url.empty()) {
-        url = ws_settings.GetString("url", "");
-    }
-    return url;
+    return GetEffectiveWebsocketUrl();
 }
 
 void WifiSetupWorker::update_state()
@@ -104,8 +99,8 @@ void WifiSetupWorker::update_state()
                 data.info->align(LV_ALIGN_TOP_MID, 0, 130);
                 data.info->setTextAlign(LV_TEXT_ALIGN_CENTER);
                 if (!is_bridge_configured) {
-                    mclog::tagWarn(_tag, "websocket URL missing; SD auto-import disabled. Use Load SD Config from setup.");
-                    data.info->setText("Bridge URL missing\nUse Load SD Config.");
+                    mclog::tagWarn(_tag, "websocket URL missing or invalid; SD auto-import disabled. Use Load SD Config from setup.");
+                    data.info->setText("Bridge URL missing/invalid\nUse Load SD Config.");
                 } else {
                     data.info->setText("Connect Wi-Fi, then use\nHermes bridge.");
                 }

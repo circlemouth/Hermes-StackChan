@@ -1,3 +1,4 @@
+#include <runtime_safety.h>
 /*
  * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
  *
@@ -23,8 +24,6 @@ static constexpr const char* TAG = "SdConfig";
 // SDカードのファイルサイズ上限 (bytes)
 static constexpr long kMaxConfigFileSize = 8192;
 
-// NVS 値の長さ上限 (bytes)
-static constexpr size_t kMaxNvsValueLen = 1024;
 static constexpr size_t kMaxWifiProfiles = 5;
 
 static constexpr const char* kConfigPathCandidates[] = {
@@ -242,20 +241,6 @@ static std::string get_nested_wifi_string(cJSON* root, std::initializer_list<con
     return "";
 }
 
-static bool is_valid_websocket_url(std::string_view value)
-{
-    return value.rfind("ws://", 0) == 0 || value.rfind("wss://", 0) == 0;
-}
-
-static std::string url_scheme(std::string_view url)
-{
-    auto scheme_end = url.find("://");
-    if (scheme_end == std::string_view::npos || scheme_end == 0) {
-        return "none";
-    }
-    return std::string(url.substr(0, scheme_end));
-}
-
 static std::string normalize_ws_path(std::string path)
 {
     if (path.empty()) {
@@ -269,6 +254,10 @@ static std::string normalize_ws_path(std::string path)
 
 static bool append_wifi_profile(ConfigSnapshot& snapshot, const WifiProfile& profile, const char* source)
 {
+    if (!runtime_safety::ValidCredential(profile.ssid) || !runtime_safety::ValidCredential(profile.password)) {
+        add_warning(snapshot, fmt::format("skip {}: Wi-Fi credentials contain control characters", source));
+        return false;
+    }
     if (profile.ssid.empty()) {
         return false;
     }
@@ -296,10 +285,10 @@ static std::string build_websocket_url_from_aiavatar_keys(cJSON* root, ConfigSna
     }
 
     if (host.find("://") != std::string::npos) {
-        if (is_valid_websocket_url(host)) {
+        if (runtime_safety::ValidWebsocketUrl(host)) {
             return host;
         }
-        add_warning(snapshot, "skip ws_host: invalid websocket URL scheme");
+        add_warning(snapshot, "skip ws_host: invalid websocket URL");
         return "";
     }
 
@@ -319,26 +308,33 @@ static std::string build_websocket_url_from_aiavatar_keys(cJSON* root, ConfigSna
         return "";
     }
 
+    // Validate host/port before appending a path so ws_host cannot inject a
+    // path/query that would hide the generated port inside the resource name.
+    const auto endpoint = fmt::format("{}://{}:{}", scheme, host, port);
+    if (host.find_first_of("/?#") != std::string::npos || !runtime_safety::ValidWebsocketUrl(endpoint)) {
+        add_warning(snapshot, "skip ws_host: invalid websocket authority");
+        return "";
+    }
     const std::string path = normalize_ws_path(get_string(root, "ws_path", "/ws"));
-    return fmt::format("{}://{}:{}{}", scheme, host, port, path);
+    return endpoint + path;
 }
 
 static void parse_websocket_config(cJSON* root, ConfigSnapshot& snapshot)
 {
-    std::string websocket_url = sanitize_config_string(get_first_string(root, {"websocket_url", "bridge_url", "ws_url"}));
+    // Endpoint bytes must pass the same policy as NVS/runtime; do not trim an
+    // invalid explicit value into a valid URL (or into an empty fallback).
+    std::string websocket_url = get_first_string(root, {"websocket_url", "bridge_url", "ws_url"});
     cJSON* websocket = cJSON_GetObjectItem(root, "websocket");
     if (websocket_url.empty() && websocket && cJSON_IsObject(websocket)) {
-        websocket_url = sanitize_config_string(get_first_string(websocket, {"url", "websocket_url", "bridge_url"}));
+        websocket_url = get_first_string(websocket, {"url", "websocket_url", "bridge_url"});
     }
     if (websocket_url.empty()) {
         websocket_url = build_websocket_url_from_aiavatar_keys(root, snapshot);
     }
 
     if (!websocket_url.empty()) {
-        if (!is_valid_websocket_url(websocket_url)) {
-            add_warning(snapshot, "skip websocket_url: URL must start with ws:// or wss://");
-        } else if (websocket_url.length() > kMaxNvsValueLen) {
-            add_warning(snapshot, fmt::format("skip websocket_url: value too long ({} bytes)", websocket_url.length()));
+        if (!runtime_safety::ValidWebsocketUrl(websocket_url)) {
+            add_warning(snapshot, "skip websocket_url: invalid websocket endpoint");
         } else {
             snapshot.has_websocket_url = true;
             snapshot.websocket_url = websocket_url;
@@ -363,8 +359,8 @@ static void parse_websocket_config(cJSON* root, ConfigSnapshot& snapshot)
 
 static void parse_wifi_config(cJSON* root, ConfigSnapshot& snapshot)
 {
-    const std::string flat_ssid = sanitize_config_string(get_nested_wifi_string(root, {"wifi_ssid"}, {"ssid"}));
-    const std::string flat_pass = sanitize_config_string(get_nested_wifi_string(root, {"wifi_password", "wifi_pass"}, {"password", "pass"}));
+    const std::string flat_ssid = get_nested_wifi_string(root, {"wifi_ssid"}, {"ssid"});
+    const std::string flat_pass = get_nested_wifi_string(root, {"wifi_password", "wifi_pass"}, {"password", "pass"});
 
     cJSON* networks = cJSON_GetObjectItem(root, "wifi_networks");
     if (networks && cJSON_IsArray(networks)) {
@@ -378,8 +374,8 @@ static void parse_wifi_config(cJSON* root, ConfigSnapshot& snapshot)
 
             WifiProfile profile;
             profile.name = sanitize_config_string(get_string(item, "name"));
-            profile.ssid = sanitize_config_string(get_string(item, "ssid"));
-            profile.password = sanitize_config_string(get_first_string(item, {"pass", "password"}));
+            profile.ssid = get_string(item, "ssid");
+            profile.password = get_first_string(item, {"pass", "password"});
 
             if (!profile.ssid.empty()) {
                 if (append_wifi_profile(snapshot, profile, fmt::format("wifi_networks[{}]", index).c_str())) {
@@ -470,7 +466,7 @@ static void apply_websocket_to_nvs(const ConfigSnapshot& snapshot)
         ws_settings.SetInt("version", snapshot.websocket_version);
 
         mclog::tagInfo(TAG, "applied websocket_url: length={}, scheme={}",
-                       snapshot.websocket_url.length(), url_scheme(snapshot.websocket_url));
+                       snapshot.websocket_url.length(), runtime_safety::WebsocketScheme(snapshot.websocket_url));
         mclog::tagInfo(TAG, "applied websocket_version: {}", snapshot.websocket_version);
         return;
     }
@@ -613,6 +609,11 @@ LoadResult load_and_apply(std::function<void(std::string_view)> on_log)
     log("Parsing JSON...");
 
     // 4. JSON をパース (RAII で自動解放)
+    if (runtime_safety::ContainsJsonNul(content)) {
+        result.error = "JSON contains an unsupported NUL character";
+        log(result.error);
+        return result;
+    }
     CJsonGuard json(content.c_str());
     if (!json.is_valid() || !cJSON_IsObject(json.root)) {
         result.error = "Invalid JSON format";

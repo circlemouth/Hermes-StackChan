@@ -11,12 +11,11 @@
 #include <smooth_lvgl.hpp>
 #include <stackchan/stackchan.h>
 #include <apps/common/common.h>
-#include <settings.h>
+#include <websocket_endpoint.h>
 #include <board.h>
 #include <display.h>
 #include <esp_log.h>
 #include <string>
-#include <string_view>
 #include "sdkconfig.h"
 
 using namespace mooncake;
@@ -44,28 +43,9 @@ static const char* wifi_status_to_string(WifiStatus status)
     }
 }
 
-static std::string websocket_scheme(std::string_view url)
-{
-    auto scheme_end = url.find("://");
-    if (scheme_end == std::string_view::npos || scheme_end == 0) {
-        return "none";
-    }
-    return std::string(url.substr(0, scheme_end));
-}
-
-static bool has_supported_websocket_scheme(std::string_view url)
-{
-    return url.rfind("ws://", 0) == 0 || url.rfind("wss://", 0) == 0;
-}
-
 static std::string get_websocket_url()
 {
-    Settings ws_settings("websocket", false);
-    std::string websocket_url = ws_settings.GetString("url_override", "");
-    if (websocket_url.empty()) {
-        websocket_url = ws_settings.GetString("url", "");
-    }
-    return websocket_url;
+    return GetEffectiveWebsocketUrl();
 }
 
 static std::string sanitize_for_bubble(std::string message)
@@ -89,8 +69,7 @@ static std::string sanitize_for_bubble(std::string message)
 }
 
 static std::string build_connectivity_error_message(bool has_sd_config_error, const std::string& sd_error_detail,
-                                                    const std::string& websocket_url,
-                                                    bool websocket_scheme_ready, bool wifi_ready_for_runtime)
+                                                    bool websocket_endpoint_ready, bool wifi_ready_for_runtime)
 {
     if (has_sd_config_error) {
         std::string message = "HERMES config error";
@@ -102,12 +81,8 @@ static std::string build_connectivity_error_message(bool has_sd_config_error, co
         return sanitize_for_bubble(message);
     }
 
-    if (websocket_url.empty()) {
+    if (!websocket_endpoint_ready) {
         return "HERMES endpoint error: websocket_url is missing or invalid. Check SD /config.json.";
-    }
-
-    if (!websocket_scheme_ready) {
-        return "HERMES endpoint error: websocket_url must start with ws:// or wss://. Check SD /config.json.";
     }
 
     if (!wifi_ready_for_runtime) {
@@ -155,21 +130,21 @@ void AppAiAgent::onOpen()
     const bool has_wifi_config     = GetHAL().hasSavedWifiCredentials();
 
     const bool has_websocket_url        = !websocket_url.empty();
-    const bool websocket_scheme_ready   = has_websocket_url && has_supported_websocket_scheme(websocket_url);
+    const bool websocket_endpoint_ready = runtime_safety::ValidWebsocketUrl(websocket_url);
     const bool is_wifi_connected        = wifi_status != WifiStatus::None;
     const bool wifi_ready_for_runtime   = is_wifi_connected || has_wifi_config;
-    const bool is_hermes_start_ready    = !has_sd_config_error && websocket_scheme_ready && wifi_ready_for_runtime;
-    const std::string scheme            = websocket_scheme(websocket_url);
+    const bool is_hermes_start_ready    = !has_sd_config_error && websocket_endpoint_ready && wifi_ready_for_runtime;
+    const std::string scheme            = runtime_safety::WebsocketScheme(websocket_url);
     const std::string sd_error_detail   = has_sd_config_error ? GetHAL().getLastSdConfigError() : std::string();
 
     ESP_LOGI(TAG, "SD config autoload result: error=%d", has_sd_config_error);
-    ESP_LOGI(TAG, "websocket_url configured=%d, length=%u, scheme=%s, scheme_ready=%d", has_websocket_url,
-             static_cast<unsigned>(websocket_url.length()), scheme.c_str(), websocket_scheme_ready);
+    ESP_LOGI(TAG, "websocket_url configured=%d, length=%u, scheme=%s, endpoint_ready=%d", has_websocket_url,
+             static_cast<unsigned>(websocket_url.length()), scheme.c_str(), websocket_endpoint_ready);
     ESP_LOGI(TAG, "Wi-Fi status=%s, wifi_configured=%d", wifi_status_to_string(wifi_status), has_wifi_config);
     ESP_LOGI(TAG,
-             "Hermes start readiness: sd_error=%d, websocket_url_configured=%d, websocket_scheme_ready=%d, "
+             "Hermes start readiness: sd_error=%d, websocket_url_configured=%d, websocket_endpoint_ready=%d, "
              "wifi_status=%s, wifi_configured=%d",
-             has_sd_config_error, has_websocket_url, websocket_scheme_ready, wifi_status_to_string(wifi_status),
+             has_sd_config_error, has_websocket_url, websocket_endpoint_ready, wifi_status_to_string(wifi_status),
              has_wifi_config);
 
     if (is_hermes_start_ready) {
@@ -186,12 +161,12 @@ void AppAiAgent::onOpen()
     }
 
     const std::string bubble_message = build_connectivity_error_message(
-        has_sd_config_error, sd_error_detail, websocket_url, websocket_scheme_ready, wifi_ready_for_runtime);
+        has_sd_config_error, sd_error_detail, websocket_endpoint_ready, wifi_ready_for_runtime);
 
     ESP_LOGW(TAG,
-             "Hermes start deferred: sd_error=%d, websocket_url_configured=%d, websocket_scheme_ready=%d, "
+             "Hermes start deferred: sd_error=%d, websocket_url_configured=%d, websocket_endpoint_ready=%d, "
              "wifi_status=%s, wifi_configured=%d, message=%s",
-             has_sd_config_error, has_websocket_url, websocket_scheme_ready, wifi_status_to_string(wifi_status),
+             has_sd_config_error, has_websocket_url, websocket_endpoint_ready, wifi_status_to_string(wifi_status),
              has_wifi_config, bubble_message.c_str());
 
     showConnectivityErrorBubble(bubble_message);
@@ -213,6 +188,7 @@ void AppAiAgent::showConnectivityErrorBubble(const std::string& message)
     display->SetChatMessage("system", message.c_str());
 
     LvglLockGuard lock;
+    if (!lock) return;
     view::create_home_indicator([this]() { close(); }, 0x81DBBD, 0x134233);
     if (GetStackChan().hasAvatar()) {
         GetStackChan().update();
@@ -223,6 +199,7 @@ void AppAiAgent::showConnectivityErrorBubble(const std::string& message)
 void AppAiAgent::onRunning()
 {
     LvglLockGuard lock;
+    if (!lock) return;
     view::update_home_indicator();
     if (GetStackChan().hasAvatar()) {
         GetStackChan().update();
@@ -235,6 +212,7 @@ void AppAiAgent::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
     LvglLockGuard lock;
+    if (!lock) return;
     view::destroy_home_indicator();
     GetStackChan().resetAvatar();
     GetStackChan().clearModifiers();

@@ -3,7 +3,7 @@
 
 #ifndef CONFIG_IDF_TARGET_ESP32
 #include <lvgl.h>
-#include <thread>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -14,11 +14,6 @@
 #include "camera.h"
 #include "jpg/image_to_jpeg.h"
 #include "esp_video_init.h"
-
-struct JpegChunk {
-    uint8_t* data;
-    size_t len;
-};
 
 class StackChanCamera : public Camera {
 private:
@@ -33,7 +28,7 @@ private:
     uint16_t sensor_width_         = 0;
     uint16_t sensor_height_        = 0;
     int video_fd_      = -1;
-    bool streaming_on_ = false;
+    std::atomic<bool> streaming_on_{false};
     struct MmapBuffer {
         void* start   = nullptr;
         size_t length = 0;
@@ -41,8 +36,8 @@ private:
     std::vector<MmapBuffer> mmap_buffers_;
     std::string explain_url_;
     std::string explain_token_;
-    std::thread encoder_thread_;
     std::mutex camera_mutex_;
+    bool ValidateDequeuedBuffer(const v4l2_buffer& buffer) const;
 
 public:
     StackChanCamera(const esp_video_init_config_t& config);

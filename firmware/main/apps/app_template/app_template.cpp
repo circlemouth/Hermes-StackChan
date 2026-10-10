@@ -40,6 +40,7 @@ void AppTemplate::onOpen()
     // GetHAL().lvglLock(); to lock, GetHAL().lvglUnlock(); to unlock
     // You can also use LvglLockGuard for automatic locking and unlocking
     LvglLockGuard lock;
+    if (!lock) return;
 
     // Create a quit button
     // Using lvgl cpp wrapper here
@@ -72,6 +73,7 @@ void AppTemplate::onClose()
     mclog::tagInfo(getAppInfo().name, "on close");
 
     LvglLockGuard lock;
+    if (!lock) return;
 
     // Destroy button
     _button_quit.reset();
